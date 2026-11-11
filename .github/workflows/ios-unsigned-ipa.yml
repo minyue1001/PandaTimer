@@ -1,0 +1,141 @@
+# 編出「未簽章」的 PandaTimer.ipa，下載後用 SideStore（免費 Apple ID）重簽側載。
+# 鐵律：App 與 widget 都不得帶任何 entitlement（免費帳號簽不了推播/App Group 等）。
+name: iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+
+concurrency:
+  group: ios-unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Expo SDK 58 的 expo-modules-jsi 需要 swift-tools 6.2 → Xcode 26 以上
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      CI: '1'
+      ARCHIVE_PATH: ${{ github.workspace }}/build/PandaTimer.xcarchive
+      LOG_PATH: ${{ github.workspace }}/build/xcodebuild.log
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # SDK 58 的預編譯 ExpoModulesCore 由 Swift 6.3.1 編出、Expo 版本表要求 Xcode 26.4+。
+      # 選最新的正式版 Xcode 26（排除 beta/RC），版本不足直接失敗，省掉 15 分鐘白跑。
+      - name: Select newest Xcode 26 (>= 26.4)
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -viE 'beta|_rc|release_candidate' | sort -V | tail -1 || true)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC/Contents/Developer"; fi
+          xcodebuild -version
+          swift --version
+          pod --version
+          XV=$(xcodebuild -version | head -1 | awk '{print $2}')
+          if [ "$(printf '%s\n' 26.4 "$XV" | sort -V | head -1)" != "26.4" ]; then
+            echo "::error::Xcode $XV < 26.4（Expo SDK 58 需要 Xcode 26.4+）"
+            exit 1
+          fi
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Expo prebuild (iOS)
+        run: npx expo prebuild -p ios --clean --no-install
+
+      - name: Guard - no entitlements anywhere
+        run: |
+          set -e
+          FILES=$(find ios targets -name '*.entitlements' -not -path '*/Pods/*' || true)
+          for f in $FILES; do echo "== $f"; cat "$f"; echo; done
+          for f in $FILES; do
+            if grep -q '<key>' "$f"; then
+              echo "::error file=$f::entitlements 不得含任何 key（SideStore 免費帳號簽不了）"
+              exit 1
+            fi
+          done
+          # 只允許主 App 那份（內容已在上面驗證為空 dict）；widget 或其他 target 出現任何 CODE_SIGN_ENTITLEMENTS 都擋
+          if grep 'CODE_SIGN_ENTITLEMENTS' ios/PandaTimer.xcodeproj/project.pbxproj | grep -v 'CODE_SIGN_ENTITLEMENTS = PandaTimer/PandaTimer.entitlements;'; then
+            echo "::error::除了主 App 的空 entitlements 外，不應該有任何 target 設 CODE_SIGN_ENTITLEMENTS"
+            exit 1
+          fi
+
+      - name: Pod install
+        working-directory: ios
+        run: pod install
+
+      - name: Archive (unsigned)
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild archive \
+            -workspace ios/PandaTimer.xcworkspace \
+            -scheme PandaTimer \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            > "$LOG_PATH" 2>&1 || {
+              echo "::error::xcodebuild archive 失敗，以下為錯誤行與最後 150 行"
+              grep -E 'error:|\*\* ARCHIVE FAILED' "$LOG_PATH" | head -60 || true
+              tail -150 "$LOG_PATH"
+              exit 1
+            }
+          tail -5 "$LOG_PATH"
+
+      - name: Verify app bundle and package IPA
+        run: |
+          set -e
+          APP="$ARCHIVE_PATH/Products/Applications/PandaTimer.app"
+          test -d "$APP" || { echo "::error::找不到 $APP"; ls -R "$ARCHIVE_PATH/Products" | head -50; exit 1; }
+          ls -la "$APP/PlugIns" || true
+          APPEX_COUNT=$( (ls -d "$APP"/PlugIns/*.appex 2>/dev/null || true) | wc -l | tr -d ' ')
+          if [ "$APPEX_COUNT" -lt 1 ]; then
+            echo "::error::PlugIns/*.appex 不存在（Live Activity widget 沒被嵌入）"
+            exit 1
+          fi
+          for X in "$APP"/PlugIns/*.appex; do
+            echo "appex: $X"
+            /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$X/Info.plist"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$X/Info.plist"
+          done
+          test -f "$APP/main.jsbundle" || { echo "::error::main.jsbundle 不存在（JS 沒打包進 Release）"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :NSSupportsLiveActivities' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
+          mkdir -p build/ipa/Payload
+          cp -R "$APP" build/ipa/Payload/
+          (cd build/ipa && zip -qry ../PandaTimer.ipa Payload)
+          ls -la build/PandaTimer.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PandaTimer-unsigned-ipa
+          path: build/PandaTimer.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7

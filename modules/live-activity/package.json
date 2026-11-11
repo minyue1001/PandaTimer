@@ -1,0 +1,7 @@
+{
+  "name": "live-activity",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PandaTimer 本地 Expo module：啟動/結束 Live Activity（ActivityKit，本地啟動、不用推播）",
+  "main": "index.ts"
+}
