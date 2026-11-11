@@ -11,7 +11,8 @@
 #         之後改設定用 scripts/push-config.sh）
 #       → nginx 在 listen 443 的 wheat.yueshengift.xyz server 區塊插入 location ^~ /pandatimer/
 #       → 驗證既有站台狀態碼不變、服務都 active、/api/telemetry 金鑰錯回 401／讀取金鑰回 200；
-#         任一失敗自動回滾（還原 nginx；重跑時換回上一版程式＋server.env＋unit 並重啟，首次部署則停用服務）。
+#         任一失敗自動回滾（還原 nginx；重跑時換回上一版程式＋server.env＋unit 並重啟，換版前就失敗則線上服務保持原狀，
+#         首次部署則停用服務）。
 # 可用環境變數覆寫：PANDATIMER_REMOTE（預設 wheat-new）、REMOTE_NODE_BIN（遠端 node 絕對路徑）、PANDATIMER_KEY、
 #   PANDATIMER_TELEMETRY_WRITE_KEY / PANDATIMER_TELEMETRY_READ_KEY（金鑰檔路徑）
 set -euo pipefail
@@ -39,7 +40,7 @@ for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
     --print-remote-lib) PRINT_LIB=1 ;;   # 除錯用：印出送到遠端執行的腳本
-    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "未知參數：$a" >&2; exit 2 ;;
   esac
 done
@@ -237,11 +238,12 @@ cmd_install() {
     || die "server.env.new 缺 TELEMETRY_WRITE_KEY / TELEMETRY_READ_KEY"
   "$NODE_BIN" --check "$BASE/server.incoming/index.mjs"
   # 換版前留一份「上一版」（程式、server.env、unit），回滾時換回來；.last-swap 記這次部署的時間戳
+  # （.last-swap 必須在動到任何東西「之前」寫：回滾靠它分辨「換版前就失敗＝線上未動」與「已換版」）
+  printf '%s\n' "$ts" > "$BASE/.last-swap"
   if [[ -d "$BASE/server" ]]; then rm -rf "$BASE/server.prev"; mv "$BASE/server" "$BASE/server.prev"; fi
   rm -f "$BASE/server.env.prev" "$BASE/unit.prev"
   if [[ -f "$BASE/server.env" ]]; then cp -a "$BASE/server.env" "$BASE/server.env.prev"; fi
   if [[ -f "$SYSTEMD_DIR/$SVC.service" ]]; then cp -a "$SYSTEMD_DIR/$SVC.service" "$BASE/unit.prev"; fi
-  printf '%s\n' "$ts" > "$BASE/.last-swap"
   mv "$BASE/server.incoming" "$BASE/server"
   mv -f "$BASE/server.env.new" "$BASE/server.env"
   chown root:root "$BASE/server.env"
@@ -325,13 +327,27 @@ UNIT
 }
 
 # 回滾用：這次部署（.last-swap == $1）換過版 → 換回上一版程式／server.env／unit 並重啟；健康就印 @@restored ok
+#         這次在換版前就失敗（.last-swap != $1）→ 線上程式/unit/server.env 都沒動：原服務健康就保持原狀（印 @@restored ok），
+#         不可停掉正在服務的上一版
+health_ok() { [[ "$(curl -s --max-time 3 "http://127.0.0.1:$PORT/api/health" </dev/null || true)" == "ok" ]]; }
 cmd_restore_prev() {
   local ts="$1" i ok=0
-  if [[ "$(cat "$BASE/.last-swap" 2>/dev/null || true)" != "$ts" || ! -d "$BASE/server.prev" ]]; then
-    say "• 這次沒有換過版（或沒有上一版），無法換回"
+  if [[ "$(cat "$BASE/.last-swap" 2>/dev/null || true)" != "$ts" ]]; then
+    if systemctl is-active --quiet "$SVC" 2>/dev/null && health_ok; then
+      say "• 這次在換版前就失敗，線上 $SVC 未被改動且健康，保持原狀"
+      say "@@restored ok"
+    else
+      say "• 這次沒有換過版，且 $SVC 目前不健康"
+    fi
     return 0
   fi
-  rm -rf "$BASE/server.failed"; mv "$BASE/server" "$BASE/server.failed"; mv "$BASE/server.prev" "$BASE/server"
+  if [[ ! -d "$BASE/server.prev" ]]; then
+    say "• 首次部署，沒有上一版可換回"
+    return 0
+  fi
+  rm -rf "$BASE/server.failed"
+  if [[ -d "$BASE/server" ]]; then mv "$BASE/server" "$BASE/server.failed"; fi
+  mv "$BASE/server.prev" "$BASE/server"
   if [[ -f "$BASE/server.env.prev" ]]; then mv -f "$BASE/server.env.prev" "$BASE/server.env"; fi
   if [[ -f "$BASE/unit.prev" ]]; then install -m 644 "$BASE/unit.prev" "$SYSTEMD_DIR/$SVC.service"; rm -f "$BASE/unit.prev"; fi
   rm -f "$BASE/.last-swap"
