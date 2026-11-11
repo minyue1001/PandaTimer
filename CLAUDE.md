@@ -2,7 +2,7 @@
 
 foodpanda 外送員自用 iPhone App：接單時在動態島／鎖定畫面（Live Activity）顯示「預估送達」倒數，截止前 3 分與截止時本地通知，記錄每單預估/實際時間並算今日準時率、平均超出比例（foodpanda 超時率近似）。
 Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號** → GitHub Actions 編未簽章 .ipa → 免費 Apple ID 重簽側載到 iPhone 14 Pro Max（iOS 26）。
-**現況（2026-11-11）**：SideStore 登入被 Apple 擋（-80045），改用 Windows **Sideloadly** 經 USB 簽裝；v0.1 實機驗收通過。CI 約 7 分鐘，`gh run download` 取 IPA。v0.2（App Intents＋動態島送達按鈕）已過 CI。v0.3 實機：偵測（OCR/接單鈕/27 分）成功，但 extension 內 ActivityKit 完全不可用、記憶體峰值 44MB。v0.4 實機：偵測→Darwin 訊號→App 入帳/提醒 OK，但**音訊保活下背景更新動態島全部無效**、extension 峰值 43MB。v0.5（背景定位保活＋更新回讀檢查＋兩條一鍵備援＋extension 省記憶體）寫好，**尚未 CI/實機驗收**。
+**現況（2026-11-11）**：SideStore 登入被 Apple 擋（-80045），改用 Windows **Sideloadly** 經 USB 簽裝；v0.1 實機驗收通過。CI 約 7 分鐘，取 IPA 一律用 `bash scripts/fetch-ipa.sh [run-id]`（使用者要求：只留一個資料夾 `C:\Users\minyue\Downloads\PandaTimer\`、舊版自動刪、檔名帶版本 `PandaTimer-v<rv>-<sha7>.ipa`）。v0.2（App Intents＋動態島送達按鈕）已過 CI。v0.3 實機：偵測（OCR/接單鈕/27 分）成功，但 extension 內 ActivityKit 完全不可用、記憶體峰值 44MB。v0.4 實機：偵測→Darwin 訊號→App 入帳/提醒 OK，但**音訊保活下背景更新動態島全部無效**、extension 峰值 43MB。v0.5（背景定位保活＋更新回讀檢查＋兩條一鍵備援＋extension 省記憶體）寫好，**尚未 CI/實機驗收**。
 
 ## 目錄
 - `App.tsx` 單頁 UI；`src/orders.ts` 純邏輯；`src/store.ts` AsyncStorage（key `pandatimer.orders.v1`，`mutate()` 序列化）
