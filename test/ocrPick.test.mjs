@@ -1,7 +1,7 @@
 // node --test（Node 22.18+ 內建 type stripping，可直接 import .ts）
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickMinutes } from '../src/ocrPick.ts';
+import { detectNewOrderMinutes, hasAcceptButton, pickMinutes } from '../src/ocrPick.ts';
 
 const cases = [
   // 指定樣本
@@ -51,4 +51,30 @@ test('pandarider 新版接單頁（金額＋公里＋分鐘同時出現）', () 
   assert.equal(pickMinutes(text), 27);
   // 金額回推也應一致：110.26 / 4.08355 = 27
   assert.equal(pickMinutes('每單收入\n110.26 $ 6.7公里\n接受訂單'), 27);
+});
+
+// v0.3 螢幕廣播偵測：只有含「接受訂單」的新單畫面才觸發（與 targets/broadcast/OrderDetector.swift 同規則）
+test('detectNewOrderMinutes：新單畫面才觸發', () => {
+  const cases = [
+    // 新版接單頁（金額＋公里＋分鐘）→ 27
+    ['狀態\n上線中\n每單收入\n110.26 $ 6.7公里\n27 分鐘\n鬍鬚張魯肉飯 (台北美食文化館)\n台北市XX區XX路XX巷XX號X樓\n送餐資訊\n需要收取現金\n接受訂單', 27],
+    // 舊版接單頁（只有金額）→ 金額回推 24
+    ['上線中\n100.00 $\n麥當勞\n(X)桃園市\n送餐資訊\n接受訂單', 24],
+    // 地圖待命 → null
+    ['狀態 上線中', null],
+    ['狀態\n上線中\n目前沒有訂單\n熱區 3 分鐘', null],
+    // 訂單詳情／送餐中（有分鐘數但沒有「接受訂單」）→ null
+    ['送餐資訊\n預計送達 18 分鐘\n顧客 王先生\n已取餐', null],
+    ['訂單詳情\n110.26 $\n27 分鐘\n聯絡顧客', null],
+    // OCR 字間空白、簡體字形也要認得
+    ['每單收入\n73.51 $\n接受 訂單', 18],
+    ['22 分钟\n接受订单', 22],
+    // 有按鈕但挑不出分鐘數 → null
+    ['接受訂單', null],
+    ['', null],
+  ];
+  for (const [text, want] of cases) assert.equal(detectNewOrderMinutes(text), want, JSON.stringify(text));
+  assert.equal(hasAcceptButton(null), false);
+  assert.equal(hasAcceptButton('拒絕\n接受訂單'), true);
+  assert.equal(hasAcceptButton('已接受 訂單詳情'), false);
 });

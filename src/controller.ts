@@ -1,6 +1,6 @@
 import { AppState, Linking } from 'react-native';
 import * as LiveActivity from '../modules/live-activity';
-import { activeMirror, applyNativeEvents, parseNativeEvents } from './nativeEvents';
+import { activeMirror, applyNativeEvents, orphanActivityIds, parseNativeEvents } from './nativeEvents';
 import { cancelReminders, scheduleReminders } from './notify';
 import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, parseDeepLink, type Order } from './orders';
 import { getOrders, mutate, subscribe } from './store';
@@ -103,13 +103,19 @@ export async function cancelOrder(id: string): Promise<void> {
   await cleanup(canceled);
 }
 
-/** App 啟動時對帳：系統裡還活著、但對應訂單已結束（或不存在）的動態島一律結束 */
+/**
+ * App 啟動時對帳：系統裡還活著、但對應訂單已結束（或不存在）的動態島一律結束。
+ * v0.3 例外：螢幕廣播偵測卡一律保留（規則見 nativeEvents.ts 的 orphanActivityIds）。
+ */
 export async function reconcileActivities(): Promise<void> {
-  const alive = LiveActivity.activeIds();
+  // 舊版原生沒有 activitySummaries → 退回只有 id 的舊行為（舊版也不會有偵測卡）
+  const alive =
+    LiveActivity.activitySummaries() ??
+    LiveActivity.activeIds().map((id) => ({ id, mode: 'countdown', detector: false }));
   if (!alive.length) return;
   const orders = await getOrders();
-  const keep = new Set(activeOrders(orders).map((o) => o.activityId).filter(Boolean));
-  await Promise.all(alive.filter((id) => !keep.has(id)).map((id) => LiveActivity.end(id).catch(() => undefined)));
+  const orphans = orphanActivityIds(alive, activeOrders(orders).map((o) => o.activityId));
+  await Promise.all(orphans.map((id) => LiveActivity.end(id).catch(() => undefined)));
 }
 
 /** 取走原生（App Intents）事件並合併進 AsyncStorage 訂單；回傳事件數 */

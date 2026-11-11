@@ -90,6 +90,68 @@ public class LiveActivityModule: Module {
       return Activity<PandaTimerAttributes>.activities.map { $0.id }
     }
 
+    // v0.3：每張卡的 id／mode／是否由螢幕廣播偵測管理（heartbeat 有值）。JSON 陣列字串。
+    // 對帳時 detector == true 的卡一律保留（JS 不知道它們的存在，不能當孤兒結束）。
+    Function("activitySummaries") { () -> String in
+      guard #available(iOS 16.2, *) else { return "[]" }
+      let list: [[String: Any]] = Activity<PandaTimerAttributes>.activities.map { activity -> [String: Any] in
+        let state = activity.content.state
+        let detector = state.heartbeat != nil || state.mode == "standby" || state.mode == "stopped"
+        return ["id": activity.id, "mode": state.mode ?? "countdown", "detector": detector]
+      }
+      guard let data = try? JSONSerialization.data(withJSONObject: list, options: []),
+            let text = String(data: data, encoding: .utf8)
+      else { return "[]" }
+      return text
+    }
+
+    // v0.3 螢幕廣播偵測：前景開一張「偵測待命」卡給 extension 找（已有偵測卡就沿用、只更新心跳）。
+    AsyncFunction("startStandby") { () async throws -> String in
+      guard #available(iOS 16.2, *) else {
+        throw LiveActivityUnsupportedException("需要 iOS 16.2 以上")
+      }
+      guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+        throw LiveActivityUnsupportedException("設定 > 熊貓倒數 > 即時動態 已關閉")
+      }
+      let now = Date()
+      let existing = Activity<PandaTimerAttributes>.activities.first { activity in
+        let state = activity.content.state
+        return activity.activityState == .active
+          && (state.mode == "standby" || state.mode == "stopped" || state.heartbeat != nil)
+      }
+      if let activity = existing {
+        var state = activity.content.state
+        if state.mode == "stopped" { state.mode = "standby" }
+        state.heartbeat = now
+        state.diag = "App 已就緒，等待廣播…"
+        let staleDate = state.mode == "countdown" ? activity.content.staleDate : nil
+        await activity.update(ActivityContent(state: state, staleDate: staleDate))
+        return activity.id
+      }
+      do {
+        // 與 native/intents 的 IntentLiveActivity.start 同寫法：MainActor 上 request，只把 id（String）帶出來
+        return try await MainActor.run { () throws -> String in
+          let state = PandaTimerAttributes.ContentState(
+            deadline: now, estimateMinutes: 0, mode: "standby", heartbeat: now, diag: "App 已就緒，等待廣播…")
+          let activity = try Activity<PandaTimerAttributes>.request(
+            attributes: PandaTimerAttributes(acceptedAt: now),
+            content: ActivityContent(state: state, staleDate: nil),
+            pushType: nil)
+          return activity.id
+        }
+      } catch {
+        throw LiveActivityStartException(error.localizedDescription)
+      }
+    }
+
+    // 系統「螢幕廣播」選擇器（RPSystemBroadcastPickerView）。JS 用 ref.show() 程式觸發，
+    // 觸發不了（回傳 false）時使用者可直接點這個 view 本身。
+    View(BroadcastPickerView.self) {
+      AsyncFunction("show") { (view: BroadcastPickerView) -> Bool in
+        return triggerBroadcastPicker(view)
+      }.runOnQueue(.main)
+    }
+
     // ── App Intents（主 App target，背景不跑 JS）↔ JS 的資料同步，全走 UserDefaults.standard ──
     // 鍵名/格式必須與 native/intents/DeliverActivityIntent.swift 的 PandaSharedStore 一致。
     // 鎖：objc_sync(UserDefaults.standard)，與主 target 那邊是同一個物件 → 同一把鎖。

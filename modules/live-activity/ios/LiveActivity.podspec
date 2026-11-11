@@ -13,7 +13,7 @@ Pod::Spec.new do |s|
   s.swift_version  = '5.9'
 
   s.dependency 'ExpoModulesCore'
-  s.frameworks = 'ActivityKit'
+  s.frameworks = 'ActivityKit', 'ReplayKit'
 
   # Swift/Objective-C compatibility
   s.pod_target_xcconfig = {

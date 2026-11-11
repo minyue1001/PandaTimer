@@ -22,6 +22,15 @@ private func statusColor(_ context: ActivityViewContext<PandaTimerAttributes>) -
   context.isStale ? Color.red : Color.orange
 }
 
+/// v0.3 螢幕廣播偵測：mode == "standby"（偵測中）或 "stopped"（偵測已停止）時顯示偵測卡；其餘（nil/"countdown"）照舊倒數
+private func isDetectorCard(_ state: PandaTimerAttributes.ContentState) -> Bool {
+  state.mode == "standby" || state.mode == "stopped"
+}
+
+private func detectorTitle(_ state: PandaTimerAttributes.ContentState) -> String {
+  state.mode == "stopped" ? "⏹ 偵測已停止" : "🐼 偵測中"
+}
+
 struct PandaLiveActivity: Widget {
   var body: some WidgetConfiguration {
     ActivityConfiguration(for: PandaTimerAttributes.self) { context in
@@ -31,37 +40,52 @@ struct PandaLiveActivity: Widget {
     } dynamicIsland: { context in
       DynamicIsland {
         DynamicIslandExpandedRegion(.leading) {
-          Text("🐼 熊貓")
+          Text(isDetectorCard(context.state) ? detectorTitle(context.state) : "🐼 熊貓")
             .font(.headline)
             .foregroundStyle(Color.white)
         }
         DynamicIslandExpandedRegion(.trailing) {
-          Text("預估 \(context.state.estimateMinutes) 分")
-            .font(.headline)
-            .foregroundStyle(Color.white)
+          if isDetectorCard(context.state) {
+            HeartbeatText(state: context.state)
+              .font(.headline)
+              .foregroundStyle(Color.white)
+          } else {
+            Text("預估 \(context.state.estimateMinutes) 分")
+              .font(.headline)
+              .foregroundStyle(Color.white)
+          }
         }
         DynamicIslandExpandedRegion(.bottom) {
-          HStack(alignment: .center) {
-            Text(statusLabel(context))
-              .font(.title3.bold())
-              .foregroundStyle(statusColor(context))
-            Spacer()
-            Text(context.state.deadline, style: .timer)
-              .font(.system(size: 36, weight: .bold, design: .rounded))
-              .monospacedDigit()
-              .multilineTextAlignment(.trailing)
-              .foregroundStyle(statusColor(context))
-            DeliverButton(activityId: context.activityID)
+          if isDetectorCard(context.state) {
+            DetectorDetail(state: context.state)
+          } else {
+            HStack(alignment: .center) {
+              Text(statusLabel(context))
+                .font(.title3.bold())
+                .foregroundStyle(statusColor(context))
+              Spacer()
+              Text(context.state.deadline, style: .timer)
+                .font(.system(size: 36, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .multilineTextAlignment(.trailing)
+                .foregroundStyle(statusColor(context))
+              DeliverButton(activityId: context.activityID)
+            }
           }
         }
       } compactLeading: {
         Text("🐼")
       } compactTrailing: {
-        Text(context.state.deadline, style: .timer)
-          .monospacedDigit()
-          .multilineTextAlignment(.trailing)
-          .frame(maxWidth: 64)
-          .foregroundStyle(statusColor(context))
+        if isDetectorCard(context.state) {
+          Text(context.state.mode == "stopped" ? "停止" : "偵測")
+            .foregroundStyle(context.state.mode == "stopped" ? Color.gray : Color.green)
+        } else {
+          Text(context.state.deadline, style: .timer)
+            .monospacedDigit()
+            .multilineTextAlignment(.trailing)
+            .frame(maxWidth: 64)
+            .foregroundStyle(statusColor(context))
+        }
       } minimal: {
         Text("🐼")
       }
@@ -74,6 +98,26 @@ struct LockScreenView: View {
   let context: ActivityViewContext<PandaTimerAttributes>
 
   var body: some View {
+    if isDetectorCard(context.state) {
+      VStack(alignment: .leading, spacing: 6) {
+        HStack {
+          Text(detectorTitle(context.state))
+            .font(.headline)
+            .foregroundStyle(context.state.mode == "stopped" ? Color.gray : Color.green)
+          Spacer()
+          HeartbeatText(state: context.state)
+            .font(.headline)
+            .foregroundStyle(Color.white)
+        }
+        DetectorDetail(state: context.state)
+      }
+      .padding(16)
+    } else {
+      countdownBody
+    }
+  }
+
+  private var countdownBody: some View {
     HStack(alignment: .center, spacing: 12) {
       Text("🐼")
         .font(.system(size: 40))
@@ -84,6 +128,12 @@ struct LockScreenView: View {
         Text("預估 \(context.state.estimateMinutes) 分・截止 \(context.state.deadline, style: .time)")
           .font(.subheadline)
           .foregroundStyle(Color.white.opacity(0.8))
+        if let diag = context.state.diag {
+          Text(diag)
+            .font(.caption2)
+            .foregroundStyle(Color.white.opacity(0.6))
+            .lineLimit(1)
+        }
       }
       Spacer()
       Text(context.state.deadline, style: .timer)
@@ -111,5 +161,39 @@ struct DeliverButton: View {
     }
     .buttonStyle(.borderedProminent)
     .tint(Color.green)
+  }
+}
+
+/// 偵測卡的心跳時間（時:分:秒）。偵測程式每 60 秒更新一次；停在舊時間＝偵測程式已經沒在跑。
+struct HeartbeatText: View {
+  let state: PandaTimerAttributes.ContentState
+
+  var body: some View {
+    if let beat = state.heartbeat {
+      Text("心跳 \(beat, format: .dateTime.hour().minute().second())")
+        .monospacedDigit()
+    } else {
+      Text("等待廣播…")
+    }
+  }
+}
+
+/// 偵測卡下方：距離上次心跳多久（系統自動更新）＋診斷小字
+struct DetectorDetail: View {
+  let state: PandaTimerAttributes.ContentState
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      if let beat = state.heartbeat {
+        Text("上次回報：\(beat, style: .relative)前")
+          .font(.caption)
+          .foregroundStyle(Color.white.opacity(0.8))
+      }
+      Text(state.diag ?? "按 App 的「開始偵測」後，在跳出的視窗按「開始直播」")
+        .font(.caption2)
+        .foregroundStyle(Color.white.opacity(0.6))
+        .lineLimit(2)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
   }
 }

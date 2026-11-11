@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import type { ActivityBrief } from '../../src/nativeEvents';
 import { requireOptionalNativeModule } from 'expo';
 
 type LiveActivityNative = {
@@ -9,6 +10,8 @@ type LiveActivityNative = {
   activeIds(): string[];
   drainNativeEvents?(): string;
   syncActiveOrders?(json: string): void;
+  activitySummaries?(): string;
+  startStandby?(): Promise<string>;
 };
 
 // Expo Go / web / Android 沒有這個原生模組 → 為 null，所有呼叫安全地退化成 no-op。
@@ -70,3 +73,36 @@ export function syncActiveOrders(json: string): void {
     // 舊版原生或非 iOS：忽略
   }
 }
+
+export type ActivitySummary = ActivityBrief;
+
+/**
+ * v0.3：系統裡每張卡的 id／mode／是否為螢幕廣播偵測卡（detector）。
+ * 舊版原生（沒有這個函式）回傳 null，呼叫端要退回 activeIds() 的舊行為。
+ */
+export function activitySummaries(): ActivitySummary[] | null {
+  try {
+    const raw = native?.activitySummaries?.();
+    if (raw == null) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed
+      .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+      .filter((x) => typeof x.id === 'string')
+      .map((x) => ({
+        id: x.id as string,
+        mode: typeof x.mode === 'string' ? x.mode : 'countdown',
+        detector: x.detector === true,
+      }));
+  } catch {
+    return null;
+  }
+}
+
+/** v0.3 螢幕廣播偵測：前景開一張「偵測待命」動態島（已有就沿用），回傳 activity id */
+export async function startStandby(): Promise<string> {
+  if (!native?.startStandby) throw new Error('原生模組沒有 startStandby（需 v0.3 以上的原生版本）');
+  return native.startStandby();
+}
+
+export { BroadcastPicker, type BroadcastPickerHandle } from './BroadcastPicker';

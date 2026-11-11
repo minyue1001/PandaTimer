@@ -1,5 +1,5 @@
 # 編出「未簽章」的 PandaTimer.ipa，下載後用 SideStore（免費 Apple ID）重簽側載。
-# 鐵律：App 與 widget 都不得帶任何 entitlement（免費帳號簽不了推播/App Group 等）。
+# 鐵律：App、widget、broadcast extension 都不得帶任何 entitlement（免費帳號簽不了推播/App Group 等）。
 name: iOS unsigned IPA
 
 on:
@@ -56,6 +56,16 @@ jobs:
       - name: Unit tests
         run: node --test
 
+      # 多份必須逐字相同的 Swift 檔（ActivityKit 以型別名＋Codable 結構對應；規則檔兩邊要一致）
+      - name: Guard - identical shared Swift files
+        run: |
+          set -e
+          for f in modules/live-activity/ios/PandaTimerAttributes.swift targets/widget/PandaTimerAttributes.swift targets/broadcast/PandaTimerAttributes.swift; do
+            diff -u native/intents/PandaTimerAttributes.swift "$f" || { echo "::error file=$f::PandaTimerAttributes.swift 各份不一致"; exit 1; }
+          done
+          diff -u native/intents/MinutePicker.swift targets/broadcast/MinutePicker.swift || { echo "::error::MinutePicker.swift 兩份不一致"; exit 1; }
+          diff -u native/intents/DeliverActivityIntent.swift targets/widget/DeliverActivityIntent.swift || { echo "::error::DeliverActivityIntent.swift 兩份不一致"; exit 1; }
+
       - name: Expo prebuild (iOS)
         run: npx expo prebuild -p ios --clean --no-install
 
@@ -70,11 +80,14 @@ jobs:
               exit 1
             fi
           done
-          # 只允許主 App 那份（內容已在上面驗證為空 dict）；widget 或其他 target 出現任何 CODE_SIGN_ENTITLEMENTS 都擋
+          # 只允許主 App 那份（內容已在上面驗證為空 dict）；widget／PandaBroadcast 或其他 target 出現任何 CODE_SIGN_ENTITLEMENTS 都擋
           if grep 'CODE_SIGN_ENTITLEMENTS' ios/PandaTimer.xcodeproj/project.pbxproj | grep -v 'CODE_SIGN_ENTITLEMENTS = PandaTimer/PandaTimer.entitlements;'; then
             echo "::error::除了主 App 的空 entitlements 外，不應該有任何 target 設 CODE_SIGN_ENTITLEMENTS"
             exit 1
           fi
+          # v0.3：PandaBroadcast target 必須存在（否則下面的 appex 檢查會晚 10 分鐘才失敗）
+          grep -q 'PRODUCT_BUNDLE_IDENTIFIER = com.pandatimer.app.broadcast;' ios/PandaTimer.xcodeproj/project.pbxproj \
+            || { echo "::error::pbxproj 沒有 PandaBroadcast（com.pandatimer.app.broadcast）"; exit 1; }
 
       - name: Pod install
         working-directory: ios
@@ -108,16 +121,29 @@ jobs:
           APP="$ARCHIVE_PATH/Products/Applications/PandaTimer.app"
           test -d "$APP" || { echo "::error::找不到 $APP"; ls -R "$ARCHIVE_PATH/Products" | head -50; exit 1; }
           ls -la "$APP/PlugIns" || true
-          APPEX_COUNT=$( (ls -d "$APP"/PlugIns/*.appex 2>/dev/null || true) | wc -l | tr -d ' ')
-          if [ "$APPEX_COUNT" -lt 1 ]; then
-            echo "::error::PlugIns/*.appex 不存在（Live Activity widget 沒被嵌入）"
-            exit 1
-          fi
+          # v0.3：Live Activity widget 與螢幕廣播偵測 extension 都必須嵌入
+          for N in PandaWidget PandaBroadcast; do
+            test -d "$APP/PlugIns/$N.appex" || { echo "::error::PlugIns/$N.appex 不存在（沒被嵌入）"; exit 1; }
+          done
           for X in "$APP"/PlugIns/*.appex; do
             echo "appex: $X"
             /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$X/Info.plist"
             /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$X/Info.plist"
           done
+          BX="$APP/PlugIns/PandaBroadcast.appex"
+          EP=$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$BX/Info.plist")
+          PC=$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPrincipalClass' "$BX/Info.plist")
+          PM=$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:RPBroadcastProcessMode' "$BX/Info.plist")
+          BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$BX/Info.plist")
+          echo "PandaBroadcast: $EP / $PC / $PM / $BID"
+          [ "$EP" = "com.apple.broadcast-services-upload" ] || { echo "::error::PandaBroadcast extension point 錯：$EP"; exit 1; }
+          [ "$PC" = "PandaBroadcast.SampleHandler" ] || { echo "::error::PandaBroadcast principal class 錯：$PC"; exit 1; }
+          [ "$PM" = "RPBroadcastProcessModeSampleBuffer" ] || { echo "::error::RPBroadcastProcessMode 錯：$PM"; exit 1; }
+          [ "$BID" = "com.pandatimer.app.broadcast" ] || { echo "::error::PandaBroadcast bundle id 錯：$BID"; exit 1; }
+          # 簽章前沒有 entitlements 可驗；確認 build 產物裡沒有任何 .xcent／entitlements 檔
+          if find "$APP" -name '*.xcent' -o -name '*.entitlements' | grep .; then
+            echo "::error::app bundle 內出現 entitlements 檔"; exit 1
+          fi
           test -f "$APP/main.jsbundle" || { echo "::error::main.jsbundle 不存在（JS 沒打包進 Release）"; exit 1; }
           # v0.2 App Intents：metadata 必須擷取進主 App，否則捷徑 App 看不到「熊貓倒數」的動作（編譯不會報錯，只會靜默消失）
           AI="$APP/Metadata.appintents/extract.actionsdata"
@@ -126,7 +152,7 @@ jobs:
             grep -q "$N" "$AI" || { echo "::error::主 App 的 App Intents metadata 缺 $N"; exit 1; }
           done
           echo "App Intents metadata OK: $(wc -c < "$AI") bytes"
-          for X in "$APP"/PlugIns/*.appex; do
+          for X in "$APP"/PlugIns/PandaWidget.appex; do
             if [ -f "$X/Metadata.appintents/extract.actionsdata" ] && grep -q DeliverActivityIntent "$X/Metadata.appintents/extract.actionsdata"; then
               echo "widget metadata 含 DeliverActivityIntent: $X"
             else

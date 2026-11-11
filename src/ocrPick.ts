@@ -78,3 +78,22 @@ export function pickMinutesFromAmount(text: string): number | null {
   const m = AMOUNT_AFTER.exec(text) ?? AMOUNT_BEFORE.exec(text);
   return m ? minutesFromAmount(parseFloat(m[1])) : null;
 }
+
+// ── v0.3 螢幕廣播自動偵測：只有「新單畫面」才觸發 ──
+// ⚠️ 與 targets/broadcast/OrderDetector.swift 同一套規則；改一邊就改另一邊。
+// 新單畫面的特徵＝畫面上有「接受訂單」按鈕（地圖待命、訂單詳情、取餐/送餐頁都沒有）。
+// OCR 可能在字間插空白、或辨成簡體字形 → 先去掉所有空白再比對繁/簡兩種寫法；
+// 前面緊接「已」的（已接受訂單…）不算。
+const ACCEPT_MARKER = /(?<!已)接受(?:訂單|订单)/;
+
+export function hasAcceptButton(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const compact = normalizeOcrText(raw).replace(/\s+/g, '');
+  return ACCEPT_MARKER.test(compact);
+}
+
+/** 新單畫面 → 預估分鐘數；不是新單畫面或挑不出分鐘數 → null */
+export function detectNewOrderMinutes(raw: string | null | undefined): number | null {
+  if (!hasAcceptButton(raw)) return null;
+  return pickMinutes(raw);
+}

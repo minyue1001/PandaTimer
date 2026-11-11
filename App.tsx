@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as LiveActivity from './modules/live-activity';
+import { BroadcastPicker, type BroadcastPickerHandle } from './modules/live-activity';
 import {
   cancelOrder,
   completeOrder,
@@ -55,6 +56,8 @@ function Main() {
   const [estimateText, setEstimateText] = useState(String(DEFAULT_ESTIMATE));
   const [toast, setToast] = useState<string | null>(null);
   const estimateRef = useRef(DEFAULT_ESTIMATE);
+  const pickerRef = useRef<BroadcastPickerHandle>(null);
+  const [detectMsg, setDetectMsg] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((msg: string) => {
@@ -98,6 +101,20 @@ function Main() {
     void startOrder(v, showToast).then(() => showToast(`已開始：預估 ${v} 分`));
   };
 
+  // v0.3 自動偵測（測試）：前景先開「偵測中」動態島給 extension 找，再叫出系統的螢幕廣播視窗
+  const onStartDetect = async () => {
+    let msg: string;
+    try {
+      await ensurePermission(); // 結果 B／偵測到新單都靠本地通知回報
+      await LiveActivity.startStandby();
+      msg = '已建立「偵測中」動態島。';
+    } catch (e) {
+      msg = `動態島待命卡建立失敗：${e instanceof Error ? e.message : String(e)}（仍可廣播，結果改看通知）。`;
+    }
+    const shown = (await pickerRef.current?.show()) ?? false;
+    setDetectMsg(shown ? `${msg}請在跳出的視窗按「開始直播」。` : `${msg}沒跳出視窗的話，請點右邊的圓形按鈕。`);
+  };
+
   const onDone = (id: string) => {
     void completeOrder(id).then((o) => {
       if (o) showToast(`已送達：實際 ${o.actualMin} 分／預估 ${o.estimateMin} 分`);
@@ -124,6 +141,22 @@ function Main() {
         {!laSupported && (
           <Text style={styles.warn}>動態島不可用（需原生版本，且 設定 › 熊貓倒數 › 即時動態 要開啟）</Text>
         )}
+
+        {/* 0. 自動偵測（v0.3 測試） */}
+        <View style={styles.card}>
+          <Text style={styles.section}>自動偵測（測試）</Text>
+          <Text style={styles.note}>1. 按「開始偵測」 → 2. 在跳出的視窗按「開始直播」。停止：點左上角紅色時間 → 停止。</Text>
+          <View style={styles.row}>
+            <Pressable
+              style={({ pressed }) => [styles.bigBtn, styles.detectBtn, { opacity: pressed ? 0.7 : 1 }]}
+              onPress={() => void onStartDetect()}
+            >
+              <Text style={styles.bigBtnText}>開始偵測</Text>
+            </Pressable>
+            <BroadcastPicker ref={pickerRef} style={styles.picker} />
+          </View>
+          {detectMsg && <Text style={styles.note}>{detectMsg}</Text>}
+        </View>
 
         {/* 1. 開始倒數 */}
         <View style={styles.card}>
@@ -287,6 +320,8 @@ const styles = StyleSheet.create({
   },
   bigBtn: { height: 76, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   bigBtnText: { color: '#fff', fontSize: 30, fontWeight: '800' },
+  detectBtn: { flex: 1, backgroundColor: '#5E35B1' },
+  picker: { width: 76, height: 76, borderRadius: 18, backgroundColor: '#EDE7F6' },
   toast: { fontSize: 18, color: '#333', textAlign: 'center', fontWeight: '600' },
   hint: { fontSize: 14, color: '#888', textAlign: 'center', lineHeight: 20 },
   meta: { fontSize: 18, color: '#555' },

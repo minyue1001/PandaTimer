@@ -118,14 +118,22 @@ enum PandaSharedStore {
     }
   }
 
-  /// 取消該單通知、結束對應的 Live Activity（找不到也算成功）
+  /// 取消該單通知、結束對應的 Live Activity（找不到也算成功）。
+  /// v0.3：由螢幕廣播偵測管理的卡（heartbeat 有值）不結束，改回「偵測中」待命，偵測程式下一張單還要用它。
   static func cleanup(activityId: String?, notifIds: [String]) async {
     if !notifIds.isEmpty {
       UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: notifIds)
     }
     guard let activityId = activityId else { return }
     for activity in Activity<PandaTimerAttributes>.activities where activity.id == activityId {
-      await activity.end(nil, dismissalPolicy: .immediate)
+      var state = activity.content.state
+      if state.heartbeat != nil {
+        state.mode = "standby"
+        state.diag = "已送達，回到偵測 · " + (state.diag ?? "")
+        await activity.update(ActivityContent(state: state, staleDate: nil))
+      } else {
+        await activity.end(nil, dismissalPolicy: .immediate)
+      }
     }
   }
 }

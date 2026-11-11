@@ -104,3 +104,19 @@ export function activeMirror(orders: Order[]) {
       notifIds: o.notifIds ?? [],
     }));
 }
+
+/** 原生回報的動態島摘要（modules/live-activity 的 activitySummaries） */
+export type ActivityBrief = { id: string; mode: string; detector: boolean };
+
+/**
+ * 對帳：哪些動態島是孤兒（該結束）。
+ * v0.3 例外：螢幕廣播偵測卡（待命/已停止，或被偵測程式改成倒數的卡 → 原生回報 detector=true）
+ * JS 完全不知道它們，**一律保留**（測試版寧可多留不可誤殺）；只由使用者按「送達」（回到待命）或系統逾時收掉。
+ */
+export function orphanActivityIds(
+  alive: ActivityBrief[],
+  activeActivityIds: Iterable<string | undefined>,
+): string[] {
+  const keep = new Set(activeActivityIds);
+  return alive.filter((a) => !a.detector && !keep.has(a.id)).map((a) => a.id);
+}

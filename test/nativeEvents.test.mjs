@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as nativeEventsModule from '../src/nativeEvents.ts';
 import { applyNativeEvents, parseNativeEvents, activeMirror } from '../src/nativeEvents.ts';
 
 const MIN = 60_000;
@@ -69,4 +70,17 @@ test('activeMirror 只含進行中、最早在前', () => {
   assert.deepEqual(m.map((o) => o.id), ['a', 'b']);
   assert.equal(m[0].activityId, 'A');
   assert.equal('activityId' in m[1], false);
+});
+
+test('orphanActivityIds：偵測卡一律保留，其餘照舊對帳', () => {
+  const { orphanActivityIds } = nativeEventsModule;
+  const alive = [
+    { id: 'A1', mode: 'countdown', detector: false }, // 進行中訂單的卡 → 保留
+    { id: 'A2', mode: 'countdown', detector: false }, // 訂單已結束 → 孤兒
+    { id: 'S1', mode: 'standby', detector: true }, // 偵測待命 → 保留
+    { id: 'S2', mode: 'countdown', detector: true }, // 偵測程式改成倒數（JS 不知道）→ 保留
+    { id: 'S3', mode: 'stopped', detector: true }, // 偵測已停止 → 保留
+  ];
+  assert.deepEqual(orphanActivityIds(alive, ['A1', undefined]), ['A2']);
+  assert.deepEqual(orphanActivityIds([], ['A1']), []);
 });
