@@ -7,6 +7,8 @@ type LiveActivityNative = {
   end(id: string): Promise<void>;
   endAll(): Promise<void>;
   activeIds(): string[];
+  drainNativeEvents?(): string;
+  syncActiveOrders?(json: string): void;
 };
 
 // Expo Go / web / Android 沒有這個原生模組 → 為 null，所有呼叫安全地退化成 no-op。
@@ -42,5 +44,29 @@ export function activeIds(): string[] {
     return native?.activeIds() ?? [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * 取走 App Intents（背景、不跑 JS）寫在 UserDefaults 的事件並清空佇列。
+ * 回傳未驗證的 JSON 陣列，交給 src/nativeEvents.ts 的 parseNativeEvents 過濾。
+ */
+export function drainNativeEvents(): unknown[] {
+  try {
+    const raw = native?.drainNativeEvents?.();
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 把「進行中訂單」鏡像寫進 UserDefaults，給 DeliveredIntent / 動態島送達按鈕挑單用 */
+export function syncActiveOrders(json: string): void {
+  try {
+    native?.syncActiveOrders?.(json);
+  } catch {
+    // 舊版原生或非 iOS：忽略
   }
 }

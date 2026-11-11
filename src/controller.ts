@@ -1,8 +1,9 @@
 import { AppState, Linking } from 'react-native';
 import * as LiveActivity from '../modules/live-activity';
+import { activeMirror, applyNativeEvents, parseNativeEvents } from './nativeEvents';
 import { cancelReminders, scheduleReminders } from './notify';
 import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, parseDeepLink, type Order } from './orders';
-import { getOrders, mutate } from './store';
+import { getOrders, mutate, subscribe } from './store';
 
 export type Feedback = (msg: string) => void;
 
@@ -109,6 +110,53 @@ export async function reconcileActivities(): Promise<void> {
   const orders = await getOrders();
   const keep = new Set(activeOrders(orders).map((o) => o.activityId).filter(Boolean));
   await Promise.all(alive.filter((id) => !keep.has(id)).map((id) => LiveActivity.end(id).catch(() => undefined)));
+}
+
+/** 取走原生（App Intents）事件並合併進 AsyncStorage 訂單；回傳事件數 */
+export async function drainFromNative(): Promise<number> {
+  const events = parseNativeEvents(LiveActivity.drainNativeEvents());
+  if (!events.length) return 0;
+  await mutate((list) => ({ orders: applyNativeEvents(list, events) }));
+  return events.length;
+}
+
+let lastMirror: string | null = null;
+function pushMirror(orders: Order[]) {
+  const json = JSON.stringify(activeMirror(orders));
+  if (json === lastMirror) return;
+  lastMirror = json;
+  LiveActivity.syncActiveOrders(json);
+}
+
+/**
+ * 原生 ↔ JS 同步。順序是鐵律：
+ *  1. drain（把背景 intent 開的單併進來）→ 2. reconcileActivities（否則原生剛開的動態島會被當孤兒關掉）
+ *  → 3. 之後每次訂單變動都把進行中鏡像寫回原生。每次回到前景再 drain 一次。
+ */
+export function initNativeBridge(feedback?: Feedback): () => void {
+  let disposed = false;
+  let unsubscribe: (() => void) | null = null;
+  const report = (n: number) => {
+    if (n > 0) feedback?.(`已同步捷徑／動態島的 ${n} 筆紀錄`);
+  };
+  void (async () => {
+    try {
+      report(await drainFromNative());
+    } catch {
+      // 讀不到就照舊；鏡像會在下面重寫
+    }
+    await reconcileActivities().catch(() => undefined);
+    if (disposed) return;
+    unsubscribe = subscribe(pushMirror);
+  })();
+  const appSub = AppState.addEventListener('change', (s) => {
+    if (s === 'active') void drainFromNative().then(report).catch(() => undefined);
+  });
+  return () => {
+    disposed = true;
+    unsubscribe?.();
+    appSub.remove();
+  };
 }
 
 let lastHandled: { url: string; at: number } | null = null;

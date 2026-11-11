@@ -1,8 +1,9 @@
 import ActivityKit
 import Foundation
 
-// ⚠️ 這個檔案有兩份，必須逐字相同（同名、同欄位、同型別）：
-//   modules/live-activity/ios/PandaTimerAttributes.swift（App 端啟動用）
+// ⚠️ 這個檔案有三份，必須逐字相同（同名、同欄位、同型別）：
+//   modules/live-activity/ios/PandaTimerAttributes.swift（App 端 JS 呼叫啟動用，pod LiveActivity）
+//   native/intents/PandaTimerAttributes.swift（主 App target，App Intents 背景啟動用）
 //   targets/widget/PandaTimerAttributes.swift（widget 顯示用）
 // ActivityKit 以型別名稱與 Codable 結構比對 App 與 widget 兩邊的定義。
 @available(iOS 16.2, *)

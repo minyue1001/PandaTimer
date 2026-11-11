@@ -89,5 +89,71 @@ public class LiveActivityModule: Module {
       guard #available(iOS 16.2, *) else { return [] }
       return Activity<PandaTimerAttributes>.activities.map { $0.id }
     }
+
+    // ── App Intents（主 App target，背景不跑 JS）↔ JS 的資料同步，全走 UserDefaults.standard ──
+    // 鍵名/格式必須與 native/intents/DeliverActivityIntent.swift 的 PandaSharedStore 一致。
+    // 鎖：objc_sync(UserDefaults.standard)，與主 target 那邊是同一個物件 → 同一把鎖。
+
+    // 取走原生事件佇列（JSON 陣列字串）並清空。JS 必須在 reconcileActivities() 之前呼叫。
+    Function("drainNativeEvents") { () -> String in
+      let defaults = UserDefaults.standard
+      objc_sync_enter(defaults)
+      defer { objc_sync_exit(defaults) }
+      let text = defaults.string(forKey: NativeSync.eventsKey) ?? "[]"
+      defaults.removeObject(forKey: NativeSync.eventsKey)
+      return text
+    }
+
+    // JS 每次訂單變動後覆寫「進行中訂單」鏡像（DeliveredIntent / 動態島送達按鈕以此挑單）。
+    // 尚未被 JS 取走的原生事件要併進來：未取走的 start 補進鏡像、未取走的 done 從鏡像移除，
+    // 避免 JS 用舊資料蓋掉原生剛開/剛結的單。
+    Function("syncActiveOrders") { (json: String) -> Void in
+      guard let data = json.data(using: .utf8),
+            var list = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [[String: Any]]
+      else { return }
+      let defaults = UserDefaults.standard
+      objc_sync_enter(defaults)
+      defer { objc_sync_exit(defaults) }
+      var known = Set(list.compactMap { $0["id"] as? String })
+      var doneOrderIds = Set<String>()
+      var doneActivityIds = Set<String>()
+      for event in NativeSync.readArray(NativeSync.eventsKey) {
+        let type = event["type"] as? String
+        if type == "start", let id = event["id"] as? String, !known.contains(id) {
+          var order = event
+          order.removeValue(forKey: "type")
+          list.append(order)
+          known.insert(id)
+        } else if type == "done" {
+          if let orderId = event["orderId"] as? String {
+            doneOrderIds.insert(orderId)
+          } else if let activityId = event["activityId"] as? String {
+            doneActivityIds.insert(activityId)
+          }
+        }
+      }
+      list.removeAll { item in
+        if let id = item["id"] as? String, doneOrderIds.contains(id) { return true }
+        if let aid = item["activityId"] as? String, doneActivityIds.contains(aid) { return true }
+        return false
+      }
+      if let out = try? JSONSerialization.data(withJSONObject: list, options: []),
+         let text = String(data: out, encoding: .utf8) {
+        defaults.set(text, forKey: NativeSync.activeKey)
+      }
+    }
+  }
+}
+
+private enum NativeSync {
+  static let eventsKey = "pandatimer.native.events.v1"
+  static let activeKey = "pandatimer.native.activeOrders.v1"
+
+  static func readArray(_ key: String) -> [[String: Any]] {
+    guard let text = UserDefaults.standard.string(forKey: key),
+          let data = text.data(using: .utf8),
+          let array = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [[String: Any]]
+    else { return [] }
+    return array
   }
 }

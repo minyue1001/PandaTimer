@@ -52,6 +52,10 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # OCR 分鐘挑選規則（與 native/intents/MinutePicker.swift 同一套）＋原生事件合併
+      - name: Unit tests
+        run: node --test
+
       - name: Expo prebuild (iOS)
         run: npx expo prebuild -p ios --clean --no-install
 
@@ -115,6 +119,20 @@ jobs:
             /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$X/Info.plist"
           done
           test -f "$APP/main.jsbundle" || { echo "::error::main.jsbundle 不存在（JS 沒打包進 Release）"; exit 1; }
+          # v0.2 App Intents：metadata 必須擷取進主 App，否則捷徑 App 看不到「熊貓倒數」的動作（編譯不會報錯，只會靜默消失）
+          AI="$APP/Metadata.appintents/extract.actionsdata"
+          test -f "$AI" || { echo "::error::$AI 不存在（App Intents metadata 沒被擷取）"; ls -la "$APP"; exit 1; }
+          for N in StartFromScreenshotIntent DeliveredIntent DeliverActivityIntent; do
+            grep -q "$N" "$AI" || { echo "::error::主 App 的 App Intents metadata 缺 $N"; exit 1; }
+          done
+          echo "App Intents metadata OK: $(wc -c < "$AI") bytes"
+          for X in "$APP"/PlugIns/*.appex; do
+            if [ -f "$X/Metadata.appintents/extract.actionsdata" ] && grep -q DeliverActivityIntent "$X/Metadata.appintents/extract.actionsdata"; then
+              echo "widget metadata 含 DeliverActivityIntent: $X"
+            else
+              echo "::warning::$X 沒有含 DeliverActivityIntent 的 App Intents metadata（動態島送達按鈕可能無效）"
+            fi
+          done
           /usr/libexec/PlistBuddy -c 'Print :NSSupportsLiveActivities' "$APP/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"

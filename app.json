@@ -45,6 +45,7 @@
         }
       ],
       "@bacons/apple-targets",
+      "./plugins/withAppIntents",
       "./plugins/withNoEntitlements"
     ]
   }

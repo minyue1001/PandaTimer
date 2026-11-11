@@ -1,4 +1,5 @@
 import ActivityKit
+import AppIntents
 import SwiftUI
 import WidgetKit
 
@@ -40,7 +41,7 @@ struct PandaLiveActivity: Widget {
             .foregroundStyle(Color.white)
         }
         DynamicIslandExpandedRegion(.bottom) {
-          HStack(alignment: .firstTextBaseline) {
+          HStack(alignment: .center) {
             Text(statusLabel(context))
               .font(.title3.bold())
               .foregroundStyle(statusColor(context))
@@ -50,6 +51,7 @@ struct PandaLiveActivity: Widget {
               .monospacedDigit()
               .multilineTextAlignment(.trailing)
               .foregroundStyle(statusColor(context))
+            DeliverButton(activityId: context.activityID)
           }
         }
       } compactLeading: {
@@ -85,12 +87,29 @@ struct LockScreenView: View {
       }
       Spacer()
       Text(context.state.deadline, style: .timer)
-        .font(.system(size: 40, weight: .bold, design: .rounded))
+        .font(.system(size: 34, weight: .bold, design: .rounded))
         .monospacedDigit()
         .multilineTextAlignment(.trailing)
-        .frame(maxWidth: 140, alignment: .trailing)
+        .frame(maxWidth: 120, alignment: .trailing)
         .foregroundStyle(statusColor(context))
+      DeliverButton(activityId: context.activityID)
     }
     .padding(16)
+  }
+}
+
+/// iOS 17 互動式 Live Activity：按下由系統在 App 程序背景執行 DeliverActivityIntent（結束這一張卡片的單）
+struct DeliverButton: View {
+  let activityId: String
+
+  var body: some View {
+    Button(intent: DeliverActivityIntent(activityId: activityId)) {
+      Text("送達")
+        .font(.headline.bold())
+        .foregroundStyle(Color.white)
+        .padding(.horizontal, 6)
+    }
+    .buttonStyle(.borderedProminent)
+    .tint(Color.green)
   }
 }

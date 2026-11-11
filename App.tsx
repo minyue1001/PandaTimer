@@ -14,8 +14,8 @@ import * as LiveActivity from './modules/live-activity';
 import {
   cancelOrder,
   completeOrder,
+  initNativeBridge,
   listenDeepLinks,
-  reconcileActivities,
   startOrder,
 } from './src/controller';
 import { ensurePermission } from './src/notify';
@@ -72,8 +72,13 @@ function Main() {
 
   useEffect(() => {
     void ensurePermission();
-    void reconcileActivities();
-    return listenDeepLinks(() => estimateRef.current, showToast);
+    // 先 drain 原生事件再 reconcile（initNativeBridge 內保證順序）
+    const stopBridge = initNativeBridge(showToast);
+    const stopLinks = listenDeepLinks(() => estimateRef.current, showToast);
+    return () => {
+      stopBridge();
+      stopLinks();
+    };
   }, [showToast]);
 
   const onEstimateChange = (t: string) => {
@@ -149,6 +154,12 @@ function Main() {
         </View>
 
         {toast && <Text style={styles.toast}>{toast}</Text>}
+
+        {active.length === 0 && (
+          <Text style={styles.hint}>
+            捷徑設定：熊貓接單＝擷取螢幕畫面＋熊貓倒數：從截圖開始；熊貓送達＝熊貓倒數：送達（或按動態島上的「送達」）
+          </Text>
+        )}
 
         {/* 2. 進行中 */}
         {active.map((o) => {
@@ -277,6 +288,7 @@ const styles = StyleSheet.create({
   bigBtn: { height: 76, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   bigBtnText: { color: '#fff', fontSize: 30, fontWeight: '800' },
   toast: { fontSize: 18, color: '#333', textAlign: 'center', fontWeight: '600' },
+  hint: { fontSize: 14, color: '#888', textAlign: 'center', lineHeight: 20 },
   meta: { fontSize: 18, color: '#555' },
   cancel: { fontSize: 18, color: '#999', textDecorationLine: 'underline' },
   countLabel: { fontSize: 22, fontWeight: '700' },
