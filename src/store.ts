@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { Order } from './orders';
+import { parseTombstones, type Tombstones } from './prune';
 
 const KEY = 'pandatimer.orders.v1';
 const MAX_KEEP = 1000;
@@ -45,4 +46,20 @@ export function mutate<T = void>(fn: (orders: Order[]) => { orders: Order[]; res
   });
   chain = run.catch(() => undefined);
   return run;
+}
+
+const TOMB_KEY = 'pandatimer.tombstones.v1';
+
+/** 已刪訂單的墓碑（防止原生事件佇列把它復活，保留 7 天；過期清理在 prune.addTombstones） */
+export async function loadTombstones(): Promise<Tombstones> {
+  try {
+    const raw = await AsyncStorage.getItem(TOMB_KEY);
+    return raw ? parseTombstones(JSON.parse(raw)) : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function saveTombstones(t: Tombstones): Promise<void> {
+  await AsyncStorage.setItem(TOMB_KEY, JSON.stringify(t));
 }

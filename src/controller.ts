@@ -3,7 +3,8 @@ import * as LiveActivity from '../modules/live-activity';
 import { activeMirror, applyNativeEvents, orphanActivityIds, parseNativeEvents } from './nativeEvents';
 import { cancelReminders, scheduleReminders } from './notify';
 import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, parseDeepLink, type Order } from './orders';
-import { getOrders, mutate, subscribe } from './store';
+import { addTombstones, applyPrune, dropTombstonedEvents, planPrune, type PruneCriteria, type PrunePlan } from './prune';
+import { getOrders, loadTombstones, mutate, saveTombstones, subscribe } from './store';
 
 export type Feedback = (msg: string) => void;
 
@@ -103,6 +104,42 @@ export async function cancelOrder(id: string): Promise<void> {
   await cleanup(canceled);
 }
 
+/** 預覽：這個條件會刪哪些單（確認視窗用） */
+export async function previewPrune(c: PruneCriteria): Promise<PrunePlan> {
+  return planPrune(await getOrders(), c);
+}
+
+/**
+ * 刪除紀錄（單筆／批次）。順序：
+ *  1. 先寫墓碑，再 drain（把原生佇列清空；殘留的已刪單事件被墓碑擋掉）
+ *  2. mutate 刪除（subscribe 會同步把「不含這些單」的鏡像寫回原生）
+ *  3. 進行中的單收尾：結束動態島（偵測卡走 afterFinish 切下一單／回待命，同取消流程）、取消提醒
+ */
+export async function pruneOrders(c: PruneCriteria): Promise<PrunePlan> {
+  const plan = planPrune(await getOrders(), c);
+  if (!plan.count) return plan;
+  const now = Date.now();
+  await saveTombstones(addTombstones(await loadTombstones(), plan.ids, now));
+  await drainFromNative().catch(() => undefined);
+  // drain 之後才算最終要刪的 active（drain 可能剛併進新單；新單不在 plan.ids 內，不受影響）
+  const removed = await mutate<Order[]>((list) => ({
+    orders: applyPrune(list, plan.ids),
+    result: list.filter((o) => plan.ids.includes(o.id)),
+  }));
+  const gone = (removed ?? []).filter((o) => o.status === 'active');
+  // 同一張卡只收一次（afterFinish 會依鏡像切到剩下的單）
+  const seen = new Set<string>();
+  await Promise.all(
+    gone.map((o) => {
+      const key = o.activityId;
+      const first = !key || !seen.has(key);
+      if (key) seen.add(key);
+      return first ? cleanup(o) : cancelReminders(o.notifIds);
+    }),
+  );
+  return { ...plan, active: gone, activeCount: gone.length };
+}
+
 /**
  * App 啟動時對帳：系統裡還活著、但對應訂單已結束（或不存在）的動態島一律結束。
  * v0.3 例外：螢幕廣播偵測卡一律保留（規則見 nativeEvents.ts 的 orphanActivityIds）。
@@ -120,7 +157,8 @@ export async function reconcileActivities(): Promise<void> {
 
 /** 取走原生（App Intents）事件並合併進 AsyncStorage 訂單；回傳事件數 */
 export async function drainFromNative(): Promise<number> {
-  const events = parseNativeEvents(LiveActivity.drainNativeEvents());
+  // 已刪的單（墓碑）不得被原生佇列裡殘留的 start/done 事件復活
+  const events = dropTombstonedEvents(parseNativeEvents(LiveActivity.drainNativeEvents()), await loadTombstones());
   if (!events.length) return 0;
   await mutate((list) => ({ orders: applyNativeEvents(list, events) }));
   return events.length;

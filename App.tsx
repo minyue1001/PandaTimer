@@ -17,6 +17,8 @@ import {
   completeOrder,
   initNativeBridge,
   listenDeepLinks,
+  previewPrune,
+  pruneOrders,
   startOrder,
 } from './src/controller';
 import * as Updates from 'expo-updates';
@@ -61,6 +63,7 @@ import {
   saveBaseline,
   saveGoals,
 } from './src/statsConfig';
+import { describePlan, formatTaipeiDateTime, parseTaipeiDateTime, type PruneCriteria } from './src/prune';
 import { subscribe } from './src/store';
 
 const PINK = '#D70F64';
@@ -263,6 +266,44 @@ function Main() {
     ]);
   };
 
+  // 刪除紀錄：單筆長按；批次在「管理紀錄」展開
+  const [manageOpen, setManageOpen] = useState(false);
+  const [beforeText, setBeforeText] = useState('');
+  const [allDraft, setAllDraft] = useState<string | null>(null);
+  const runPrune = (c: PruneCriteria) => {
+    void pruneOrders(c).then((p) => showToast(`已刪除 ${p.count} 筆紀錄${p.activeCount ? `（含進行中 ${p.activeCount} 筆）` : ''}`));
+  };
+  const confirmPrune = async (title: string, c: PruneCriteria, extra?: () => void) => {
+    const plan = await previewPrune(c);
+    if (!plan.count) {
+      Alert.alert(title, '沒有符合的紀錄');
+      return;
+    }
+    Alert.alert(title, describePlan(plan), [
+      { text: '不要', style: 'cancel' },
+      extra
+        ? { text: '下一步', style: 'destructive', onPress: extra }
+        : { text: `刪除 ${plan.count} 筆`, style: 'destructive', onPress: () => runPrune(c) },
+    ]);
+  };
+  const onDeleteOne = (o: Order) => {
+    const detail = `接單 ${formatTaipeiDateTime(o.acceptedAt)}\n預估 ${o.estimateMin} 分・${
+      o.status === 'active' ? '進行中（會關閉動態島、取消提醒）' : o.status === 'canceled' ? '已取消' : `實際 ${o.actualMin} 分`
+    }\n刪除後無法復原。`;
+    Alert.alert('刪除這筆紀錄？', detail, [
+      { text: '不要', style: 'cancel' },
+      { text: '刪除', style: 'destructive', onPress: () => runPrune({ kind: 'ids', ids: [o.id] }) },
+    ]);
+  };
+  const onDeleteBefore = () => {
+    const ts = parseTaipeiDateTime(beforeText);
+    if (ts == null) {
+      Alert.alert('時間格式不對', '請輸入台北時間 YYYY-MM-DD HH:mm，例如 2026-11-12 09:30');
+      return;
+    }
+    void confirmPrune(`刪除 ${formatTaipeiDateTime(ts)} 以前的紀錄`, { kind: 'before', ts });
+  };
+
   const active = useMemo(() => activeOrders(orders), [orders]);
   // 本期（14 天報酬週期，台北時區）＋今日；分鐘級即可，不必每秒重算
   const minuteTick = Math.floor(now / 60_000);
@@ -400,7 +441,7 @@ function Main() {
           return (
             <View key={o.id} style={[styles.card, late && styles.cardLate]}>
               <View style={styles.rowBetween}>
-                <Text style={styles.meta}>
+                <Text style={styles.meta} onLongPress={() => onDeleteOne(o)}>
                   接單 {formatClock(o.acceptedAt)}・預估 {o.estimateMin} 分
                 </Text>
                 <Pressable onPress={() => onCancel(o.id)} hitSlop={12}>
@@ -565,14 +606,65 @@ function Main() {
 
         {/* 4. 歷史 */}
         <View style={styles.card}>
-          <Text style={styles.section}>最近 {recent.length} 筆</Text>
+          <View style={styles.rowBetween}>
+            <Text style={styles.section}>最近 {recent.length} 筆</Text>
+            <Pressable onPress={() => setManageOpen(!manageOpen)} hitSlop={12}>
+              <Text style={styles.cancel}>{manageOpen ? '收起' : '管理紀錄'}</Text>
+            </Pressable>
+          </View>
+          {manageOpen && (
+            <View style={styles.detBox}>
+              <Text style={styles.note}>長按下面任一筆可單筆刪除。批次刪除含進行中與已取消的單；補登不受影響。</Text>
+              <Pressable onPress={() => void confirmPrune('刪除今天的紀錄', { kind: 'today', now: Date.now() })}>
+                <Text style={styles.goalBtn}>刪除今天的紀錄</Text>
+              </Pressable>
+              <View style={styles.row}>
+                <TextInput
+                  style={styles.goalInput}
+                  value={beforeText}
+                  onChangeText={setBeforeText}
+                  placeholder="YYYY-MM-DD HH:mm"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <Pressable onPress={onDeleteBefore}>
+                  <Text style={styles.goalBtn}>刪除以前的</Text>
+                </Pressable>
+              </View>
+              <Pressable onPress={() => void confirmPrune('刪除全部紀錄', { kind: 'all' }, () => setAllDraft(''))}>
+                <Text style={[styles.goalBtn, { color: RED }]}>刪除全部紀錄…</Text>
+              </Pressable>
+              {allDraft != null && (
+                <View style={styles.row}>
+                  <TextInput
+                    style={styles.goalInput}
+                    value={allDraft}
+                    onChangeText={setAllDraft}
+                    placeholder="輸入「刪除」兩字確認"
+                  />
+                  <Pressable
+                    disabled={allDraft.trim() !== '刪除'}
+                    onPress={() => {
+                      setAllDraft(null);
+                      runPrune({ kind: 'all' });
+                    }}
+                  >
+                    <Text style={[styles.goalBtn, { color: allDraft.trim() === '刪除' ? RED : '#BBB' }]}>確定全刪</Text>
+                  </Pressable>
+                  <Pressable onPress={() => setAllDraft(null)}>
+                    <Text style={styles.cancel}>取消</Text>
+                  </Pressable>
+                </View>
+              )}
+            </View>
+          )}
           {recent.length === 0 && <Text style={styles.meta}>還沒有紀錄</Text>}
           {recent.map((o) => {
             // v0.7：與本期統計同一條彈性線（預估 × graceFactor）
             const late = o.actualMin != null && !isOnTime({ est: o.estimateMin, act: o.actualMin }, statsParams);
             const over = (o.actualMin ?? 0) - o.estimateMin;
             return (
-              <View key={o.id} style={styles.histRow}>
+              <Pressable key={o.id} style={styles.histRow} onLongPress={() => onDeleteOne(o)} delayLongPress={500}>
                 <Text style={styles.histTime}>
                   {new Date(o.acceptedAt).getMonth() + 1}/{new Date(o.acceptedAt).getDate()}{' '}
                   {formatClock(o.acceptedAt)}
@@ -583,7 +675,7 @@ function Main() {
                 <Text style={[styles.histBadge, { color: late ? RED : GREEN }]}>
                   {late ? `超 ${Math.round(over * 10) / 10}` : '準時'}
                 </Text>
-              </View>
+              </Pressable>
             );
           })}
         </View>
