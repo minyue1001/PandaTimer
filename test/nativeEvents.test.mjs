@@ -85,10 +85,10 @@ test('orphanActivityIds：偵測卡一律保留，其餘照舊對帳', () => {
   assert.deepEqual(orphanActivityIds([], ['A1']), []);
 });
 
-test('v0.4 自動單：source 保留；沿用偵測卡時舊單讓出 activityId', () => {
+test('v0.6 多單：自動單共用偵測卡 activityId；動態島送達（只帶 activityId）結的是最早截止那單', () => {
   const ev = parseNativeEvents([
-    { type: 'start', id: 'a1', acceptedAt: 0, estimateMin: 20, deadline: 20 * MIN, activityId: 'DET', notifIds: [], source: 'auto' },
-    { type: 'start', id: 'a2', acceptedAt: 5 * MIN, estimateMin: 27, deadline: 32 * MIN, activityId: 'DET', notifIds: [], source: 'auto' },
+    { type: 'start', id: 'a1', acceptedAt: 0, estimateMin: 30, deadline: 30 * MIN, activityId: 'DET', notifIds: [], source: 'auto' },
+    { type: 'start', id: 'a2', acceptedAt: 5 * MIN, estimateMin: 18, deadline: 23 * MIN, activityId: 'DET', notifIds: [], source: 'auto' },
     { type: 'start', id: 'x', acceptedAt: 6 * MIN, estimateMin: 10, deadline: 16 * MIN, source: 'weird' },
   ]);
   assert.equal(ev[0].source, 'auto');
@@ -96,12 +96,17 @@ test('v0.4 自動單：source 保留；沿用偵測卡時舊單讓出 activityId
   const out = applyNativeEvents([jsOrder('j1', 1 * MIN, { activityId: 'OTHER' })], ev);
   const a1 = out.find((o) => o.id === 'a1');
   const a2 = out.find((o) => o.id === 'a2');
-  assert.equal(a1.activityId, undefined);
+  // 不再讓出 activityId：兩單都掛在偵測卡上
+  assert.equal(a1.activityId, 'DET');
   assert.equal(a2.activityId, 'DET');
   assert.equal(a2.source, 'auto');
   assert.equal(out.find((o) => o.id === 'j1').activityId, 'OTHER');
-  // 之後動態島送達（只帶 activityId）→ 結的是最新那單 a2
-  const after = applyNativeEvents(out, parseNativeEvents([{ type: 'done', at: 30 * MIN, activityId: 'DET' }]));
+  // 卡上顯示的是最早截止的 a2（23 分 < 30 分）→ 只帶 activityId 的送達結 a2
+  const after = applyNativeEvents(out, parseNativeEvents([{ type: 'done', at: 20 * MIN, activityId: 'DET' }]));
   assert.equal(after.find((o) => o.id === 'a2').status, 'delivered');
   assert.equal(after.find((o) => o.id === 'a1').status, 'active');
+  // 再送達一次 → 換 a1
+  const after2 = applyNativeEvents(after, parseNativeEvents([{ type: 'done', at: 25 * MIN, activityId: 'DET' }]));
+  assert.equal(after2.find((o) => o.id === 'a1').status, 'delivered');
+  assert.equal(after2.find((o) => o.id === 'j1').status, 'active');
 });

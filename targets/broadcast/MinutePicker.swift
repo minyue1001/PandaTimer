@@ -93,6 +93,17 @@ enum MinutePicker {
   }
 
   static func pickFromAmount(_ text: String) -> Int? {
+    guard let amount = firstAmount(text) else { return nil }
+    return minutes(fromAmount: amount)
+  }
+
+  /// 畫面上的第一個金額（「110.26 $」優先，其次「$ 110.26」）；沒有 → nil。
+  /// v0.6：螢幕廣播偵測用它當新單的第二個辨識鍵（分鐘數＋金額），與 src/ocrPick.ts 的 pickAmount 同規則。
+  static func pickAmount(_ raw: String) -> Double? {
+    firstAmount(normalize(raw))
+  }
+
+  private static func firstAmount(_ text: String) -> Double? {
     let ns = text as NSString
     for pattern in [amountAfterPattern, amountBeforePattern] {
       guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
@@ -100,7 +111,7 @@ enum MinutePicker {
             match.range(at: 1).location != NSNotFound,
             let amount = Double(ns.substring(with: match.range(at: 1)))
       else { continue }
-      return minutes(fromAmount: amount)
+      return amount
     }
     return nil
   }

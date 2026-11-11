@@ -6,6 +6,11 @@
 //   GET /api/manifest   header: expo-platform / expo-runtime-version / expo-protocol-version / expo-expect-signature
 //   GET /api/assets?asset=<timestamp>/<相對路徑>&runtimeVersion=<rv>&platform=ios
 //   GET /api/health     → "ok"
+//   POST /api/telemetry header x-pt-key: <寫入金鑰>；body JSON 物件或陣列（≤64KB；每來源每分鐘 ≤120 筆）
+//        → 只留白名單欄位（FIELD_RULES）、附伺服器時間 ts → TELEMETRY_DIR/YYYY-MM-DD.jsonl（台北日期；保留 14 天、單日 ≤20MB）
+//   GET /api/telemetry?date=YYYY-MM-DD&since=<ISO>&limit=N   header x-pt-read: <讀取金鑰>
+//        → {date, count, records[], truncated, next}（有 since：since 之後最早的 N 筆；沒有：最後 N 筆）
+//   隱私鐵律：不得收 OCR 原文、地址、店名、顧客資訊 → 伺服器只收白名單鍵、字串截短、kw 只收白名單關鍵字。
 //
 // 資料目錄：UPDATES_DIR/<runtimeVersion>/<timestamp>/ = `npx expo export -p ios` 的 dist + expoConfig.json
 //   - 取數字最大的 timestamp；以 "." 開頭的目錄（上傳中）忽略
@@ -15,6 +20,9 @@
 //   HOST (127.0.0.1)  PORT (3970)  UPDATES_DIR (/opt/pandatimer-updates/updates)
 //   PRIVATE_KEY_PATH (/opt/pandatimer-updates/keys/private-key.pem)
 //   PUBLIC_URL (https://wheat.yueshengift.xyz/pandatimer)：manifest 內資產網址的前綴
+//   TELEMETRY_DIR (/opt/pandatimer-updates/telemetry)  TELEMETRY_WRITE_KEY  TELEMETRY_READ_KEY（兩把金鑰由
+//   systemd EnvironmentFile=/opt/pandatimer-updates/server.env 提供；沒設 → /api/telemetry 回 503）
+//   TELEMETRY_TZ (Asia/Taipei)  TELEMETRY_RATE_PER_MIN (120)  TELEMETRY_DAY_MAX_BYTES (20MB)  TELEMETRY_KEEP_DAYS (14)
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -27,6 +35,14 @@ const PORT = Number(process.env.PORT || 3970);
 const UPDATES_DIR = path.resolve(process.env.UPDATES_DIR || '/opt/pandatimer-updates/updates');
 const PRIVATE_KEY_PATH = process.env.PRIVATE_KEY_PATH || '/opt/pandatimer-updates/keys/private-key.pem';
 const PUBLIC_URL = (process.env.PUBLIC_URL || 'https://wheat.yueshengift.xyz/pandatimer').replace(/\/+$/, '');
+const TELEMETRY_DIR = path.resolve(process.env.TELEMETRY_DIR || '/opt/pandatimer-updates/telemetry');
+const TELEMETRY_WRITE_KEY = process.env.TELEMETRY_WRITE_KEY || '';
+const TELEMETRY_READ_KEY = process.env.TELEMETRY_READ_KEY || '';
+const TELEMETRY_TZ = process.env.TELEMETRY_TZ || 'Asia/Taipei';
+const TELEMETRY_RATE_PER_MIN = Number(process.env.TELEMETRY_RATE_PER_MIN || 120);
+const TELEMETRY_DAY_MAX_BYTES = Number(process.env.TELEMETRY_DAY_MAX_BYTES || 20 * 1024 * 1024);
+const TELEMETRY_KEEP_DAYS = Number(process.env.TELEMETRY_KEEP_DAYS || 14);
+const TELEMETRY_MAX_BODY = 64 * 1024;
 const KEY_ID = 'main';
 const ALG = 'rsa-v1_5-sha256';
 
@@ -277,15 +293,170 @@ async function handleAsset(req, res, url) {
   fs.createReadStream(filePath).on('error', () => res.destroy()).pipe(res);
 }
 
+
+// ---------- telemetry（v0.6 遠端狀態回報） ----------
+// ⚠️ 白名單關鍵字與 src/screenInfo.ts 的 KEYWORD_NAMES、targets/broadcast/OrderDetector.swift 的 ScreenInfo.keywords 一致；
+//    欄位鍵名與 PandaTelemetry.swift 的 allowedKeys 一致（test/telemetry.test.mjs 比對）。
+const TELEMETRY_KEYWORDS = [
+  '接受訂單', '拒絕', '前往取餐', '抵達餐廳', '已取餐', '前往送餐', '抵達', '送達', '完成訂單',
+  '上線中', '休息中', '訂單詳情', '聯絡', '導航', '拍照', '確認取餐', '取消',
+];
+const KEYWORD_SET = new Set(TELEMETRY_KEYWORDS);
+const N = 'num', B = 'bool', S = 'str';
+// 型別：num（有限數字）、bool、str（截 80 字）、kw（白名單字串陣列）
+const FIELD_RULES = {
+  t: N, src: S, ev: S, dev: S, ver: S, rv: S, upd: S,
+  seq: N, gap: N, frames: N, ocr: N, skip: N, fails: N, errs: N, memMB: N, peakMB: N,
+  accept: B, min: N, amt: N, km: N, kw: 'kw', screen: S, interval: N, triggers: N, dups: N,
+  island: S, islandErr: S, keep: S, auth: S, fg: S, orders: N, others: S, susp: B,
+  note: S, code: N, sent: N, dropped: N, beatAge: N, reason: S,
+};
+const MAX_STR = 80;
+
+/** 單筆紀錄 → 只留白名單欄位；不是物件或沒有 ev → null */
+function sanitizeRecord(r) {
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+  const out = {};
+  for (const [k, type] of Object.entries(FIELD_RULES)) {
+    if (!Object.prototype.hasOwnProperty.call(r, k)) continue;
+    const v = r[k];
+    if (type === N) { if (typeof v === 'number' && Number.isFinite(v)) out[k] = v; }
+    else if (type === B) { if (typeof v === 'boolean') out[k] = v; }
+    else if (type === S) { if (typeof v === 'string' && v.length) out[k] = v.slice(0, MAX_STR); }
+    else if (type === 'kw') {
+      if (Array.isArray(v)) out[k] = [...new Set(v.filter((x) => typeof x === 'string' && KEYWORD_SET.has(x)))];
+    }
+  }
+  if (typeof out.ev !== 'string') return null;
+  return out;
+}
+
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a || ''), 'utf8');
+  const y = Buffer.from(String(b || ''), 'utf8');
+  if (!x.length || !y.length || x.length !== y.length) return false;
+  return crypto.timingSafeEqual(x, y);
+}
+
+const dateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TELEMETRY_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+const localDate = (ms) => dateFmt.format(new Date(ms)); // YYYY-MM-DD
+const telemetryFile = (date) => path.join(TELEMETRY_DIR, `${date}.jsonl`);
+
+// 來源（src|dev）每 60 秒的筆數；外加全域上限（來源數×4）避免換 dev 灌爆磁碟
+const rateBuckets = new Map();
+function rateAllow(key, n, now) {
+  const take = (k, limit) => {
+    let b = rateBuckets.get(k);
+    if (!b || now - b.start >= 60_000) { b = { start: now, count: 0 }; rateBuckets.set(k, b); }
+    return { ok: b.count + n <= limit, commit: () => { b.count += n; } };
+  };
+  if (rateBuckets.size > 5000) rateBuckets.clear();
+  const one = take(`s:${key}`, TELEMETRY_RATE_PER_MIN);
+  const all = take('*', TELEMETRY_RATE_PER_MIN * 4);
+  if (!one.ok || !all.ok) return false;
+  one.commit(); all.commit();
+  return true;
+}
+
+async function readBody(req, limit) {
+  const declared = Number(req.headers['content-length'] || 0);
+  if (declared > limit) throw new HttpError(413, `Body too large (> ${limit} bytes)`);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw new HttpError(413, `Body too large (> ${limit} bytes)`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+let lastPrune = 0;
+async function pruneTelemetry(now) {
+  if (now - lastPrune < 60 * 60 * 1000) return;
+  lastPrune = now;
+  const keepFrom = localDate(now - (TELEMETRY_KEEP_DAYS - 1) * 86_400_000);
+  let names = [];
+  try { names = await fsp.readdir(TELEMETRY_DIR); } catch { return; }
+  for (const name of names) {
+    const m = /^(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
+    if (m && m[1] < keepFrom) await fsp.rm(path.join(TELEMETRY_DIR, name), { force: true }).catch(() => undefined);
+  }
+}
+
+let writeChain = Promise.resolve();
+async function handleTelemetryPost(req, res) {
+  if (!TELEMETRY_WRITE_KEY) throw new HttpError(503, 'Telemetry not configured');
+  if (!safeEqual(req.headers['x-pt-key'], TELEMETRY_WRITE_KEY)) throw new HttpError(401, 'Bad key');
+  const body = await readBody(req, TELEMETRY_MAX_BODY);
+  let parsed;
+  try { parsed = JSON.parse(body.toString('utf8')); } catch { throw new HttpError(400, 'Invalid JSON'); }
+  const list = (Array.isArray(parsed) ? parsed : [parsed]).map(sanitizeRecord).filter(Boolean);
+  if (!list.length) throw new HttpError(400, 'No valid records');
+  if (list.length > 500) throw new HttpError(413, 'Too many records');
+  const now = Date.now();
+  const first = list[0];
+  if (!rateAllow(`${first.src || '-'}|${first.dev || '-'}`, list.length, now)) {
+    throw new HttpError(429, `Rate limit: ${TELEMETRY_RATE_PER_MIN} records/min per source`);
+  }
+  const ts = new Date(now).toISOString();
+  const text = list.map((r) => JSON.stringify({ ts, ...r })).join('\n') + '\n';
+  const file = telemetryFile(localDate(now));
+  const run = writeChain.then(async () => {
+    await fsp.mkdir(TELEMETRY_DIR, { recursive: true });
+    let size = 0;
+    try { size = (await fsp.stat(file)).size; } catch { /* 今天第一筆 */ }
+    if (size + Buffer.byteLength(text) > TELEMETRY_DAY_MAX_BYTES) throw new HttpError(429, 'Daily telemetry quota reached');
+    await fsp.appendFile(file, text, { mode: 0o640 });
+  });
+  writeChain = run.catch(() => undefined);
+  await run;
+  void pruneTelemetry(now);
+  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(JSON.stringify({ ok: true, accepted: list.length }));
+}
+
+async function handleTelemetryGet(req, res, url) {
+  if (!TELEMETRY_READ_KEY) throw new HttpError(503, 'Telemetry not configured');
+  if (!safeEqual(req.headers['x-pt-read'], TELEMETRY_READ_KEY)) throw new HttpError(401, 'Bad key');
+  const date = url.searchParams.get('date') || localDate(Date.now());
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new HttpError(400, 'Invalid date');
+  const sinceRaw = url.searchParams.get('since');
+  const since = sinceRaw ? Date.parse(sinceRaw) : null;
+  if (sinceRaw && !Number.isFinite(since)) throw new HttpError(400, 'Invalid since');
+  const limit = Math.max(1, Math.min(5000, Number(url.searchParams.get('limit')) || 500));
+  let text = '';
+  try { text = await fsp.readFile(telemetryFile(date), 'utf8'); } catch { /* 沒有資料 */ }
+  let records = [];
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try {
+      const r = JSON.parse(line);
+      if (since == null || Date.parse(r.ts) > since) records.push(r);
+    } catch { /* 壞行略過 */ }
+  }
+  const total = records.length;
+  records = since == null ? records.slice(-limit) : records.slice(0, limit);
+  const next = records.length ? records[records.length - 1].ts : sinceRaw;
+  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(JSON.stringify({ date, count: records.length, total, truncated: total > records.length, next, records }));
+}
+
 const server = http.createServer(async (req, res) => {
   const started = Date.now();
   let url;
   res.on('finish', () => {
     if (!url || url.pathname === '/api/health') return;
+    if (url.pathname === '/api/telemetry' && res.statusCode < 400) return; // 回報很頻繁，成功的不寫 log
     console.log(`${req.method} ${url.pathname} ${res.statusCode} ${Date.now() - started}ms rv=${req.headers['expo-runtime-version'] || url.searchParams.get('runtimeVersion') || '-'}`);
   });
   try {
     url = new URL(req.url || '/', 'http://localhost');
+    if (url.pathname === '/api/telemetry') {
+      if (req.method === 'POST') return await handleTelemetryPost(req, res);
+      if (req.method === 'GET') return await handleTelemetryGet(req, res, url);
+      throw new HttpError(405, 'Method not allowed');
+    }
     if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
     switch (url.pathname) {
       case '/api/health':
@@ -309,7 +480,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`pandatimer-updates listening on http://${HOST}:${PORT} updatesDir=${UPDATES_DIR} publicUrl=${PUBLIC_URL} signing=${fs.existsSync(PRIVATE_KEY_PATH) ? 'on' : 'OFF'}`);
+  const { port } = server.address();
+  console.log(`pandatimer-updates listening on http://${HOST}:${port} updatesDir=${UPDATES_DIR} publicUrl=${PUBLIC_URL} signing=${fs.existsSync(PRIVATE_KEY_PATH) ? 'on' : 'OFF'} telemetry=${TELEMETRY_WRITE_KEY && TELEMETRY_READ_KEY ? TELEMETRY_DIR : 'OFF'}`);
+  void pruneTelemetry(Date.now());
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => server.close(() => process.exit(0)));

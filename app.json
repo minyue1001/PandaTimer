@@ -4,14 +4,17 @@
     "slug": "panda-timer",
     "scheme": "pandatimer",
     "version": "1.0.0",
-    "runtimeVersion": "0.5",
+    "runtimeVersion": "0.6",
     "updates": {
       "url": "https://wheat.yueshengift.xyz/pandatimer/api/manifest",
       "enabled": true,
       "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 0,
       "codeSigningCertificate": "./server/certs/certificate.pem",
-      "codeSigningMetadata": { "keyid": "main", "alg": "rsa-v1_5-sha256" }
+      "codeSigningMetadata": {
+        "keyid": "main",
+        "alg": "rsa-v1_5-sha256"
+      }
     },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -22,7 +25,10 @@
       "infoPlist": {
         "CFBundleDisplayName": "熊貓倒數",
         "NSSupportsLiveActivities": true,
-        "UIBackgroundModes": ["location", "audio"],
+        "UIBackgroundModes": [
+          "location",
+          "audio"
+        ],
         "NSLocationWhenInUseUsageDescription": "偵測中保持 App 在背景運作，以便自動更新動態島倒數",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "偵測中保持 App 在背景運作，以便自動更新動態島倒數（只需要「使用 App 期間」）",
         "ITSAppUsesNonExemptEncryption": false
@@ -58,7 +64,12 @@
       ],
       "@bacons/apple-targets",
       "./plugins/withAppIntents",
+      "./plugins/withTelemetry",
       "./plugins/withNoEntitlements"
-    ]
+    ],
+    "extra": {
+      "telemetryKey": "4QaC9xUMnxSiRSkQSQEKU-mWWzHsPBSZ6pZar8XVEjs",
+      "telemetryUrl": "https://wheat.yueshengift.xyz/pandatimer/api/telemetry"
+    }
   }
 }

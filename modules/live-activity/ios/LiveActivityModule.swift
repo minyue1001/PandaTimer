@@ -32,6 +32,10 @@ public class LiveActivityModule: Module {
       DetectorHub.shared.appBecameActive()
     }
 
+    OnAppEntersBackground {
+      DetectorHub.shared.appEnteredBackground()
+    }
+
     // 系統版本夠新、且使用者沒在設定裡關掉「即時動態」
     Function("isSupported") { () -> Bool in
       if #available(iOS 16.2, *) {
@@ -69,25 +73,16 @@ public class LiveActivityModule: Module {
       }
     }.runOnQueue(.main)
 
-    // 結束指定 id 的 Live Activity（找不到也算成功）。
-    // v0.4：由偵測程式管理的卡（heartbeat 有值）不結束，改回「偵測中」待命（同 PandaSharedStore.cleanup）。
+    // JS 送達/取消一單後呼叫（JS 已先把進行中鏡像同步成「不含這單」）。找不到也算成功。
+    // v0.6（同 PandaSharedStore.cleanup → DetectorCardPlan.afterFinish）：這張卡上還掛著其他單 → 切到下一單；
+    // 沒有了 → 偵測卡（heartbeat 有值）回「偵測中」待命，一般卡結束。
     AsyncFunction("end") { (id: String, promise: Promise) in
       guard #available(iOS 16.2, *) else {
         promise.resolve(nil)
         return
       }
-      let targets = Activity<PandaTimerAttributes>.activities.filter { $0.id == id }
       Task {
-        for activity in targets {
-          var state = activity.content.state
-          if state.heartbeat != nil {
-            state.mode = "standby"
-            state.diag = "已送達，回到偵測 · " + (state.diag ?? "")
-            await activity.update(ActivityContent(state: state, staleDate: nil))
-          } else {
-            await activity.end(nil, dismissalPolicy: .immediate)
-          }
-        }
+        await DetectorCardPlan.afterFinish(activityId: id, note: "已送達 \(DetectorCardPlan.clock(Date()))")
         promise.resolve(nil)
       }
     }
@@ -178,9 +173,18 @@ public class LiveActivityModule: Module {
       await DetectorHub.shared.disarm()
     }
 
-    // 偵測狀態 JSON（armed/keepAlive/keepAliveMode/locationAuth/lastFixAt/islandCheck/lastBeatAt/lastOrder*/autoCountSinceLaunch）
+    // 偵測狀態 JSON（armed/keepAlive/keepAliveMode/locationAuth/lastFixAt/islandCheck/lastBeatAt/lastOrder*/
+    // autoCountSinceLaunch/telemetryLastOk/telemetryPending/telemetryError）
     Function("detectorStatus") { () -> String in
       return DetectorHub.shared.statusJSON()
+    }
+
+    // v0.6：JS 告訴原生回報要帶的情境（OTA 更新 id）。JSON 物件字串，例如 {"upd":"1a2b3c4d"}；只收白名單鍵。
+    Function("setTelemetryContext") { (json: String) -> Void in
+      guard let data = json.data(using: .utf8),
+            let dict = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any]
+      else { return }
+      DetectorHub.shared.setTelemetryContext(dict)
     }
 
     // 系統「螢幕廣播」選擇器（RPSystemBroadcastPickerView）。JS 用 ref.show() 程式觸發，
@@ -250,10 +254,9 @@ enum NativeSync {
   static let eventsKey = "pandatimer.native.events.v1"
   static let activeKey = "pandatimer.native.activeOrders.v1"
 
-  /// v0.4 自動偵測開單：與 PandaSharedStore.recordStart 同格式（start 事件＋進行中鏡像），同一把鎖。
-  /// takesOverActivity：沿用偵測卡（同一張卡被改成新倒數）→ 鏡像裡其他單的同一 activityId 要拿掉，
-  /// 否則動態島「送達」會結到舊單。JS 端 applyNativeEvents 也做同樣處理。
-  static func recordStart(_ order: [String: Any], takesOverActivity: Bool) {
+  /// 自動偵測開單：與 PandaSharedStore.recordStart 同格式（start 事件＋進行中鏡像），同一把鎖。
+  /// v0.6：多張自動單可以共用同一張偵測卡（同一 activityId），不再把舊單的 activityId 拿掉（DetectorCardPlan）。
+  static func recordStart(_ order: [String: Any]) {
     let defaults = UserDefaults.standard
     objc_sync_enter(defaults)
     defer { objc_sync_exit(defaults) }
@@ -263,14 +266,6 @@ enum NativeSync {
     events.append(event)
     writeArray(events, eventsKey)
     var active = readArray(activeKey)
-    if takesOverActivity, let aid = order["activityId"] as? String {
-      active = active.map { item in
-        guard (item["activityId"] as? String) == aid else { return item }
-        var copy = item
-        copy.removeValue(forKey: "activityId")
-        return copy
-      }
-    }
     active.append(order)
     writeArray(active, activeKey)
   }

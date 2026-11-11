@@ -64,17 +64,20 @@ struct PandaLiveActivity: Widget {
               }
             }
           } else {
-            HStack(alignment: .center) {
-              Text(statusLabel(context))
-                .font(.title3.bold())
-                .foregroundStyle(statusColor(context))
-              Spacer()
-              Text(context.state.deadline, style: .timer)
-                .font(.system(size: 36, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .multilineTextAlignment(.trailing)
-                .foregroundStyle(statusColor(context))
-              DeliverButton(activityId: context.activityID)
+            VStack(alignment: .leading, spacing: 2) {
+              HStack(alignment: .center) {
+                Text(statusLabel(context))
+                  .font(.title3.bold())
+                  .foregroundStyle(statusColor(context))
+                Spacer()
+                Text(context.state.deadline, style: .timer)
+                  .font(.system(size: 36, weight: .bold, design: .rounded))
+                  .monospacedDigit()
+                  .multilineTextAlignment(.trailing)
+                  .foregroundStyle(statusColor(context))
+                DeliverButton(activityId: context.activityID)
+              }
+              OthersText(state: context.state)
             }
           }
         }
@@ -138,6 +141,7 @@ struct LockScreenView: View {
         Text("預估 \(context.state.estimateMinutes) 分・截止 \(context.state.deadline, style: .time)")
           .font(.subheadline)
           .foregroundStyle(Color.white.opacity(0.8))
+        OthersText(state: context.state)
         if let diag = context.state.diag {
           Text(diag)
             .font(.caption2)
@@ -186,6 +190,20 @@ struct StartCountdownButton: View {
     }
     .buttonStyle(.borderedProminent)
     .tint(pandaPink)
+  }
+}
+
+/// v0.6 多單：卡上倒數的是最早截止那單，其餘列在這行（「另 2 單：18:42、18:55 截止」）；送達後自動切到下一單。
+struct OthersText: View {
+  let state: PandaTimerAttributes.ContentState
+
+  var body: some View {
+    if let others = state.others, !others.isEmpty {
+      Text(others)
+        .font(.caption.bold())
+        .foregroundStyle(Color.yellow)
+        .lineLimit(1)
+    }
   }
 }
 

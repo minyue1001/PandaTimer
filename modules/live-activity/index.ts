@@ -16,6 +16,7 @@ type LiveActivityNative = {
   armDetection?(): string;
   stopDetection?(): Promise<void>;
   detectorStatus?(): string;
+  setTelemetryContext?(json: string): void;
   addListener?(event: 'onDetectorSignal', fn: (ev: DetectorEvent) => void): { remove(): void };
 };
 
@@ -140,6 +141,15 @@ export function detectorStatus(): DetectorStatus | null {
     return parseDetectorStatus(native?.detectorStatus?.());
   } catch {
     return null;
+  }
+}
+
+/** v0.6：原生遠端回報要帶的情境（OTA 更新 id 等）；舊版原生忽略 */
+export function setTelemetryContext(ctx: { upd?: string }): void {
+  try {
+    native?.setTelemetryContext?.(JSON.stringify(ctx));
+  } catch {
+    // 舊版原生或非 iOS：忽略
   }
 }
 

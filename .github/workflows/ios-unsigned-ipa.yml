@@ -68,7 +68,22 @@ jobs:
           diff -u native/intents/DeliverActivityIntent.swift targets/widget/DeliverActivityIntent.swift || { echo "::error::DeliverActivityIntent.swift 兩份不一致"; exit 1; }
           # v0.5：偵測卡「開始倒數」按鈕的 intent（主 App 執行、widget 畫按鈕）
           diff -u native/intents/StartDetectedCountdownIntent.swift targets/widget/StartDetectedCountdownIntent.swift || { echo "::error::StartDetectedCountdownIntent.swift 兩份不一致"; exit 1; }
+          # v0.6：多單卡片規則（pod／主 App intents／widget 三份）、遠端回報 client（App pod／broadcast 兩份）
+          for f in modules/live-activity/ios/DetectorCardPlan.swift targets/widget/DetectorCardPlan.swift; do
+            diff -u native/intents/DetectorCardPlan.swift "$f" || { echo "::error file=$f::DetectorCardPlan.swift 各份不一致"; exit 1; }
+          done
+          diff -u modules/live-activity/ios/PandaTelemetry.swift targets/broadcast/PandaTelemetry.swift || { echo "::error::PandaTelemetry.swift 兩份不一致"; exit 1; }
           if grep -rn 'import ActivityKit' targets/broadcast; then echo "::error::broadcast extension 不得 import ActivityKit（v0.3 實測不可用）"; exit 1; fi
+
+      # v0.6 遠端狀態回報：寫入金鑰在 app.json extra.telemetryKey（plugins/withTelemetry.js 寫進 Info.plist）
+      - name: Guard - telemetry key in app.json
+        run: |
+          node -e '
+            const e = require("./app.json").expo.extra || {};
+            if (!/^[A-Za-z0-9_-]{32,}$/.test(e.telemetryKey || "")) { console.log("::error::app.json 缺 extra.telemetryKey（base64url ≥32 字）"); process.exit(1); }
+            if (!/^https:\/\/.+\/api\/telemetry$/.test(e.telemetryUrl || "")) { console.log("::error::app.json extra.telemetryUrl 不對"); process.exit(1); }
+            console.log("telemetryKey OK（長度 " + e.telemetryKey.length + "），url " + e.telemetryUrl);
+          '
 
       - name: Expo prebuild (iOS)
         run: npx expo prebuild -p ios --clean --no-install
@@ -102,6 +117,11 @@ jobs:
             /usr/libexec/PlistBuddy -c "Print :$K" "$PL" | grep -q . \
               || { echo "::error::主 App Info.plist 缺 $K（背景定位保活需要）"; exit 1; }
           done
+          # v0.6：Info.plist 的回報設定與 app.json 一致（extension 讀所屬 App 的這幾個鍵）
+          TK=$(/usr/libexec/PlistBuddy -c 'Print :PandaTelemetryKey' "$PL")
+          [ "$TK" = "$(node -p "require('./app.json').expo.extra.telemetryKey")" ] || { echo "::error::Info.plist PandaTelemetryKey 與 app.json 不一致"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :PandaTelemetryURL' "$PL" | grep -q '^https://' || { echo "::error::Info.plist 缺 PandaTelemetryURL"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :PandaRuntimeVersion' "$PL"
           RV=$(/usr/libexec/PlistBuddy -c 'Print :EXUpdatesRuntimeVersion' ios/PandaTimer/Supporting/Expo.plist)
           WANT=$(node -p "require('./app.json').expo.runtimeVersion")
           echo "EXUpdatesRuntimeVersion=$RV（app.json：$WANT）"
@@ -188,6 +208,10 @@ jobs:
             /usr/libexec/PlistBuddy -c "Print :$K" "$APP/Info.plist" | grep -q . \
               || { echo "::error::打包後主 App 缺 $K"; exit 1; }
           done
+          /usr/libexec/PlistBuddy -c 'Print :PandaTelemetryURL' "$APP/Info.plist" | grep -q '^https://' \
+            || { echo "::error::打包後主 App 缺 PandaTelemetryURL（遠端回報會停用）"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :PandaTelemetryKey' "$APP/Info.plist" | grep -q . \
+            || { echo "::error::打包後主 App 缺 PandaTelemetryKey"; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
           mkdir -p build/ipa/Payload

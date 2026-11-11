@@ -78,3 +78,22 @@ test('detectNewOrderMinutes：新單畫面才觸發', () => {
   assert.equal(hasAcceptButton('拒絕\n接受訂單'), true);
   assert.equal(hasAcceptButton('已接受 訂單詳情'), false);
 });
+
+// v0.6：螢幕廣播用「分鐘數＋金額」辨識同一張新單（與 MinutePicker.pickAmount / ScreenInfo.amountKey 同規則）
+test('pickAmount／amountKey', async () => {
+  const { pickAmount, amountKey } = await import('../src/ocrPick.ts');
+  assert.equal(pickAmount('每單收入\n110.26 $ 6.7公里\n27 分鐘\n接受訂單'), 110.26);
+  assert.equal(pickAmount('NT$ 138.84'), 138.84);
+  assert.equal(pickAmount('１００.００ ＄'), 100);
+  assert.equal(pickAmount('預計送達 18 分鐘'), null);
+  assert.equal(pickAmount(''), null);
+  assert.equal(pickAmount(null), null);
+  assert.equal(pickAmount('9999.00 $'), 9999); // 原始值照給；範圍交給 amountKey / minutesFromAmount
+  assert.equal(amountKey(110.26), 110);
+  assert.equal(amountKey(73.51), 74);
+  assert.equal(amountKey(null), 0);
+  assert.equal(amountKey(9999), 0);
+  assert.equal(amountKey(0.3), 0);
+  // 金額回推分鐘數的舊行為不變
+  assert.equal(pickMinutes('73.51 $\n接受訂單'), 18);
+});

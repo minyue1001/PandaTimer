@@ -75,8 +75,29 @@ export function minutesFromAmount(amount: number): number | null {
 }
 
 export function pickMinutesFromAmount(text: string): number | null {
+  const amount = firstAmount(text);
+  return amount == null ? null : minutesFromAmount(amount);
+}
+
+function firstAmount(text: string): number | null {
   const m = AMOUNT_AFTER.exec(text) ?? AMOUNT_BEFORE.exec(text);
-  return m ? minutesFromAmount(parseFloat(m[1])) : null;
+  return m ? parseFloat(m[1]) : null;
+}
+
+/**
+ * v0.6：畫面上的第一個金額（「110.26 $」優先，其次「$ 110.26」）；沒有 → null。
+ * 螢幕廣播偵測用「分鐘數＋金額」辨識是不是同一張新單（與 MinutePicker.pickAmount 同規則）。
+ */
+export function pickAmount(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  return firstAmount(normalizeOcrText(raw));
+}
+
+/** 金額 → 訊號/去重用的整數鍵（四捨五入，0~999；抓不到或超出範圍 → 0） */
+export function amountKey(amount: number | null | undefined): number {
+  if (amount == null || !Number.isFinite(amount)) return 0;
+  const k = Math.round(amount);
+  return k >= 1 && k <= 999 ? k : 0;
 }
 
 // ── v0.3 螢幕廣播自動偵測：只有「新單畫面」才觸發 ──

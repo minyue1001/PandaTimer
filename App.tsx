@@ -19,7 +19,8 @@ import {
   listenDeepLinks,
   startOrder,
 } from './src/controller';
-import { beatAgeSec, countAutoToday, locationAuthPending } from './src/detector';
+import * as Updates from 'expo-updates';
+import { beatAgeSec, countAutoToday, locationAuthPending, telemetryLine } from './src/detector';
 import { ensurePermission } from './src/notify';
 import { OtaBox } from './src/OtaBox';
 import {
@@ -73,6 +74,11 @@ function Main() {
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    // v0.6：原生遠端回報帶上 OTA 更新 id（回報由原生送，JS 只顯示「回報：最後成功」）
+    LiveActivity.setTelemetryContext({ upd: Updates.updateId ? Updates.updateId.slice(0, 8) : 'embedded' });
   }, []);
 
   useEffect(() => {
@@ -172,6 +178,7 @@ function Main() {
           <Text style={styles.section}>自動偵測（測試）</Text>
           <Text style={styles.note}>
             1. 按「開始偵測」（定位權限選「使用 App 期間」）→ 2. 在跳出的視窗按「開始直播」。停止：點左上角紅色時間 → 停止。
+            多單：動態島倒數最早截止那單，其他單列在下面；按「送達」自動切到下一單。
             動態島沒變時：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」。
           </Text>
           {det && (
@@ -199,6 +206,7 @@ function Main() {
                   : ''}
               </Text>
               {!!det.lastOrderHow && <Text style={styles.note}>{det.lastOrderHow}</Text>}
+              <Text style={[styles.note, det.telemetryError ? { color: RED } : null]}>{telemetryLine(det)}</Text>
             </View>
           )}
           <View style={styles.row}>

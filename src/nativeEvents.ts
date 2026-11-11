@@ -2,9 +2,10 @@
 // 事件格式由 native/intents/DeliverActivityIntent.swift 的 PandaSharedStore 寫入：
 //   start: { type:'start', id, acceptedAt, estimateMin, deadline, activityId?, notifIds?, source? }   (時間皆 ms)
 //     v0.4 自動偵測開的單由 modules/live-activity 的 DetectorHub 寫入同一佇列（source:'auto'）。
-//     若沿用了偵測卡（同一張卡改成新倒數），其他進行中訂單的同一 activityId 要拿掉（動態島只代表最新那單）。
+//     v0.6：多張自動單共用同一張偵測卡（同一 activityId），不再把舊單的 activityId 拿掉（src/cardPlan.ts）。
 //   done:  { type:'done', at, orderId?, activityId? }
-//     有 orderId → 只結那一單；否則有 activityId → 只結對應動態島那一單；都沒有 → 最早一筆進行中。
+//     有 orderId → 只結那一單；否則有 activityId → 結該卡上「最早截止」那單（卡上顯示的就是它）；
+//     都沒有 → 最早一筆進行中。
 //     指定了但找不到（例如已在 App 內按過送達/取消）→ 忽略，不誤結別張單。
 import type { Order } from './orders';
 
@@ -60,19 +61,22 @@ function earliestActive(list: Order[]): Order | undefined {
   return best;
 }
 
+/** 同一張卡上的進行中訂單裡最早截止的（同截止取較早接單）＝卡上正在倒數的那單 */
+function earliestDeadlineOnCard(list: Order[], activityId: string): Order | undefined {
+  let best: Order | undefined;
+  for (const o of list) {
+    if (o.status !== 'active' || o.activityId !== activityId) continue;
+    if (!best || o.deadline < best.deadline || (o.deadline === best.deadline && o.acceptedAt < best.acceptedAt)) best = o;
+  }
+  return best;
+}
+
 /** 依序套用事件；回傳新陣列（新單放最前面，與 startOrder 一致） */
 export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order[] {
   let list = orders.slice();
   for (const ev of events) {
     if (ev.type === 'start') {
       if (list.some((o) => o.id === ev.id)) continue; // 重複事件
-      const takenId = ev.activityId;
-      if (takenId) {
-        // 同一張動態島被新單接手（偵測卡疊單覆蓋）→ 舊單不再擁有它，免得送達/結束時動到新單的卡
-        list = list.map((o) =>
-          o.status === 'active' && o.activityId === takenId ? { ...o, activityId: undefined } : o,
-        );
-      }
       list = [
         {
           id: ev.id,
@@ -90,7 +94,7 @@ export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order
       const target = ev.orderId
         ? list.find((o) => o.id === ev.orderId && o.status === 'active')
         : ev.activityId
-          ? list.find((o) => o.activityId === ev.activityId && o.status === 'active')
+          ? earliestDeadlineOnCard(list, ev.activityId)
           : earliestActive(list);
       if (!target) continue;
       const actualMin = Math.round(((ev.at - target.acceptedAt) / 60_000) * 10) / 10;

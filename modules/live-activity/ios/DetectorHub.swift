@@ -5,18 +5,23 @@ import Foundation
 import UIKit
 import UserNotifications
 
-// v0.4/v0.5：螢幕廣播 extension（PandaBroadcast）→ App 的訊號中樞。
+// v0.4/v0.5/v0.6：螢幕廣播 extension（PandaBroadcast）→ App 的訊號中樞。
 // 實測（v0.3）：ActivityKit 在 broadcast extension 內完全不可用 → extension 只負責 OCR，
 // 用 Darwin notification（跨程序、不需 App Group/entitlement）以「名稱」編碼資料通知 App：
-//   com.pandatimer.order.<N>（N=1…90 分）、com.pandatimer.broadcast.started/.stopped/.heartbeat、
+//   com.pandatimer.order.<N>.<S>（N=1…90 分、S=序號 0…3）、com.pandatimer.broadcast.started/.stopped/.heartbeat、
 //   com.pandatimer.drain（App Intents 寫了事件佇列 → 請 JS drain）。
-// ⚠️ 名稱與 targets/broadcast/SampleHandler.swift 的 Signal、src/detector.ts 的 parseSignalName 必須一致。
+// ⚠️ 名稱與 targets/broadcast/SampleHandler.swift 的 PandaSignal、src/detector.ts 的 parseSignalName 必須一致。
 // App 端要活著才收得到 → 偵測期間保活，見 KeepAlive。
-// v0.4 實測（iOS 26.6.2）：只靠靜音音訊保活時，背景的 Activity.update 全部無聲失效
-//   （liveactivitiesd：「Process is only playing background media so is forbidden to update activity」）。
-// v0.5：保活改用背景定位（音訊只當備援）；每次更新後回讀檢查；另有兩條一鍵備援：
-//   ① 點「偵測到新單」通知 → App 進前景 → appBecameActive 把最新自動單的倒數推到動態島；
-//   ② 偵測卡上的「開始倒數」按鈕（native/intents/StartDetectedCountdownIntent.swift，讀 LastAutoStore）。
+// v0.4 實測（iOS 26.6.2）：只靠靜音音訊保活時，背景的 Activity.update 全部無聲失效。
+// v0.5：保活改用背景定位（音訊只當備援）。v0.5 實測：update 有生效，但動態島畫面要關螢幕再打開才重繪；
+//   同一張 27 分的圖只偵測得到第一單（extension 與 App 兩層「同分鐘數」去重＋同名 Darwin 通知合併）。
+// v0.6：
+//   - App 不再去重：每收到一則 order 訊號＝一張新單（extension 負責邊緣觸發＋（分鐘, 金額）90 秒去重；序號跳號＝訊號遺失）。
+//   - 多單共用偵測卡：每張自動單都掛在偵測卡上（鏡像 activityId＝偵測卡 id），卡片顯示最早截止那單、others 列其餘
+//     （DetectorCardPlan.swift，三份逐字相同）；送達一單自動切到下一單。
+//   - 新單用 update(_:alertConfiguration:) 強制展開提示＋重繪；心跳 update 不帶 alert。
+//   - 遠端狀態回報（PandaTelemetry，source "app"）。
+//   一鍵備援照舊：① 點「偵測到新單」通知 → App 進前景 → 依鏡像重推卡片；② 偵測卡上的「開始倒數」按鈕。
 final class DetectorHub {
   static let shared = DetectorHub()
 
@@ -26,9 +31,10 @@ final class DetectorHub {
   static let heartbeatName = "com.pandatimer.broadcast.heartbeat"
   static let drainName = "com.pandatimer.drain"
   static let maxMinutes = 90
+  static let seqMod = 4
 
   enum Signal {
-    case order(Int)
+    case order(Int, Int)
     case started
     case stopped
     case heartbeat
@@ -44,17 +50,32 @@ final class DetectorHub {
     default: break
     }
     guard name.hasPrefix(orderPrefix) else { return nil }
-    let rest = String(name.dropFirst(orderPrefix.count))
-    guard !rest.isEmpty, !rest.hasPrefix("0"), rest.allSatisfy({ $0 >= "0" && $0 <= "9" }), let n = Int(rest),
-          n >= 1, n <= maxMinutes
+    let parts = String(name.dropFirst(orderPrefix.count)).split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 2 else { return nil }
+    let minText = String(parts[0])
+    let seqText = String(parts[1])
+    guard !minText.isEmpty, minText.count <= 2, !minText.hasPrefix("0"),
+          minText.allSatisfy({ $0 >= "0" && $0 <= "9" }), let n = Int(minText), n >= 1, n <= maxMinutes,
+          seqText.count == 1, let s = Int(seqText), s >= 0, s < seqMod
     else { return nil }
-    return .order(n)
+    return .order(n, s)
+  }
+
+  /// 4 個狀態名稱＋90×4 個 order.N.S（共 364 個）
+  static func allNames() -> [String] {
+    var names = [startedName, stoppedName, heartbeatName, drainName]
+    for n in 1...maxMinutes {
+      for s in 0..<seqMod { names.append("\(orderPrefix)\(n).\(s)") }
+    }
+    return names
   }
 
   // MARK: - 狀態（只在 queue 上存取）
 
   private let queue = DispatchQueue(label: "com.pandatimer.detector.hub")
   let keepAlive = KeepAlive()
+  /// v0.6 遠端狀態回報（App 端）
+  let telemetry = PandaTelemetry(source: "app")
   private var registered = false
   private var emitter: (([String: Any?]) -> Void)?
   private var watchdog: DispatchSourceTimer?
@@ -69,10 +90,14 @@ final class DetectorHub {
   private var islandCheck = ""
   private var autoCount = 0
   private var beatAlerted = false
+  private var lastSeq: Int?
+  private var missedSignals = 0
+  /// fg / bg / unknown（OnAppBecomesActive / OnAppEntersBackground 更新）
+  private var appState = "unknown"
+  private var lastKeepLogged = ""
 
   private let watchdogInterval = 30
   private let beatTimeout: TimeInterval = 150
-  private let orderDedupe: TimeInterval = 90
 
   // MARK: - 對外（由 LiveActivityModule 呼叫）
 
@@ -80,16 +105,14 @@ final class DetectorHub {
     queue.async { self.emitter = emit }
   }
 
-  /// 註冊 4 個狀態名稱＋90 個 order.N。Darwin 回呼在主執行緒，進來後一律轉到 queue。
+  /// 註冊 4 個狀態名稱＋360 個 order.N.S。Darwin 回呼在主執行緒，進來後一律轉到 queue。
   func registerIfNeeded() {
     DispatchQueue.main.async {
       guard !self.registeredOnMain else { return }
       self.registeredOnMain = true
       let center = CFNotificationCenterGetDarwinNotifyCenter()
       let observer = Unmanaged.passUnretained(self).toOpaque()
-      var names = [Self.startedName, Self.stoppedName, Self.heartbeatName, Self.drainName]
-      for n in 1...Self.maxMinutes { names.append("\(Self.orderPrefix)\(n)") }
-      for name in names {
+      for name in Self.allNames() {
         CFNotificationCenterAddObserver(
           center, observer,
           { _, _, cfName, _, _ in
@@ -109,21 +132,24 @@ final class DetectorHub {
       self.armed = true
       self.armedAt = Date()
       self.beatAlerted = false
+      self.lastSeq = nil
       self.keepAlive.start()
       self.startWatchdog()
+      self.telemetry.log("arm", self.appFields(), urgent: true)
     }
   }
 
-  /// App「停止偵測」：停保活（定位＋音訊）；偵測卡若在倒數就交還給那張單（heartbeat=nil），否則結束
+  /// App「停止偵測」：停保活（定位＋音訊）；偵測卡若在倒數就交還給那些單（heartbeat=nil），否則結束
   func disarm() async {
     queue.sync {
       self.armed = false
       self.keepAlive.stop()
       self.stopWatchdog()
+      self.telemetry.log("disarm", self.appFields())
     }
     for activity in Activity<PandaTimerAttributes>.activities where Self.isDetectorCard(activity) {
       var state = activity.content.state
-      if state.mode == "countdown" && state.deadline > Date() {
+      if state.mode == "countdown" && !DetectorCardPlan.items(cardId: activity.id).isEmpty {
         state.heartbeat = nil
         state.diag = "偵測已停止（這張倒數保留）"
         await activity.update(ActivityContent(state: state, staleDate: state.deadline))
@@ -133,9 +159,15 @@ final class DetectorHub {
     }
   }
 
+  /// JS 傳來的回報情境（目前只有 OTA 更新 id "upd"）
+  func setTelemetryContext(_ fields: [String: Any]) {
+    telemetry.setContext(fields)
+  }
+
   func statusJSON() -> String {
     let dict: [String: Any] = queue.sync {
       let keep = keepAlive.snapshot()
+      let tele = telemetry.snapshot()
       var d: [String: Any] = [
         "registered": registered,
         "armed": armed,
@@ -145,12 +177,15 @@ final class DetectorHub {
         "autoCountSinceLaunch": autoCount,
         "lastOrderHow": lastOrderHow,
         "islandCheck": islandCheck,
+        "telemetryPending": tele.pending,
       ]
       if let b = lastBeat { d["lastBeatAt"] = Self.ms(b) }
       if let m = lastOrderMinutes { d["lastOrderMinutes"] = m }
       if let at = lastOrderAt { d["lastOrderAt"] = Self.ms(at) }
       if let e = keep.error { d["keepAliveError"] = e }
       if let fix = keep.lastFixAt { d["lastFixAt"] = Self.ms(fix) }
+      if let ok = tele.lastOk { d["telemetryLastOk"] = Self.ms(ok) }
+      if let e = tele.lastError { d["telemetryError"] = e }
       return d
     }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
@@ -160,22 +195,32 @@ final class DetectorHub {
   }
 
   /// App 回到前景（含點「偵測到新單」通知打開 App）：
-  /// 最新自動單還沒送達 → 把它的倒數強制推到動態島（背景更新可能被系統擋掉，前景一定可以）＋回讀檢查；
-  /// 沒有待補的單 → 照舊只更新心跳/診斷字。不會重複記錄訂單（只改卡，不寫事件）。
+  /// 偵測卡上還掛著單 → 依進行中鏡像把卡片重推一次（背景更新可能被系統擋掉或沒重繪，前景一定可以）＋回讀檢查；
+  /// 沒有單 → 照舊只更新心跳/診斷字。不會重複記錄訂單（只改卡，不寫事件）。
   func appBecameActive() {
     queue.async {
+      self.appState = "fg"
+      self.telemetry.log("fg", self.appFields())
       self.keepAlive.ensure()
       let tracking = self.armed || self.lastBeat != nil
       Task {
-        if let check = await Self.restorePendingCountdown(reason: "回前景補推") {
+        if let result = await Self.refreshDetectorCard(reason: "回前景重推") {
           self.queue.async {
-            self.islandCheck = check
-            self.emit(["type": "restored", "how": check])
+            self.islandCheck = result.text
+            self.telemetry.log("restore", self.appFields().merging(result.fields) { $1 })
+            self.emit(["type": "restored", "how": result.text])
           }
         } else if tracking {
           self.queue.async { self.pushCard(note: nil) }
         }
       }
+    }
+  }
+
+  func appEnteredBackground() {
+    queue.async {
+      self.appState = "bg"
+      self.telemetry.log("bg", self.appFields())
     }
   }
 
@@ -192,6 +237,7 @@ final class DetectorHub {
     case .started:
       lastBeat = now
       beatAlerted = false
+      lastSeq = nil  // extension 每次開始序號從 0 算
       if !armed {
         // 使用者從控制中心直接開廣播、App 剛好還活著：試著保活（背景啟動定位/音訊可能被拒，結果寫進狀態）
         armed = true
@@ -200,11 +246,13 @@ final class DetectorHub {
         startWatchdog()
       }
       pushCard(note: "偵測已啟動")
+      telemetry.log("sig", appFields().merging(["note": "started"]) { $1 }, urgent: true)
       emit(["type": "started"])
     case .heartbeat:
       lastBeat = now
       beatAlerted = false
       pushCard(note: nil)
+      telemetry.log("beat", appFields())
       emit(["type": "heartbeat"])
     case .stopped:
       lastBeat = now
@@ -212,20 +260,22 @@ final class DetectorHub {
       keepAlive.stop()
       stopWatchdog()
       pushCard(note: "偵測已停止 \(Self.hms(now))", stopping: true)
+      telemetry.log("sig", appFields().merging(["note": "stopped"]) { $1 }, urgent: true)
       emit(["type": "stopped"])
     case .drain:
       emit(["type": "drain"])
-    case .order(let minutes):
-      handleOrder(minutes, at: now)
+    case .order(let minutes, let seq):
+      handleOrder(minutes, seq: seq, at: now)
     }
   }
 
-  private func handleOrder(_ minutes: Int, at now: Date) {
-    if let m = lastOrderMinutes, m == minutes, let at = lastOrderAt, now.timeIntervalSince(at) < orderDedupe {
-      return
-    }
+  /// v0.6：不去重（extension 已做邊緣觸發＋去重），每則訊號＝一張新單。
+  private func handleOrder(_ minutes: Int, seq: Int, at now: Date) {
     // 看門狗每 30 秒走一次；隔太久沒走＝App 曾被暫停，這個訊號可能是恢復後才送達（時間偏晚）
     let wasSuspended = watchdog != nil && now.timeIntervalSince(lastTick) > Double(watchdogInterval) * 1.5 + 5
+    let gap = lastSeq.map { (seq - $0 - 1 + Self.seqMod) % Self.seqMod } ?? 0
+    lastSeq = seq
+    missedSignals += gap
     lastOrderMinutes = minutes
     lastOrderAt = now
     autoCount += 1
@@ -233,17 +283,14 @@ final class DetectorHub {
     let beat = lastBeat ?? now
     let diag = diagText(note: "自動新單 \(minutes) 分")
     let orderId = "\(Int64(Self.ms(now)))-a\(UUID().uuidString.prefix(4).lowercased())"
-    // 收到訊號就先寫「最近一次自動偵測」：動態島「開始倒數」按鈕與回前景補推都讀這個
-    LastAutoStore.write(.init(
-      orderId: orderId, minutes: minutes, detectedAt: now,
-      deadline: now.addingTimeInterval(Double(minutes) * 60), activityId: nil))
+    let baseFields = appFields()
 
     Task {
       // App 曾被暫停 → 用 extension 那則「偵測到新單」通知裡的偵測時間（找不到就用收到訊號的時間）
       var acceptedAt = now
       var timeNote = ""
       if wasSuspended {
-        if let t = await DetectorNotify.detectedAt(minutes: minutes, notAfter: now) {
+        if let t = await DetectorNotify.detectedAt(minutes: minutes, seq: seq, notAfter: now) {
           acceptedAt = t
           timeNote = "（App 曾被暫停，接單時間已改用偵測通知的 \(Self.hms(t))）"
         } else {
@@ -251,56 +298,92 @@ final class DetectorHub {
         }
       }
       let deadline = acceptedAt.addingTimeInterval(Double(minutes) * 60)
-      let outcome = await Self.openOrderCard(
-        minutes: minutes, acceptedAt: acceptedAt, deadline: deadline, beat: beat, diag: diag)
       let notifIds = await DetectorReminders.schedule(deadline: deadline, estimateMin: minutes)
-      let acceptedMs = Self.ms(acceptedAt)
       var order: [String: Any] = [
         "id": orderId,
-        "acceptedAt": acceptedMs,
+        "acceptedAt": Self.ms(acceptedAt),
         "estimateMin": minutes,
         "deadline": Self.ms(deadline),
         "notifIds": notifIds,
         "source": "auto",
       ]
-      if let aid = outcome.activityId { order["activityId"] = aid }
-      NativeSync.recordStart(order, takesOverActivity: outcome.reusedDetectorCard)
-      LastAutoStore.write(.init(
-        orderId: orderId, minutes: minutes, detectedAt: acceptedAt, deadline: deadline,
-        activityId: outcome.activityId))
-      // 更新是否真的生效：1 秒後重新從 Activity.activities 讀同 id 的 content.state 比對
-      let check = await Self.verifyCountdown(activityId: outcome.activityId, deadline: deadline)
+      let outcome = await Self.placeOrder(
+        &order, minutes: minutes, acceptedAt: acceptedAt, deadline: deadline, beat: beat, diag: diag)
+      let check = await Self.verifyCard(activityId: outcome.activityId, expect: outcome.expect)
       let how = outcome.text + timeNote
       self.queue.async {
         self.lastOrderHow = how
-        self.islandCheck = check
-        self.emit(["type": "order", "minutes": minutes, "how": how, "check": check])
+        self.islandCheck = check.text
+        var fields = baseFields.merging(check.fields) { $1 }
+        fields["min"] = minutes
+        fields["seq"] = seq
+        fields["gap"] = gap
+        fields["susp"] = wasSuspended
+        fields["orders"] = outcome.count
+        if let err = outcome.requestError { fields["reason"] = err }
+        self.telemetry.log("order", fields, urgent: true)
+        self.emit(["type": "order", "minutes": minutes, "how": how, "check": check.text])
       }
+      let gapNote = gap > 0 ? "\n⚠️ 中間有 \(gap) 則新單訊號遺失（App 可能被暫停）" : ""
       await DetectorNotify.post(
-        title: "App 已記錄自動新單：\(minutes) 分",
-        body: "\(check)\n\(how)\n動態島沒變的話：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」",
+        title: "App 已記錄自動新單：\(minutes) 分" + (outcome.count > 1 ? "（進行中 \(outcome.count) 單）" : ""),
+        body: "\(check.text)\n\(how)\(gapNote)\n動態島沒變的話：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」",
         passive: true)
     }
+  }
+
+  /// App 端回報共用欄位：保活模式、定位授權、前景/背景
+  private func appFields() -> [String: Any] {
+    let keep = keepAlive.snapshot()
+    var d: [String: Any] = ["keep": keep.mode, "auth": keep.locationAuth, "fg": appState]
+    if missedSignals > 0 { d["gap"] = missedSignals }
+    return d
   }
 
   // MARK: - 動態島
 
   struct OrderCardOutcome {
     let activityId: String?
-    let reusedDetectorCard: Bool
+    /// 卡上應該顯示的主單截止時間與 others（回讀比對用）
+    let expect: DetectorCardPlan.Item?
+    let expectOthers: String?
+    /// 這張卡上掛著的單數
+    let count: Int
+    let requestError: String?
     let text: String
   }
 
-  /// 先試背景開新倒數卡（官方文件：只有前景/LiveActivityIntent 能開，預期會被拒），
-  /// 失敗就把偵測卡改成倒數（疊單時前一張自動單的倒數會被覆蓋）。
-  static func openOrderCard(
-    minutes: Int, acceptedAt: Date, deadline: Date, beat: Date, diag: String
+  /// 有偵測卡 → 這單掛到偵測卡（鏡像 activityId＝偵測卡 id）→ 依鏡像重排卡片（最早截止為主、others 列其餘）
+  ///   並用 alertConfiguration 強制展開提示＋重繪；
+  /// 沒有偵測卡 → 試背景開新卡（官方：只有前景/LiveActivityIntent 能開，背景預期被拒），失敗就只記錄＋提醒通知。
+  /// 訂單一律在這裡寫進事件佇列＋進行中鏡像（NativeSync.recordStart）。
+  static func placeOrder(
+    _ order: inout [String: Any], minutes: Int, acceptedAt: Date, deadline: Date, beat: Date, diag: String
   ) async -> OrderCardOutcome {
-    let requestError: String
+    if let card = detectorCard() {
+      order["activityId"] = card.id
+      NativeSync.recordStart(order)
+      let items = DetectorCardPlan.items(cardId: card.id)
+      let total = items.count
+      let alert = AlertConfiguration(
+        title: LocalizedStringResource(stringLiteral: "新單 \(minutes) 分"),
+        body: LocalizedStringResource(
+          stringLiteral: "截止 \(hm(deadline))" + (total > 1 ? "・進行中 \(total) 單" : "")),
+        sound: .default)
+      let main = await DetectorCardPlan.apply(to: card, items: items, note: diag, alert: alert)
+      let others = DetectorCardPlan.othersText(Array(items.dropFirst()))
+      var text = "已把 \(minutes) 分掛到偵測卡（提示展開）"
+      if total > 1, let m = main {
+        text += "；卡上 \(total) 單，顯示最早截止 \(hm(m.deadline))"
+      }
+      return OrderCardOutcome(
+        activityId: card.id, expect: main, expectOthers: others, count: total, requestError: nil, text: text)
+    }
+    // 沒有偵測卡（例如使用者從控制中心直接開廣播）：試著開新卡
     do {
       let id = try await MainActor.run { () throws -> String in
         let state = PandaTimerAttributes.ContentState(
-          deadline: deadline, estimateMinutes: minutes, mode: "countdown", heartbeat: nil,
+          deadline: deadline, estimateMinutes: minutes, mode: "countdown", heartbeat: beat,
           diag: "自動偵測 \(hm(acceptedAt))")
         let activity = try Activity<PandaTimerAttributes>.request(
           attributes: PandaTimerAttributes(acceptedAt: acceptedAt),
@@ -308,45 +391,48 @@ final class DetectorHub {
           pushType: nil)
         return activity.id
       }
-      return OrderCardOutcome(activityId: id, reusedDetectorCard: false, text: "新開倒數卡成功")
-    } catch {
-      requestError = error.localizedDescription
-    }
-    guard let card = detectorCard() else {
+      order["activityId"] = id
+      NativeSync.recordStart(order)
+      let item = DetectorCardPlan.Item(
+        id: order["id"] as? String ?? "", acceptedAt: acceptedAt, estimateMin: minutes, deadline: deadline)
       return OrderCardOutcome(
-        activityId: nil, reusedDetectorCard: false,
-        text: "開新卡被拒（\(requestError)），也找不到偵測卡 → 只記錄＋提醒通知")
+        activityId: id, expect: item, expectOthers: nil, count: 1, requestError: nil, text: "沒有偵測卡，新開倒數卡成功")
+    } catch {
+      NativeSync.recordStart(order)
+      let err = error.localizedDescription
+      return OrderCardOutcome(
+        activityId: nil, expect: nil, expectOthers: nil, count: 0, requestError: err,
+        text: "沒有偵測卡、開新卡被拒（\(err)）→ 只記錄＋提醒通知")
     }
-    let old = card.content.state
-    let overwrote = old.mode == "countdown" && old.deadline > Date()
-    var state = old
-    state.mode = "countdown"
-    state.deadline = deadline
-    state.estimateMinutes = minutes
-    state.heartbeat = beat
-    state.diag = diag
-    await card.update(ActivityContent(state: state, staleDate: deadline))
-    return OrderCardOutcome(
-      activityId: card.id, reusedDetectorCard: true,
-      text: "開新卡被拒（\(requestError)），已把偵測卡改成 \(minutes) 分倒數"
-        + (overwrote ? "（疊單：前一張自動單的倒數被覆蓋）" : ""))
   }
 
-  /// 更新後 1 秒回讀：同 id 的卡 content.state 是否為新的倒數（mode/deadline）。
+  struct CardCheck {
+    let text: String
+    let fields: [String: Any]
+  }
+
+  /// 更新後 1 秒回讀：同 id 的卡 content.state 是否為預期的主單（mode/deadline）。
   /// ⚠️ 讀到的是本程序 ActivityKit 的狀態；若系統（liveactivitiesd）拒絕但本地狀態已改，這裡仍會是 ✓ —
-  /// 所以通知/App 上的 ✓ 只代表「本地已改」，真正以動態島畫面為準（✗ 則一定沒更新成功）。
-  static func verifyCountdown(activityId: String?, deadline: Date) async -> String {
+  /// 所以 ✓ 只代表「本地已改」，真正以動態島畫面為準（✗ 則一定沒更新成功）。
+  static func verifyCard(activityId: String?, expect: DetectorCardPlan.Item?) async -> CardCheck {
     let place = await appStateText()
-    guard let id = activityId else { return "動態島：沒有卡可更新✗（\(place)）" }
+    guard let id = activityId, let want = expect else {
+      return CardCheck(text: "動態島：沒有卡可更新✗（\(place)）", fields: ["island": "✗", "islandErr": "noCard"])
+    }
     try? await Task.sleep(nanoseconds: 1_000_000_000)
     guard let activity = Activity<PandaTimerAttributes>.activities.first(where: { $0.id == id }) else {
-      return "動態島：卡不見了✗（\(place)）"
+      return CardCheck(text: "動態島：卡不見了✗（\(place)）", fields: ["island": "✗", "islandErr": "cardGone"])
     }
     let state = activity.content.state
-    let ok = activity.activityState == .active
+    let alive = activity.activityState == .active
+    let ok = alive
       && (state.mode ?? "countdown") == "countdown"
-      && abs(state.deadline.timeIntervalSince(deadline)) < 1
-    return ok ? "動態島：已更新✓（\(place)）" : "動態島：疑似被系統擋✗（\(place)）"
+      && abs(state.deadline.timeIntervalSince(want.deadline)) < 1
+    if ok {
+      return CardCheck(text: "動態島：已更新✓（\(place)）", fields: ["island": "✓"])
+    }
+    let why = alive ? "stateMismatch" : "state:\(activity.activityState)"
+    return CardCheck(text: "動態島：疑似被系統擋✗（\(place)）", fields: ["island": "✗", "islandErr": why])
   }
 
   static func appStateText() async -> String {
@@ -359,30 +445,17 @@ final class DetectorHub {
     }
   }
 
-  /// 最新自動單（LastAutoStore）還在進行中 → 把它的倒數推到卡上（優先該單的卡，否則偵測卡），回傳回讀結果。
-  /// 沒有待補的單回 nil。只改動態島，不寫訂單事件（不會重複記錄）。
-  static func restorePendingCountdown(reason: String) async -> String? {
-    let now = Date()
-    guard let record = LastAutoStore.read(), LastAutoStore.isOrderActive(record, now: now),
-          now < record.deadline.addingTimeInterval(60 * 60)
-    else { return nil }
-    let alive = Activity<PandaTimerAttributes>.activities.filter {
-      $0.activityState != .ended && $0.activityState != .dismissed
-    }
-    let card: Activity<PandaTimerAttributes>?
-    if let aid = record.activityId {
-      card = alive.first { $0.id == aid }
-    } else {
-      card = detectorCard()
-    }
-    guard let activity = card else { return nil }
-    var state = activity.content.state
-    state.mode = "countdown"
-    state.deadline = record.deadline
-    state.estimateMinutes = record.minutes
-    state.diag = "\(reason) \(hms(now)) · 自動新單 \(record.minutes) 分 @\(hm(record.detectedAt))"
-    await activity.update(ActivityContent(state: state, staleDate: record.deadline))
-    return await verifyCountdown(activityId: activity.id, deadline: record.deadline)
+  /// 偵測卡上還掛著單 → 依鏡像重推（不帶 alert）＋回讀；沒有卡或沒有單 → nil。只改動態島，不寫訂單事件。
+  static func refreshDetectorCard(reason: String) async -> CardCheck? {
+    guard let card = detectorCard() else { return nil }
+    let items = DetectorCardPlan.items(cardId: card.id)
+    guard !items.isEmpty else { return nil }
+    let main = await DetectorCardPlan.apply(
+      to: card, items: items, note: "\(reason) \(hms(Date())) · 進行中 \(items.count) 單", alert: nil)
+    let check = await verifyCard(activityId: card.id, expect: main)
+    var fields = check.fields
+    fields["orders"] = items.count
+    return CardCheck(text: check.text, fields: fields)
   }
 
   static func isDetectorCard(_ activity: Activity<PandaTimerAttributes>) -> Bool {
@@ -394,6 +467,7 @@ final class DetectorHub {
   static func detectorCard() -> Activity<PandaTimerAttributes>? {
     let all = Activity<PandaTimerAttributes>.activities.filter(isDetectorCard)
     return all.first { $0.content.state.mode == "standby" }
+      ?? all.first { $0.content.state.mode == "countdown" }
       ?? all.first { $0.content.state.mode == "stopped" }
       ?? all.first
   }
@@ -434,7 +508,7 @@ final class DetectorHub {
     return parts.joined(separator: " · ")
   }
 
-  // MARK: - 看門狗（30 秒）：記錄「App 還活著」、補播備援音訊、心跳逾時警告
+  // MARK: - 看門狗（30 秒）：記錄「App 還活著」、補播備援音訊、心跳逾時警告、保活狀態變化回報
 
   private func startWatchdog() {
     guard watchdog == nil else { return }
@@ -457,6 +531,14 @@ final class DetectorHub {
     lastTick = now
     guard armed else { return }
     keepAlive.ensure()
+    let keep = keepAlive.snapshot()
+    let keepTag = "\(keep.mode)|\(keep.locationAuth)|\(keep.error ?? "")"
+    if keepTag != lastKeepLogged {
+      lastKeepLogged = keepTag
+      var fields = appFields()
+      if let e = keep.error { fields["reason"] = e }
+      telemetry.log("keep", fields, urgent: keep.error != nil)
+    }
     let since = lastBeat ?? armedAt ?? now
     let gap = now.timeIntervalSince(since)
     if gap > beatTimeout && !beatAlerted {
@@ -465,6 +547,9 @@ final class DetectorHub {
       let note = lastBeat == nil ? "⚠️ 還沒收到偵測訊號（廣播沒開始？）" : "⚠️ \(minutes) 分鐘沒收到偵測心跳"
       pushCard(note: note)
       emit(["type": "beatTimeout"])
+      var fields = appFields()
+      fields["beatAge"] = Int(gap)
+      telemetry.log("beatTimeout", fields, urgent: true)
       let body = "\(note)。偵測可能已被系統關掉，請重新開始偵測。"
       Task {
         await DetectorNotify.post(title: "🐼 偵測沒有回應", body: body, passive: false)
@@ -499,69 +584,6 @@ final class DetectorHub {
 
   static func hms(_ date: Date) -> String { hmsFormatter.string(from: date) }
   static func hm(_ date: Date) -> String { hmFormatter.string(from: date) }
-}
-
-// MARK: - 最近一次自動偵測（UserDefaults.standard，主 App 程序內共用）
-// ⚠️ 鍵名與 JSON 格式和 native/intents/StartDetectedCountdownIntent.swift 的 DetectedCountdownStore 一致
-//    （test/detector.test.mjs 會比對鍵名字串）。
-//   {"orderId":String,"minutes":Int,"detectedAt":ms,"deadline":ms,"activityId"?:String}
-
-enum LastAutoStore {
-  static let key = "pandatimer.detector.lastAuto.v1"
-  /// 訂單剛偵測到、還沒寫進進行中鏡像的寬限時間
-  static let recordingGrace: TimeInterval = 30
-
-  struct Record {
-    let orderId: String
-    let minutes: Int
-    let detectedAt: Date
-    let deadline: Date
-    let activityId: String?
-  }
-
-  static func write(_ record: Record) {
-    var dict: [String: Any] = [
-      "orderId": record.orderId,
-      "minutes": record.minutes,
-      "detectedAt": DetectorHub.ms(record.detectedAt),
-      "deadline": DetectorHub.ms(record.deadline),
-    ]
-    if let aid = record.activityId { dict["activityId"] = aid }
-    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
-          let text = String(data: data, encoding: .utf8)
-    else { return }
-    let defaults = UserDefaults.standard
-    objc_sync_enter(defaults)
-    defer { objc_sync_exit(defaults) }
-    defaults.set(text, forKey: key)
-  }
-
-  static func read() -> Record? {
-    let defaults = UserDefaults.standard
-    objc_sync_enter(defaults)
-    defer { objc_sync_exit(defaults) }
-    guard let text = defaults.string(forKey: key), let data = text.data(using: .utf8),
-          let dict = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any],
-          let orderId = dict["orderId"] as? String,
-          let minutes = (dict["minutes"] as? NSNumber)?.intValue,
-          let detectedMs = (dict["detectedAt"] as? NSNumber)?.doubleValue,
-          let deadlineMs = (dict["deadline"] as? NSNumber)?.doubleValue
-    else { return nil }
-    return Record(
-      orderId: orderId, minutes: minutes,
-      detectedAt: Date(timeIntervalSince1970: detectedMs / 1000),
-      deadline: Date(timeIntervalSince1970: deadlineMs / 1000),
-      activityId: dict["activityId"] as? String)
-  }
-
-  /// 該單仍在進行中：進行中鏡像有它的 id，或剛偵測到（寬限內，記錄還在路上）
-  static func isOrderActive(_ record: Record, now: Date) -> Bool {
-    if now.timeIntervalSince(record.detectedAt) < recordingGrace { return true }
-    let defaults = UserDefaults.standard
-    objc_sync_enter(defaults)
-    defer { objc_sync_exit(defaults) }
-    return NativeSync.readArray(NativeSync.activeKey).contains { ($0["id"] as? String) == record.orderId }
-  }
 }
 
 // MARK: - 保活（v0.5）：背景定位優先；定位授權被拒或定位失敗才用靜音音訊備援
@@ -935,14 +957,15 @@ enum DetectorNotify {
   }
 
   /// extension 發的「偵測到新單」通知（userInfo pandatimer=detected）裡的偵測時間：
-  /// 同分鐘數、在 notAfter 之前 10 分鐘內的最新一則。找不到回 nil。
-  static func detectedAt(minutes: Int, notAfter: Date) async -> Date? {
+  /// 同分鐘數（v0.6 起再比對序號）、在 notAfter 之前 10 分鐘內的最新一則。找不到回 nil。
+  static func detectedAt(minutes: Int, seq: Int, notAfter: Date) async -> Date? {
     let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
     var best: Date?
     for notification in delivered {
       let info = notification.request.content.userInfo
       guard (info["pandatimer"] as? String) == "detected",
             (info["minutes"] as? NSNumber)?.intValue == minutes,
+            (info["seq"] as? NSNumber).map({ $0.intValue == seq }) ?? true,
             let ms = (info["detectedAt"] as? NSNumber)?.doubleValue
       else { continue }
       let t = Date(timeIntervalSince1970: ms / 1000)

@@ -5,9 +5,13 @@
 #   bash scripts/deploy-updates-server.sh             # 正式部署
 #
 # 會做：上傳 server/ 與私鑰到 /opt/pandatimer-updates → 系統帳號 pandatimer → systemd pandatimer-updates
+#       → v0.6：兩把回報金鑰（本機 ~/.config/pandatimer/telemetry-{write,read}-key）寫成遠端 server.env（600），
+#         systemd 用 EnvironmentFile 讀；回報資料寫 /opt/pandatimer-updates/telemetry（ReadWritePaths）
 #       → nginx 在 listen 443 的 wheat.yueshengift.xyz server 區塊插入 location ^~ /pandatimer/
-#       → 驗證既有站台狀態碼不變、服務都 active；任一失敗自動回滾（還原 nginx、停用 pandatimer-updates）。
-# 可用環境變數覆寫：PANDATIMER_REMOTE（預設 wheat-new）、REMOTE_NODE_BIN（遠端 node 絕對路徑）、PANDATIMER_KEY
+#       → 驗證既有站台狀態碼不變、服務都 active、/api/telemetry 金鑰錯回 401／讀取金鑰回 200；
+#         任一失敗自動回滾（還原 nginx；重跑時換回上一版程式＋server.env＋unit 並重啟，首次部署則停用服務）。
+# 可用環境變數覆寫：PANDATIMER_REMOTE（預設 wheat-new）、REMOTE_NODE_BIN（遠端 node 絕對路徑）、PANDATIMER_KEY、
+#   PANDATIMER_TELEMETRY_WRITE_KEY / PANDATIMER_TELEMETRY_READ_KEY（金鑰檔路徑）
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,6 +26,8 @@ PUBLIC_URL="https://${DOMAIN}/pandatimer"
 NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled/${SITE_NAME}}"
 BACKUP_DIR="${BACKUP_DIR:-/root/nginx-backup}"
 LOCAL_KEY="${PANDATIMER_KEY:-$HOME/.config/pandatimer/keys/private-key.pem}"
+WRITE_KEY_FILE="${PANDATIMER_TELEMETRY_WRITE_KEY:-$HOME/.config/pandatimer/telemetry-write-key}"
+READ_KEY_FILE="${PANDATIMER_TELEMETRY_READ_KEY:-$HOME/.config/pandatimer/telemetry-read-key}"
 REMOTE_NODE_BIN="${REMOTE_NODE_BIN:-}"
 TS="$(date +%Y%m%d-%H%M%S)"
 
@@ -31,7 +37,7 @@ for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
     --print-remote-lib) PRINT_LIB=1 ;;   # 除錯用：印出送到遠端執行的腳本
-    -h|--help) sed -n '2,12p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "未知參數：$a" >&2; exit 2 ;;
   esac
 done
@@ -39,6 +45,7 @@ done
 WORK="$(mktemp -d)"
 REMOTE_LIB="$WORK/remote-lib.sh"
 PRE_OUT="$WORK/pre.out"
+ENV_FILE="$WORK/server.env"
 POST_OUT="$WORK/post.out"
 
 # ---------------------------------------------------------------- 遠端腳本（單引號 heredoc：本機零展開）
@@ -210,6 +217,7 @@ cmd_preflight() {
 }
 
 cmd_install() {
+  local ts="${1:-manual}"
   resolve_node
   if ! id -u pandatimer >/dev/null 2>&1; then
     useradd --system --no-create-home --home-dir "$BASE" --shell /usr/sbin/nologin pandatimer
@@ -220,17 +228,29 @@ cmd_install() {
   install -d -m 755 -o root -g root "$BASE"
   install -d -m 755 -o pandatimer -g pandatimer "$BASE/updates"
   install -d -m 700 -o pandatimer -g pandatimer "$BASE/keys"
+  install -d -m 750 -o pandatimer -g pandatimer "$BASE/telemetry"
   [[ -f "$BASE/server.incoming/index.mjs" ]] || die "找不到剛上傳的 $BASE/server.incoming/index.mjs"
+  [[ -s "$BASE/server.env.new" ]] || die "找不到剛上傳的 $BASE/server.env.new"
+  grep -q '^TELEMETRY_WRITE_KEY=..*' "$BASE/server.env.new" && grep -q '^TELEMETRY_READ_KEY=..*' "$BASE/server.env.new" \
+    || die "server.env.new 缺 TELEMETRY_WRITE_KEY / TELEMETRY_READ_KEY"
   "$NODE_BIN" --check "$BASE/server.incoming/index.mjs"
+  # 換版前留一份「上一版」（程式、server.env、unit），回滾時換回來；.last-swap 記這次部署的時間戳
   if [[ -d "$BASE/server" ]]; then rm -rf "$BASE/server.prev"; mv "$BASE/server" "$BASE/server.prev"; fi
+  rm -f "$BASE/server.env.prev" "$BASE/unit.prev"
+  if [[ -f "$BASE/server.env" ]]; then cp -a "$BASE/server.env" "$BASE/server.env.prev"; fi
+  if [[ -f "$SYSTEMD_DIR/$SVC.service" ]]; then cp -a "$SYSTEMD_DIR/$SVC.service" "$BASE/unit.prev"; fi
+  printf '%s\n' "$ts" > "$BASE/.last-swap"
   mv "$BASE/server.incoming" "$BASE/server"
+  mv -f "$BASE/server.env.new" "$BASE/server.env"
+  chown root:root "$BASE/server.env"
+  chmod 600 "$BASE/server.env"
   chown -R root:root "$BASE/server"
   chmod -R u=rwX,go=rX "$BASE/server"
   if [[ -s "$BASE/keys/private-key.pem.new" ]]; then mv -f "$BASE/keys/private-key.pem.new" "$BASE/keys/private-key.pem"; fi
   [[ -s "$BASE/keys/private-key.pem" ]] || die "私鑰 $BASE/keys/private-key.pem 不存在"
   chown pandatimer:pandatimer "$BASE/keys/private-key.pem"
   chmod 600 "$BASE/keys/private-key.pem"
-  say "• 程式已放到 $BASE/server，私鑰 $(stat -c '%a %U' "$BASE/keys/private-key.pem")"
+  say "• 程式已放到 $BASE/server，私鑰 $(stat -c '%a %U' "$BASE/keys/private-key.pem")，server.env $(stat -c '%a %U' "$BASE/server.env")"
 
   local unit="$SYSTEMD_DIR/$SVC.service" tmp
   tmp="$(mktemp)"
@@ -248,6 +268,8 @@ Environment=PORT=$PORT
 Environment=UPDATES_DIR=$BASE/updates
 Environment=PRIVATE_KEY_PATH=$BASE/keys/private-key.pem
 Environment=PUBLIC_URL=$PUBLIC_URL
+Environment=TELEMETRY_DIR=$BASE/telemetry
+EnvironmentFile=$BASE/server.env
 ExecStart=$NODE_BIN $BASE/server/index.mjs
 Restart=on-failure
 RestartSec=3
@@ -255,6 +277,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=$BASE/telemetry
 
 [Install]
 WantedBy=multi-user.target
@@ -283,6 +306,31 @@ UNIT
   bind="$(ss -Hltn "sport = :$PORT" | awk '{print $4}' | sort -u | tr '\n' ' ')"
   [[ "$bind" == "127.0.0.1:$PORT " ]] || die "綁定位址不對：$bind（應只有 127.0.0.1:$PORT）"
   say "• 綁定位址：$bind"
+  local tc
+  tc="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'x-pt-key: deploy-check-wrong-key' \
+    -H 'content-type: application/json' --data '{"ev":"deploy-check"}' "http://127.0.0.1:$PORT/api/telemetry" </dev/null || true)"
+  [[ "$tc" == "401" ]] || die "127.0.0.1:$PORT/api/telemetry 金鑰錯應回 401，實際 $tc（server.env 沒被讀到？）"
+  say "• /api/telemetry 已啟用（錯誤金鑰 → 401）"
+}
+
+# 回滾用：這次部署（.last-swap == $1）換過版 → 換回上一版程式／server.env／unit 並重啟；健康就印 @@restored ok
+cmd_restore_prev() {
+  local ts="$1" i ok=0
+  if [[ "$(cat "$BASE/.last-swap" 2>/dev/null || true)" != "$ts" || ! -d "$BASE/server.prev" ]]; then
+    say "• 這次沒有換過版（或沒有上一版），無法換回"
+    return 0
+  fi
+  rm -rf "$BASE/server.failed"; mv "$BASE/server" "$BASE/server.failed"; mv "$BASE/server.prev" "$BASE/server"
+  if [[ -f "$BASE/server.env.prev" ]]; then mv -f "$BASE/server.env.prev" "$BASE/server.env"; fi
+  if [[ -f "$BASE/unit.prev" ]]; then install -m 644 "$BASE/unit.prev" "$SYSTEMD_DIR/$SVC.service"; rm -f "$BASE/unit.prev"; fi
+  rm -f "$BASE/.last-swap"
+  systemctl daemon-reload
+  systemctl restart "$SVC" || true
+  for i in $(seq 1 20); do
+    if [[ "$(curl -s --max-time 3 "http://127.0.0.1:$PORT/api/health" </dev/null || true)" == "ok" ]]; then ok=1; break; fi
+    sleep 0.5
+  done
+  if (( ok )); then say "• 已換回上一版並重啟（失敗的版本留在 $BASE/server.failed）"; say "@@restored ok"; else say "• 換回上一版後仍起不來"; fi
 }
 
 cmd_nginx_apply() {
@@ -333,11 +381,20 @@ cmd_verify() {
   local m
   m="$(curl -s --max-time 15 -H 'expo-platform: ios' -H 'expo-runtime-version: deploy-check' -H 'expo-protocol-version: 1' "https://$DOMAIN/pandatimer/api/manifest" </dev/null || true)"
   if [[ "$m" == *'"noUpdateAvailable"'* ]]; then say '@@manifest ok'; else say '@@manifest bad'; fi
+  # v0.6 回報端點（經 nginx）：錯誤寫入金鑰 → 401；讀取金鑰（從 server.env 讀，經 600 暫存檔給 curl，不進指令列）→ 200
+  printf '@@tele_bad %s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST -H 'x-pt-key: deploy-check-wrong-key' \
+    -H 'content-type: application/json' --data '{"ev":"deploy-check"}' "https://$DOMAIN/pandatimer/api/telemetry" </dev/null || true)"
+  local hf
+  hf="$(umask 077; mktemp)"
+  printf 'x-pt-read: %s\n' "$(sed -n 's/^TELEMETRY_READ_KEY=//p' "$BASE/server.env" | head -1)" > "$hf"
+  printf '@@tele_read %s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -H @"$hf" "https://$DOMAIN/pandatimer/api/telemetry?limit=1" </dev/null || true)"
+  rm -f "$hf"
 }
 
 case "$CMD" in
   preflight) cmd_preflight ;;
-  install) cmd_install ;;
+  install) cmd_install "${1:-manual}" ;;
+  restore-prev) cmd_restore_prev "$1" ;;
   nginx-apply) cmd_nginx_apply "$1" ;;
   nginx-restore) cmd_nginx_restore "$1" ;;
   nginx-plan) nginx_real; nginx_py check "$NGINX_REAL" ;;
@@ -362,7 +419,12 @@ rollback() {
   echo ""
   echo "↩️  回滾中（失敗階段：$STAGE）…"
   remote nginx-restore "$TS"
-  remote service-disable
+  # 重跑部署（遠端已有上一版）→ 換回上一版並重啟，OTA 不中斷；首次部署或換回失敗 → 停用服務（同舊行為）
+  if remote restore-prev "$TS" | tee "$WORK/restore.out" | show && grep -q '^@@restored ok' "$WORK/restore.out"; then
+    echo "• 已換回上一版，$SVC 繼續服務"
+  else
+    remote service-disable
+  fi
 }
 on_exit() {
   local rc=$?
@@ -390,6 +452,20 @@ node --check "$REPO/server/index.mjs" || fail "server/index.mjs 語法錯誤"
 [[ "$(openssl pkey -in "$LOCAL_KEY" -pubout 2>/dev/null)" == "$(openssl x509 -in "$REPO/server/certs/certificate.pem" -noout -pubkey 2>/dev/null)" ]] \
   || fail "私鑰與 server/certs/certificate.pem 不成對"
 echo "• server 程式語法 OK、私鑰 600 且與憑證成對"
+# v0.6 回報金鑰：兩個本機檔（600、base64url ≥32 字、兩把不同），寫入金鑰必須等於 app.json 的 extra.telemetryKey
+for f in "$WRITE_KEY_FILE" "$READ_KEY_FILE"; do
+  [[ -f "$f" ]] || fail "找不到回報金鑰 $f"
+  [[ "$(stat -c %a "$f")" == "600" ]] || fail "回報金鑰權限應為 600：$f"
+  [[ "$(tr -d '\n' < "$f")" =~ ^[A-Za-z0-9_-]{32,}$ ]] || fail "回報金鑰格式不對（base64url、至少 32 字）：$f"
+done
+WRITE_KEY="$(tr -d '\n' < "$WRITE_KEY_FILE")"
+READ_KEY="$(tr -d '\n' < "$READ_KEY_FILE")"
+[[ "$WRITE_KEY" != "$READ_KEY" ]] || fail "寫入金鑰與讀取金鑰不可相同"
+APP_KEY="$(node -p "require('$REPO/app.json').expo.extra?.telemetryKey ?? ''")"
+[[ "$APP_KEY" == "$WRITE_KEY" ]] || fail "app.json 的 extra.telemetryKey 與 $WRITE_KEY_FILE 不一致（App 送的回報會被拒）"
+( umask 077; printf 'TELEMETRY_WRITE_KEY=%s\nTELEMETRY_READ_KEY=%s\n' "$WRITE_KEY" "$READ_KEY" > "$ENV_FILE" )
+unset WRITE_KEY READ_KEY APP_KEY
+echo "• 回報金鑰 600、格式 OK、寫入金鑰與 app.json 一致"
 
 # ---------------------------------------------------------------- 2. 遠端前置檢查（唯讀）
 echo "== 2/5 遠端前置檢查（唯讀，$REMOTE）"
@@ -408,12 +484,15 @@ if (( DRY_RUN )); then
 == DRY RUN：以下動作「不會」執行，只是預告 ==
   1. 打包 $REPO/server/{index.mjs,certs/certificate.pem,README.md} → $REMOTE:$BASE/server（舊版移到 server.prev）
   2. 上傳私鑰 $LOCAL_KEY → $REMOTE:$BASE/keys/private-key.pem（600，owner pandatimer）
-  3. 若無則建立系統帳號 pandatimer；$BASE/updates、$BASE/keys 給 pandatimer
-  4. 寫 $SYSTEMD_DIR/$SVC.service（User=pandatimer、127.0.0.1:$PORT、Restart=on-failure）→ enable + restart → 驗 /api/health
+     上傳回報金鑰（$WRITE_KEY_FILE、$READ_KEY_FILE）→ $REMOTE:$BASE/server.env（600，root）
+  3. 若無則建立系統帳號 pandatimer；$BASE/updates、$BASE/keys、$BASE/telemetry 給 pandatimer；上一版程式/server.env/unit 留作回滾
+  4. 寫 $SYSTEMD_DIR/$SVC.service（User=pandatimer、127.0.0.1:$PORT、EnvironmentFile=$BASE/server.env、
+     ReadWritePaths=$BASE/telemetry、Restart=on-failure）→ enable + restart → 驗 /api/health、/api/telemetry 錯誤金鑰 401
   5. nginx：$( [[ "$NGINX_STATE" == "already" ]] && echo "已含 /pandatimer/，不改" || echo "備份到 $BACKUP_DIR/$SITE_NAME.$TS → 插入上方 diff 的 location → nginx -t → reload（失敗即還原）" )
   6. 驗證：/、/wheat/、/wheat/admin/ 狀態碼與改前一致；$PUBLIC_URL/api/health = ok；
-     manifest 經 nginx 回 noUpdateAvailable；nginx / wheat-server@a / $SVC 皆 active；wheat-tw-tunnel 狀態不變
-     任一失敗 → 還原 nginx、停用 $SVC、非零退出
+     manifest 經 nginx 回 noUpdateAvailable；/api/telemetry 經 nginx：錯誤金鑰 401、讀取金鑰 200；
+     nginx / wheat-server@a / $SVC 皆 active；wheat-tw-tunnel 狀態不變
+     任一失敗 → 還原 nginx；有上一版就換回並重啟，否則停用 $SVC；非零退出
 ✅ dry-run 完成（未改動任何東西）
 EOF
   exit 0
@@ -425,12 +504,13 @@ echo "== 3/5 上傳程式與私鑰"
 tar -C "$REPO/server" --owner=0 --group=0 -czf - index.mjs certs/certificate.pem README.md \
   | "${SSH[@]}" "set -euo pipefail; install -d -m 755 $BASE; rm -rf $BASE/server.incoming; install -d -m 755 $BASE/server.incoming; tar -xzf - -C $BASE/server.incoming --no-same-owner"
 "${SSH[@]}" "set -euo pipefail; umask 077; install -d -m 700 $BASE/keys; cat > $BASE/keys/private-key.pem.new" < "$LOCAL_KEY"
-echo "• 已上傳到 $BASE/server.incoming 與 keys/private-key.pem.new"
+"${SSH[@]}" "set -euo pipefail; umask 077; cat > $BASE/server.env.new" < "$ENV_FILE"
+echo "• 已上傳到 $BASE/server.incoming、keys/private-key.pem.new、server.env.new"
 
 # ---------------------------------------------------------------- 4. 安裝服務 + nginx
 STAGE="install"
 echo "== 4/5 安裝 systemd 服務"
-remote install
+remote install "$TS"
 STAGE="nginx"
 echo "== 4/5 nginx"
 remote nginx-apply "$TS"
@@ -453,6 +533,9 @@ if [[ "$st" == "$TUNNEL_BEFORE" ]]; then echo "• wheat-tw-tunnel：$TUNNEL_BEF
 h="$(awk '$1=="@@health"{print $2}' "$POST_OUT")"
 if [[ "$h" == "ok" ]]; then echo "• $PUBLIC_URL/api/health = ok ✓"; else echo "• $PUBLIC_URL/api/health = '$h' ✗"; bad=1; fi
 if grep -q '^@@manifest ok' "$POST_OUT"; then echo "• manifest 經 nginx → noUpdateAvailable ✓"; else echo "• manifest 經 nginx 異常 ✗"; bad=1; fi
+tb="$(awk '$1=="@@tele_bad"{print $2}' "$POST_OUT")"; tr_="$(awk '$1=="@@tele_read"{print $2}' "$POST_OUT")"
+if [[ "$tb" == "401" ]]; then echo "• /api/telemetry 錯誤金鑰 → 401 ✓"; else echo "• /api/telemetry 錯誤金鑰 → '$tb' ✗"; bad=1; fi
+if [[ "$tr_" == "200" ]]; then echo "• /api/telemetry 讀取金鑰 → 200 ✓"; else echo "• /api/telemetry 讀取金鑰 → '$tr_' ✗"; bad=1; fi
 lh="$(curl -s --max-time 15 "$PUBLIC_URL/api/health" || true)"
 echo "• （本機視角，僅參考）$PUBLIC_URL/api/health = '${lh}'"
 (( bad == 0 )) || fail "改後驗證未通過"

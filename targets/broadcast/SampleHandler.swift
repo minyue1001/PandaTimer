@@ -11,6 +11,8 @@ import Vision
 // 「Target does not include NSSupportsLiveActivities plist key」）→ 這裡**不碰 ActivityKit**。
 // 只做 OCR 偵測，結果用 Darwin notification 通知 App（名稱編碼資料，見 PandaSignal），App 保活中自己更新動態島。
 // 另外保留本地通知「偵測到新單：N 分鐘」給使用者確認（不響聲）。
+// v0.6：多單＝邊緣觸發（接單鈕出現一次只觸發一次；出現中換了分鐘數/金額也算新單）＋（分鐘, 金額）90 秒去重；
+//   訊號 com.pandatimer.order.<分>.<序號 mod 4>；遠端狀態回報（PandaTelemetry，只送結構化欄位，OCR 原文不離開 runOCR）。
 //
 // 省記憶體（v0.4 實測峰值 43MB → v0.5 目標 ≤36MB；jetsam 約 50MB）：
 //  - 不用 CIContext：直接讀 pixel buffer 的亮度平面（420f 的 Y），只取畫面下方 50%，
@@ -55,10 +57,13 @@ enum PandaSignal {
       CFNotificationCenterGetDarwinNotifyCenter(), CFNotificationName(name as CFString), nil, nil, true)
   }
 
-  /// N 必須在 1…90（MinutePicker 已限制；App 只註冊這 90 個名稱）
-  static func postOrder(_ minutes: Int) -> Bool {
+  /// v0.6：com.pandatimer.order.<分 1-90>.<序號 0-3>。序號讓連續兩張同分鐘的單名稱不同
+  /// （App 被暫停時同名 Darwin 通知會合併成一則）。App 註冊 90×4 個名稱；分鐘數超出範圍 → 不送、回 false。
+  static let seqMod = 4
+
+  static func postOrder(_ minutes: Int, seq: Int) -> Bool {
     guard minutes >= 1, minutes <= 90 else { return false }
-    post("\(orderPrefix)\(minutes)")
+    post("\(orderPrefix)\(minutes).\(((seq % seqMod) + seqMod) % seqMod)")
     return true
   }
 }
@@ -72,7 +77,10 @@ final class BroadcastDetector {
   private let forceOcrInterval: CFAbsoluteTime = 10
   private let sameFrameMaxBits = 40  // 4096 bits 中差異 ≤40（≈1%）視為同一畫面
   private let heartbeatInterval: Int = 60
-  private let dedupeWindow: TimeInterval = 180
+  /// v0.6：同一組（分鐘數, 金額取整）90 秒內不重複觸發（切 App 回來同一張邀請還在）；不同金額或分鐘數一律視為新單
+  private let dedupeWindow: TimeInterval = 90
+  /// 連續幾次 OCR 都沒有接單鈕才算「接單鈕消失」（一次 OCR 漏看不會被當成新的一次出現）
+  private let goneAfterMisses = 2
   private let maxLongEdge = 640
   private let bottomFraction = 0.50
   private let memoryAlertMB: Double = 40
@@ -82,6 +90,8 @@ final class BroadcastDetector {
   private let lock = NSLock()
   private let ocr = FrameOCR()
   private var heartbeatTimer: DispatchSourceTimer?
+  /// v0.6 遠端狀態回報（只送結構化欄位，見 PandaTelemetry.swift 的隱私鐵律）
+  private let telemetry = PandaTelemetry(source: "ext")
 
   // lock 保護（ReplayKit 回呼執行緒 ↔ workQueue）
   private var framesReceived = 0
@@ -105,15 +115,31 @@ final class BroadcastDetector {
   private var lastTriggerMinutes: Int?
   private var lastTriggerAt: Date?
   private var triggerCount = 0
+  // v0.6 多單：邊緣觸發＋（分鐘數, 金額）去重
+  /// 接單鈕目前「出現中」時，這次出現已觸發（或已判定重複）的鍵；nil＝這次出現還沒觸發
+  private var appearanceKey: OrderKey?
+  private var recentKeys: [(key: OrderKey, at: Date)] = []
+  private var orderSeq = 0
+  private var dupCount = 0
+  private var lastScreenLogged: String?
+  private var lastScreenLoggedAt: Date?
+
+  struct OrderKey: Equatable {
+    let minutes: Int
+    let amount: Int  // 金額四捨五入取整（0＝抓不到）
+  }
 
   // MARK: - 生命週期（由 SampleHandler 轉呼叫）
 
   func start() {
     PandaSignal.post(PandaSignal.started)
     workQueue.async {
-      RunRecord.reportPreviousIfCrashed()
+      if let previous = RunRecord.reportPreviousIfCrashed() {
+        self.telemetry.log("crashPrev", ["note": previous], urgent: true)
+      }
       self.sampleMemory()
       RunRecord.save(diag: self.diag(), finished: false)
+      self.telemetry.log("start", self.statsFields(), urgent: true)
     }
     let timer = DispatchSource.makeTimerSource(queue: workQueue)
     timer.schedule(
@@ -133,16 +159,21 @@ final class BroadcastDetector {
     PandaSignal.post(PandaSignal.stopped)
     // 程序在這個方法 return 後就會被結束 → 等最後一則（靜音）摘要通知送出（最多 2 秒）
     let done = DispatchSemaphore(value: 0)
+    let sent = DispatchSemaphore(value: 0)
     workQueue.async {
       self.sampleMemory()
       let text = self.diag()
       RunRecord.save(diag: "偵測已停止 \(Clock.hms(Date())) · \(text)", finished: true)
+      self.telemetry.log("stop", self.statsFields())
+      self.telemetry.flush { sent.signal() }
       Task.detached {
         await Notifier.post("偵測已停止", text, passive: true)
         done.signal()
       }
     }
+    // 程序在這個方法 return 後就會被結束：通知與最後一批回報各等一下（合計最多約 2.5 秒）
     _ = done.wait(timeout: .now() + 2)
+    _ = sent.wait(timeout: .now() + 0.5)
   }
 
   /// 每 60 秒：心跳給 App；記錄本輪診斷（被系統殺掉時下次開始會回報）；峰值 >40MB 發靜音通知
@@ -151,6 +182,7 @@ final class BroadcastDetector {
     sampleMemory()
     let text = diag()
     RunRecord.save(diag: text, finished: false)
+    telemetry.log("beat", statsFields())
     if peakMB > memoryAlertMB && peakMB >= alertedPeakMB + 3 {
       alertedPeakMB = peakMB
       Task.detached {
@@ -212,50 +244,111 @@ final class BroadcastDetector {
   }
 
   private func runOCR(_ frame: GrayFrame) {
-    let text: String
+    // OCR 原文只活在這個函式內：立刻轉成結構化摘要（ScreenInfo），之後只用摘要（隱私鐵律：原文不上傳、不保存）
+    let info: ScreenInfo.Summary
     do {
       guard let image = frame.cgImage() else {
         ocrErrors += 1
         return
       }
-      text = try ocr.recognize(image, orientation: frame.orientation)
+      let ocrText = try ocr.recognize(image, orientation: frame.orientation)
+      info = ScreenInfo.analyze(ocrText)
     } catch {
       ocrErrors += 1
       return
     }
     ocrCount += 1
     sampleMemory()
-    lastSawAccept = OrderDetector.hasAcceptButton(text)
-    missStreak = lastSawAccept ? 0 : missStreak + 1
+    lastSawAccept = info.accept
+    missStreak = info.accept ? 0 : missStreak + 1
     let interval = missStreak >= idleAfterMisses ? idleOcrInterval : ocrInterval
     lock.lock()
     currentInterval = interval
     lock.unlock()
-    guard lastSawAccept, let minutes = OrderDetector.detect(text) else { return }
+    logScreenIfChanged(info)
 
-    // 去重：同一分鐘數 3 分鐘內只觸發一次（新單畫面會停留好幾秒）
-    let now = Date()
-    if let last = lastTriggerMinutes, last == minutes,
-       let at = lastTriggerAt, now.timeIntervalSince(at) < dedupeWindow
-    {
+    // v0.6 邊緣觸發：接單鈕「從沒有變成有」才算一次新單出現，同一次出現期間只觸發一次；
+    // 出現期間若分鐘數/金額變了（直接換成另一張邀請）也算新單。連續 goneAfterMisses 次沒看到接單鈕＝這次出現結束。
+    guard info.accept else {
+      if missStreak >= goneAfterMisses { appearanceKey = nil }
       return
     }
+    guard let minutes = info.minutes else { return }  // 有接單鈕但還挑不出分鐘數（畫面還在動畫）→ 等下一次 OCR
+    let key = OrderKey(minutes: minutes, amount: ScreenInfo.amountKey(info.amount))
+    if appearanceKey == key { return }
+    appearanceKey = key
+
+    let now = Date()
+    recentKeys.removeAll { now.timeIntervalSince($0.at) >= dedupeWindow }
+    if recentKeys.contains(where: { $0.key == key }) {
+      // 90 秒內同一組（分鐘數, 金額）→ 同一張邀請（切 App 回來還在）
+      dupCount += 1
+      telemetry.log("dup", ["min": minutes, "amt": info.amount ?? 0, "dups": dupCount])
+      return
+    }
+    recentKeys.append((key: key, at: now))
     lastTriggerMinutes = minutes
     lastTriggerAt = now
     triggerCount += 1
-    let sent = PandaSignal.postOrder(minutes)
+    let seq = orderSeq
+    orderSeq += 1
+    let sent = PandaSignal.postOrder(minutes, seq: seq)
     let text2 = diag()
-    // userInfo：App 被暫停後才收到訊號時，用這裡的偵測時間當接單時間（DetectorNotify.detectedAt）。
-    // 點這則通知 → 系統打開 App → App 回前景就把這單的倒數推到動態島（不會重複記錄）。
+    var fields: [String: Any] = [
+      "min": minutes, "seq": seq % PandaSignal.seqMod, "triggers": triggerCount, "kw": info.kw,
+      "screen": info.screen, "accept": true, "memMB": currentMB, "peakMB": peakMB,
+      "note": sent ? "signal" : "outOfRange",
+    ]
+    if let a = info.amount { fields["amt"] = a }
+    if let km = info.km { fields["km"] = km }
+    telemetry.log("order", fields, urgent: true)
+    // userInfo：App 被暫停後才收到訊號時，用這裡的偵測時間當接單時間（DetectorNotify.detectedAt，以分鐘數＋序號配對）。
+    // 點這則通知 → 系統打開 App → App 回前景就把卡片重推一次（不會重複記錄）。
     let detectedMs = (now.timeIntervalSince1970 * 1000).rounded()
+    let amountText = info.amount.map { String(format: "%.2f 元・", $0) } ?? ""
+    let seqValue = seq % PandaSignal.seqMod
     Task.detached {
-      let info: [String: Any] = ["pandatimer": "detected", "minutes": minutes, "detectedAt": detectedMs]
+      let infoDict: [String: Any] = [
+        "pandatimer": "detected", "minutes": minutes, "detectedAt": detectedMs, "seq": seqValue,
+      ]
       await Notifier.post(
         "偵測到新單：\(minutes) 分鐘",
-        (sent ? "已通知 App 開倒數與記錄。動態島沒變→點這則打開 App" : "分鐘數超出 1–90，未通知 App")
+        amountText
+          + (sent ? "已通知 App 開倒數與記錄。動態島沒變→點這則打開 App" : "分鐘數超出 1–90，未通知 App")
           + "\n\(text2)",
-        passive: false, userInfo: info)
+        passive: false, userInfo: infoDict)
     }
+  }
+
+  /// 畫面分類或接單鈕狀態有變才記一筆（最多每 5 秒一筆，接單鈕狀態改變不受限）
+  private func logScreenIfChanged(_ info: ScreenInfo.Summary) {
+    let tag = "\(info.screen)|\(info.accept)"
+    let now = Date()
+    guard tag != lastScreenLogged else { return }
+    let acceptChanged = lastScreenLogged.map { !$0.hasSuffix("|\(info.accept)") } ?? true
+    if !acceptChanged, let at = lastScreenLoggedAt, now.timeIntervalSince(at) < 5 { return }
+    lastScreenLogged = tag
+    lastScreenLoggedAt = now
+    var fields: [String: Any] = ["screen": info.screen, "accept": info.accept, "kw": info.kw]
+    if let m = info.minutes { fields["min"] = m }
+    if let a = info.amount { fields["amt"] = a }
+    if let km = info.km { fields["km"] = km }
+    telemetry.log("screen", fields)
+  }
+
+  /// 心跳/開始/停止回報的統計欄位（只有數字）
+  private func statsFields() -> [String: Any] {
+    lock.lock()
+    let frames = framesReceived
+    let fails = imageFailures
+    let skips = skipped
+    let interval = currentInterval
+    lock.unlock()
+    return [
+      "frames": frames, "ocr": ocrCount, "skip": skips, "fails": fails, "errs": ocrErrors,
+      "memMB": currentMB, "peakMB": peakMB, "accept": lastSawAccept, "interval": interval,
+      "triggers": triggerCount, "dups": dupCount,
+    ]
   }
 
   // MARK: - 診斷
@@ -541,17 +634,19 @@ enum RunRecord {
     UserDefaults.standard.set(record, forKey: key)
   }
 
-  /// 上一輪沒有走到 broadcastFinished（被 jetsam 殺掉或當掉）→ 發通知附最後一次的診斷
-  static func reportPreviousIfCrashed() {
+  /// 上一輪沒有走到 broadcastFinished（被 jetsam 殺掉或當掉）→ 發通知附最後一次的診斷；回傳給 telemetry 的摘要
+  /// （診斷字只有幀數/OCR 次數/記憶體等統計，沒有畫面內容）
+  static func reportPreviousIfCrashed() -> String? {
     guard let last = UserDefaults.standard.dictionary(forKey: key),
           let finished = last["finished"] as? Bool, !finished,
           let at = last["at"] as? Double
-    else { return }
+    else { return nil }
     let diag = (last["diag"] as? String) ?? ""
     let when = Clock.hms(Date(timeIntervalSince1970: at))
     Task.detached {
       await Notifier.post("⚠️ 上次偵測異常中止", "最後紀錄 \(when)：\(diag)（可能記憶體超過上限被系統關掉）", passive: false)
     }
+    return "\(when) \(diag)"
   }
 }
 
