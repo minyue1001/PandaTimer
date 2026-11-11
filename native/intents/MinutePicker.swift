@@ -74,6 +74,34 @@ enum MinutePicker {
         bestValue = value
       }
     }
-    return bestValue
+    return bestValue ?? pickFromAmount(text)
+  }
+
+  // ── 規則 5（備援）：畫面沒有「XX 分鐘」時，用新單金額回推（與 src/ocrPick.ts 同規則）──
+  // 依 583 筆報酬單驗證：預估報酬 = max(45, 預估分鐘 × 4.08355)。金額 ≤45 分不出分鐘數 → shortOrderMinutes。
+  static let ratePerMinute = 4.08355
+  static let minFare = 45.0
+  static let shortOrderMinutes = 8
+  private static let amountAfterPattern = "(?<![0-9.])([0-9]{2,4}(?:\\.[0-9]{1,2})?)\\s*(?:\\$|＄|元)"
+  private static let amountBeforePattern = "(?:NT)?(?:\\$|＄)\\s*([0-9]{2,4}(?:\\.[0-9]{1,2})?)(?![0-9])"
+
+  static func minutes(fromAmount amount: Double) -> Int? {
+    guard amount >= 30, amount <= 600 else { return nil }
+    if amount <= minFare + 0.005 { return shortOrderMinutes }
+    let m = Int((amount / ratePerMinute).rounded())
+    return (m >= minMinutes && m <= maxMinutes) ? m : nil
+  }
+
+  static func pickFromAmount(_ text: String) -> Int? {
+    let ns = text as NSString
+    for pattern in [amountAfterPattern, amountBeforePattern] {
+      guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+            let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)),
+            match.range(at: 1).location != NSNotFound,
+            let amount = Double(ns.substring(with: match.range(at: 1)))
+      else { continue }
+      return minutes(fromAmount: amount)
+    }
+    return nil
   }
 }

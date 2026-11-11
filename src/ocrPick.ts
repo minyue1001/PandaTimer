@@ -54,5 +54,27 @@ export function pickMinutes(raw: string | null | undefined): number | null {
         : 2;
     if (!best || tier < best.tier) best = { tier, value };
   }
-  return best?.value ?? null;
+  return best?.value ?? pickMinutesFromAmount(text);
+}
+
+// ── 規則 5（備援）：畫面沒有「XX 分鐘」時，用新單金額回推 ──
+// 依使用者 3 期報酬單 583 筆驗證：預估報酬 = max(45, 預估分鐘 × 4.08355)，無例外。
+// 金額 ≤45 時分不出分鐘數（全部是 45 元），保守當 SHORT_ORDER_MINUTES。
+// 金額候選＝「2~4 位數(可帶 1~2 位小數) + $/＄/元」或「$/＄/NT$ + 數字」，範圍 30~600，取第一個。
+export const RATE_PER_MINUTE = 4.08355;
+export const MIN_FARE = 45;
+export const SHORT_ORDER_MINUTES = 8;
+const AMOUNT_AFTER = /(?<![0-9.])([0-9]{2,4}(?:\.[0-9]{1,2})?)\s*(?:\$|＄|元)/;
+const AMOUNT_BEFORE = /(?:NT)?(?:\$|＄)\s*([0-9]{2,4}(?:\.[0-9]{1,2})?)(?![0-9])/i;
+
+export function minutesFromAmount(amount: number): number | null {
+  if (!(amount >= 30 && amount <= 600)) return null;
+  if (amount <= MIN_FARE + 0.005) return SHORT_ORDER_MINUTES;
+  const m = Math.round(amount / RATE_PER_MINUTE);
+  return m >= MIN_MINUTES && m <= MAX_MINUTES ? m : null;
+}
+
+export function pickMinutesFromAmount(text: string): number | null {
+  const m = AMOUNT_AFTER.exec(text) ?? AMOUNT_BEFORE.exec(text);
+  return m ? minutesFromAmount(parseFloat(m[1])) : null;
 }

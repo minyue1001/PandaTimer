@@ -29,3 +29,19 @@ for (const [input, expected] of cases) {
     assert.equal(pickMinutes(input), expected);
   });
 }
+
+// 規則 5：用新單金額回推（預估報酬 = max(45, 分鐘 × 4.08355)）
+test('金額回推分鐘數', () => {
+  const cases = [
+    ['上線中\n100.00 $\n麥當勞\n(X)桃園市\n送餐資訊\n接受訂單', 24], // 實際 pandarider 新單畫面
+    ['73.51 $\n接受訂單', 18],
+    ['49.01 $', 12],
+    ['45.00 $\n拒絕', 8], // 最低價分不出 → 保守 8 分
+    ['NT$ 138.84', 34],
+    ['１００.００ ＄', 24],
+    ['預計送達 18 分鐘\n200.00 $', 18], // 有分鐘數時優先用分鐘數
+    ['狀態 上線中\n拒絕', null],
+    ['9999.00 $', null],
+  ];
+  for (const [text, want] of cases) assert.equal(pickMinutes(text), want, JSON.stringify(text));
+});
