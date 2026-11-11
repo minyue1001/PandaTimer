@@ -1,0 +1,117 @@
+{
+  "version": "2026-11-12.1",
+  "picker": {
+    "minutePattern": "(?<![0-9.])([0-9]{1,3})(?![0-9.])\\s*(?:分鐘|分钟|分|min)",
+    "minMinutes": 1,
+    "maxMinutes": 90,
+    "keywords": [
+      "送達",
+      "預計",
+      "預估",
+      "抵達",
+      "完成",
+      "剩餘",
+      "送达",
+      "预计",
+      "预估",
+      "抵达",
+      "剩余"
+    ],
+    "amountAfterPattern": "(?<![0-9.])([0-9]{2,4}(?:\\.[0-9]{1,2})?)\\s*(?:\\$|＄|元)",
+    "amountBeforePattern": "(?:NT)?(?:\\$|＄)\\s*([0-9]{2,4}(?:\\.[0-9]{1,2})?)(?![0-9])",
+    "minAmount": 30,
+    "maxAmount": 600,
+    "ratePerMinute": 4.08355,
+    "minFare": 45,
+    "shortOrderMinutes": 8
+  },
+  "detector": {
+    "acceptPattern": "(?<!已)接受(?:訂單|订单)",
+    "dedupeSeconds": 90,
+    "goneAfterMisses": 2,
+    "ocrIntervalSeconds": 1.5,
+    "idleOcrIntervalSeconds": 3,
+    "idleAfterMisses": 3,
+    "forceOcrSeconds": 10,
+    "bottomFraction": 0.5,
+    "maxLongEdge": 640,
+    "minimumTextHeight": 0.02,
+    "sameFrameMaxBits": 40,
+    "heartbeatSeconds": 60,
+    "memoryAlertMB": 40,
+    "configRefreshSeconds": 600
+  },
+  "telemetry": {
+    "keywords": [
+      [
+        "接受訂單",
+        "接受订单"
+      ],
+      [
+        "拒絕",
+        "拒绝"
+      ],
+      [
+        "前往取餐"
+      ],
+      [
+        "抵達餐廳",
+        "抵达餐厅"
+      ],
+      [
+        "已取餐"
+      ],
+      [
+        "前往送餐"
+      ],
+      [
+        "抵達",
+        "抵达"
+      ],
+      [
+        "送達",
+        "送达"
+      ],
+      [
+        "完成訂單",
+        "完成订单"
+      ],
+      [
+        "上線中",
+        "上线中"
+      ],
+      [
+        "休息中"
+      ],
+      [
+        "訂單詳情",
+        "订单详情"
+      ],
+      [
+        "聯絡",
+        "联络",
+        "聯繫",
+        "联系"
+      ],
+      [
+        "導航",
+        "导航"
+      ],
+      [
+        "拍照"
+      ],
+      [
+        "確認取餐",
+        "确认取餐"
+      ],
+      [
+        "取消"
+      ]
+    ],
+    "flushSeconds": 30,
+    "batchSize": 10
+  },
+  "app": {
+    "beatTimeoutSeconds": 150
+  }
+}

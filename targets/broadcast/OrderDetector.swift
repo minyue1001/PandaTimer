@@ -4,23 +4,34 @@ import Foundation
 // 改一邊就改另一邊，並跑 `node --test`（Swift 在 WSL 無法執行，TS 版即為測試替身）。
 // 新單畫面的特徵＝畫面上有「接受訂單」按鈕；OCR 可能字間插空白或辨成簡體 → 去空白後比對繁/簡；
 // 前面緊接「已」的（已接受訂單…）不算。分鐘數交給 MinutePicker（與 native/intents 那份逐字相同）。
+// v0.6：接單鈕正則可由遠端設定 detector.acceptPattern 覆寫（編不過 → 用預設）。
 enum OrderDetector {
-  private static let markerPattern = "(?<!已)接受(?:訂單|订单)"
+  static let defaultAcceptPattern = "(?<!已)接受(?:訂單|订单)"
 
-  static func hasAcceptButton(_ raw: String) -> Bool {
+  static func hasAcceptButton(_ raw: String, pattern: String = OrderDetector.defaultAcceptPattern) -> Bool {
     let compact = ScreenInfo.compact(raw)
-    guard !compact.isEmpty, let marker = try? NSRegularExpression(pattern: markerPattern, options: []) else {
-      return false
-    }
+    guard !compact.isEmpty,
+          let marker = (try? NSRegularExpression(pattern: pattern, options: []))
+            ?? (try? NSRegularExpression(pattern: defaultAcceptPattern, options: []))
+    else { return false }
     let range = NSRange(location: 0, length: (compact as NSString).length)
     return marker.firstMatch(in: compact, options: [], range: range) != nil
   }
 
   /// 新單畫面 → 預估分鐘數；不是新單畫面或挑不出分鐘數 → nil
-  static func detect(_ raw: String) -> Int? {
-    guard hasAcceptButton(raw) else { return nil }
-    return MinutePicker.pick(raw)
+  static func detect(_ raw: String, rules: ScreenRules = .standard) -> Int? {
+    guard hasAcceptButton(raw, pattern: rules.acceptPattern) else { return nil }
+    return MinutePicker.pick(raw, config: rules.picker)
   }
+}
+
+/// v0.6：畫面判讀規則（遠端設定 picker / detector.acceptPattern / telemetry.keywords；預設＝內建常數）
+struct ScreenRules {
+  var picker = PickerConfig.standard
+  var acceptPattern = OrderDetector.defaultAcceptPattern
+  var keywords = ScreenInfo.keywords
+
+  static let standard = ScreenRules()
 }
 
 // v0.6 遠端狀態回報用的畫面摘要：只產生結構化欄位，**OCR 原文不離開這個函式**。
@@ -67,10 +78,10 @@ enum ScreenInfo {
       in: text, options: [], range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "")
   }
 
-  static func matchKeywords(_ raw: String) -> [String] {
+  static func matchKeywords(_ raw: String, rows: [[String]] = ScreenInfo.keywords) -> [String] {
     let text = compact(raw)
     guard !text.isEmpty else { return [] }
-    return keywords.filter { forms in forms.contains { text.contains($0) } }.map { $0[0] }
+    return rows.filter { forms in !forms.isEmpty && forms.contains { text.contains($0) } }.map { $0[0] }
   }
 
   static func extractKm(_ raw: String) -> Double? {
@@ -96,13 +107,13 @@ enum ScreenInfo {
   }
 
   /// OCR 文字 → 結構化摘要。minutes 只在有接單鈕時才挑（同 OrderDetector.detect）
-  static func analyze(_ raw: String) -> Summary {
-    let accept = OrderDetector.hasAcceptButton(raw)
-    let kw = matchKeywords(raw)
+  static func analyze(_ raw: String, rules: ScreenRules = .standard) -> Summary {
+    let accept = OrderDetector.hasAcceptButton(raw, pattern: rules.acceptPattern)
+    let kw = matchKeywords(raw, rows: rules.keywords)
     return Summary(
       accept: accept,
-      minutes: accept ? MinutePicker.pick(raw) : nil,
-      amount: MinutePicker.pickAmount(raw),
+      minutes: accept ? MinutePicker.pick(raw, config: rules.picker) : nil,
+      amount: MinutePicker.pickAmount(raw, config: rules.picker),
       km: extractKm(raw),
       kw: kw,
       screen: classify(accept: accept, hits: kw))

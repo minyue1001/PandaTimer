@@ -69,27 +69,61 @@ enum PandaSignal {
 }
 
 final class BroadcastDetector {
-  // MARK: - 參數
-  private let ocrInterval: CFAbsoluteTime = 1.5
-  /// 連續 idleAfterMisses 次 OCR 都沒有接單鈕 → 改用 idleOcrInterval
-  private let idleOcrInterval: CFAbsoluteTime = 3
-  private let idleAfterMisses = 3
-  private let forceOcrInterval: CFAbsoluteTime = 10
-  private let sameFrameMaxBits = 40  // 4096 bits 中差異 ≤40（≈1%）視為同一畫面
-  private let heartbeatInterval: Int = 60
-  /// v0.6：同一組（分鐘數, 金額取整）90 秒內不重複觸發（切 App 回來同一張邀請還在）；不同金額或分鐘數一律視為新單
-  private let dedupeWindow: TimeInterval = 90
-  /// 連續幾次 OCR 都沒有接單鈕才算「接單鈕消失」（一次 OCR 漏看不會被當成新的一次出現）
-  private let goneAfterMisses = 2
-  private let maxLongEdge = 640
-  private let bottomFraction = 0.50
-  private let memoryAlertMB: Double = 40
+  // MARK: - 參數（v0.6：由遠端設定下發——server/config.json 的 detector/picker/telemetry 區塊；預設＝下列值＝
+  // server/config.default.json＝src/remoteConfig.ts 的 DEFAULT_DETECTOR。缺漏/不合法的欄位用預設，範圍同 RANGES）
+  struct DetectorSettings {
+    var ocrInterval: CFAbsoluteTime = 1.5
+    /// 連續 idleAfterMisses 次 OCR 都沒有接單鈕 → 改用 idleOcrInterval
+    var idleOcrInterval: CFAbsoluteTime = 3
+    var idleAfterMisses = 3
+    var forceOcrInterval: CFAbsoluteTime = 10
+    var sameFrameMaxBits = 40  // 4096 bits 中差異 ≤40（≈1%）視為同一畫面
+    var heartbeatInterval = 60
+    /// 同一組（分鐘數, 金額取整）90 秒內不重複觸發（切 App 回來同一張邀請還在）；不同金額或分鐘數一律視為新單
+    var dedupeWindow: TimeInterval = 90
+    /// 連續幾次 OCR 都沒有接單鈕才算「接單鈕消失」（一次 OCR 漏看不會被當成新的一次出現）
+    var goneAfterMisses = 2
+    var maxLongEdge = 640
+    var bottomFraction = 0.50
+    var minimumTextHeight = 0.02
+    var memoryAlertMB: Double = 40
+    var refreshSeconds: TimeInterval = 600
+    /// 接單鈕正則、分鐘/金額規則（PickerConfig）、回報白名單關鍵字
+    var rules = ScreenRules.standard
+    var version = "default"
+
+    init() {}
+
+    init(root: [String: Any]) {
+      let d = RemoteConfig.section(root, "detector")
+      ocrInterval = RemoteConfig.number(d["ocrIntervalSeconds"], 0.5, 10, ocrInterval)
+      idleOcrInterval = RemoteConfig.number(d["idleOcrIntervalSeconds"], 0.5, 30, idleOcrInterval)
+      idleAfterMisses = RemoteConfig.int(d["idleAfterMisses"], 1, 100, idleAfterMisses)
+      forceOcrInterval = RemoteConfig.number(d["forceOcrSeconds"], 1, 120, forceOcrInterval)
+      sameFrameMaxBits = RemoteConfig.int(d["sameFrameMaxBits"], 0, 1000, sameFrameMaxBits)
+      heartbeatInterval = RemoteConfig.int(d["heartbeatSeconds"], 15, 600, heartbeatInterval)
+      dedupeWindow = RemoteConfig.number(d["dedupeSeconds"], 0, 3600, dedupeWindow)
+      goneAfterMisses = RemoteConfig.int(d["goneAfterMisses"], 1, 20, goneAfterMisses)
+      maxLongEdge = RemoteConfig.int(d["maxLongEdge"], 320, 1600, maxLongEdge)
+      bottomFraction = RemoteConfig.number(d["bottomFraction"], 0.2, 1, bottomFraction)
+      minimumTextHeight = RemoteConfig.number(d["minimumTextHeight"], 0, 0.2, minimumTextHeight)
+      memoryAlertMB = RemoteConfig.number(d["memoryAlertMB"], 10, 100, memoryAlertMB)
+      refreshSeconds = RemoteConfig.refreshSeconds(root)
+      rules.picker = PickerConfig(json: RemoteConfig.section(root, "picker"))
+      rules.acceptPattern = RemoteConfig.regex(d["acceptPattern"], groups: 0, rules.acceptPattern)
+      if let rows = RemoteConfig.telemetry(root).keywords { rules.keywords = rows }
+      version = RemoteConfig.version(root)
+    }
+  }
 
   // MARK: - 狀態
   private let workQueue = DispatchQueue(label: "com.pandatimer.broadcast.work", qos: .userInitiated)
   private let lock = NSLock()
   private let ocr = FrameOCR()
   private var heartbeatTimer: DispatchSourceTimer?
+  /// v0.6 遠端設定（broadcastStarted 與每 refreshSeconds 抓一次；逾時 3 秒；失敗用快取或預設）
+  private let remote = RemoteConfig()
+  private var lastConfigFetch: Date?  // 只在 workQueue
   /// v0.6 遠端狀態回報（只送結構化欄位，見 PandaTelemetry.swift 的隱私鐵律）
   private let telemetry = PandaTelemetry(source: "ext")
 
@@ -103,6 +137,7 @@ final class BroadcastDetector {
   private var imageFailures = 0
   private var badFormat: OSType?
   private var currentInterval: CFAbsoluteTime = 1.5
+  private var settings = DetectorSettings()
 
   // 只在 workQueue 存取
   private var ocrCount = 0
@@ -133,7 +168,15 @@ final class BroadcastDetector {
 
   func start() {
     PandaSignal.post(PandaSignal.started)
+    // 先套上次快取的遠端設定（沒有就預設），再背景抓最新的
+    let initial = DetectorSettings(root: remote.snapshot())
+    lock.lock()
+    settings = initial
+    currentInterval = initial.ocrInterval
+    lock.unlock()
     workQueue.async {
+      self.applyConfig(self.remote.snapshot())
+      self.refreshConfig()
       if let previous = RunRecord.reportPreviousIfCrashed() {
         self.telemetry.log("crashPrev", ["note": previous], urgent: true)
       }
@@ -143,8 +186,8 @@ final class BroadcastDetector {
     }
     let timer = DispatchSource.makeTimerSource(queue: workQueue)
     timer.schedule(
-      deadline: .now() + .seconds(heartbeatInterval),
-      repeating: .seconds(heartbeatInterval),
+      deadline: .now() + .seconds(initial.heartbeatInterval),
+      repeating: .seconds(initial.heartbeatInterval),
       leeway: .seconds(5))
     timer.setEventHandler { [weak self] in
       self?.heartbeat()
@@ -176,17 +219,64 @@ final class BroadcastDetector {
     _ = sent.wait(timeout: .now() + 0.5)
   }
 
-  /// 每 60 秒：心跳給 App；記錄本輪診斷（被系統殺掉時下次開始會回報）；峰值 >40MB 發靜音通知
+  /// 每 60 秒（遠端可調）：心跳給 App；記錄本輪診斷（被系統殺掉時下次開始會回報）；峰值超過門檻發靜音通知；
+  /// 每 refreshSeconds 重抓一次遠端設定
   private func heartbeat() {
     PandaSignal.post(PandaSignal.heartbeat)
     sampleMemory()
     let text = diag()
     RunRecord.save(diag: text, finished: false)
     telemetry.log("beat", statsFields())
-    if peakMB > memoryAlertMB && peakMB >= alertedPeakMB + 3 {
+    let s = currentSettings()
+    if peakMB > s.memoryAlertMB && peakMB >= alertedPeakMB + 3 {
       alertedPeakMB = peakMB
+      let limit = Int(s.memoryAlertMB)
       Task.detached {
-        await Notifier.post("偵測記憶體偏高", "峰值超過 40MB（上限約 50MB，超過會被系統關掉）\n\(text)", passive: true)
+        await Notifier.post("偵測記憶體偏高", "峰值超過 \(limit)MB（上限約 50MB，超過會被系統關掉）\n\(text)", passive: true)
+      }
+    }
+    if lastConfigFetch.map({ Date().timeIntervalSince($0) >= s.refreshSeconds }) ?? true { refreshConfig() }
+  }
+
+  // MARK: - 遠端設定（只在 workQueue）
+
+  private func currentSettings() -> DetectorSettings {
+    lock.lock()
+    defer { lock.unlock() }
+    return settings
+  }
+
+  private func applyConfig(_ root: [String: Any]) {
+    let next = DetectorSettings(root: root)
+    lock.lock()
+    let old = settings
+    settings = next
+    if currentInterval == old.ocrInterval || currentInterval == old.idleOcrInterval {
+      currentInterval = missStreak >= next.idleAfterMisses ? next.idleOcrInterval : next.ocrInterval
+    }
+    lock.unlock()
+    ocr.setMinimumTextHeight(Float(next.minimumTextHeight))
+    let t = RemoteConfig.telemetry(root)
+    telemetry.configure(flushSeconds: t.flushSeconds, batchSize: t.batchSize)
+    telemetry.setContext(["cfg": next.version])
+    if old.heartbeatInterval != next.heartbeatInterval, let timer = heartbeatTimer {
+      timer.schedule(
+        deadline: .now() + .seconds(next.heartbeatInterval), repeating: .seconds(next.heartbeatInterval),
+        leeway: .seconds(5))
+    }
+  }
+
+  private func refreshConfig() {
+    lastConfigFetch = Date()
+    remote.refresh(timeout: 3) { [weak self] changed in
+      guard let self = self else { return }
+      self.workQueue.async {
+        if changed {
+          self.applyConfig(self.remote.snapshot())
+          self.telemetry.log("config", ["cfg": self.remote.version, "note": "updated"], urgent: true)
+        } else if let err = self.remote.error {
+          self.telemetry.log("config", ["cfg": self.remote.version, "reason": err])
+        }
       }
     }
   }
@@ -197,6 +287,7 @@ final class BroadcastDetector {
     let now = CFAbsoluteTimeGetCurrent()
     lock.lock()
     framesReceived += 1
+    let s = settings
     let shouldCheck = !busy && now - lastCheckStart >= currentInterval
     if shouldCheck {
       busy = true
@@ -210,7 +301,7 @@ final class BroadcastDetector {
     var format: OSType?
     autoreleasepool {
       (made, format) = GrayFrame.make(
-        sampleBuffer, bottomFraction: bottomFraction, maxLongEdge: maxLongEdge)
+        sampleBuffer, bottomFraction: s.bottomFraction, maxLongEdge: s.maxLongEdge)
     }
     guard let frame = made else {
       lock.lock()
@@ -222,8 +313,8 @@ final class BroadcastDetector {
     }
 
     lock.lock()
-    let same = lastHash.map { GrayFrame.distance($0, frame.hash) <= sameFrameMaxBits } ?? false
-    if same && now - lastOcrAt < forceOcrInterval {
+    let same = lastHash.map { GrayFrame.distance($0, frame.hash) <= s.sameFrameMaxBits } ?? false
+    if same && now - lastOcrAt < s.forceOcrInterval {
       skipped += 1
       busy = false
       lock.unlock()
@@ -245,6 +336,7 @@ final class BroadcastDetector {
 
   private func runOCR(_ frame: GrayFrame) {
     // OCR 原文只活在這個函式內：立刻轉成結構化摘要（ScreenInfo），之後只用摘要（隱私鐵律：原文不上傳、不保存）
+    let s = currentSettings()
     let info: ScreenInfo.Summary
     do {
       guard let image = frame.cgImage() else {
@@ -252,7 +344,7 @@ final class BroadcastDetector {
         return
       }
       let ocrText = try ocr.recognize(image, orientation: frame.orientation)
-      info = ScreenInfo.analyze(ocrText)
+      info = ScreenInfo.analyze(ocrText, rules: s.rules)
     } catch {
       ocrErrors += 1
       return
@@ -261,7 +353,7 @@ final class BroadcastDetector {
     sampleMemory()
     lastSawAccept = info.accept
     missStreak = info.accept ? 0 : missStreak + 1
-    let interval = missStreak >= idleAfterMisses ? idleOcrInterval : ocrInterval
+    let interval = missStreak >= s.idleAfterMisses ? s.idleOcrInterval : s.ocrInterval
     lock.lock()
     currentInterval = interval
     lock.unlock()
@@ -270,7 +362,7 @@ final class BroadcastDetector {
     // v0.6 邊緣觸發：接單鈕「從沒有變成有」才算一次新單出現，同一次出現期間只觸發一次；
     // 出現期間若分鐘數/金額變了（直接換成另一張邀請）也算新單。連續 goneAfterMisses 次沒看到接單鈕＝這次出現結束。
     guard info.accept else {
-      if missStreak >= goneAfterMisses { appearanceKey = nil }
+      if missStreak >= s.goneAfterMisses { appearanceKey = nil }
       return
     }
     guard let minutes = info.minutes else { return }  // 有接單鈕但還挑不出分鐘數（畫面還在動畫）→ 等下一次 OCR
@@ -279,7 +371,7 @@ final class BroadcastDetector {
     appearanceKey = key
 
     let now = Date()
-    recentKeys.removeAll { now.timeIntervalSince($0.at) >= dedupeWindow }
+    recentKeys.removeAll { now.timeIntervalSince($0.at) >= s.dedupeWindow }
     if recentKeys.contains(where: { $0.key == key }) {
       // 90 秒內同一組（分鐘數, 金額）→ 同一張邀請（切 App 回來還在）
       dupCount += 1
@@ -382,6 +474,7 @@ final class BroadcastDetector {
       "間隔\(currentIntervalText())s",
     ]
     if triggerCount > 0, let m = lastTriggerMinutes { parts.append("觸發\(triggerCount)(\(m)分)") }
+    parts.append("設定 \(currentSettings().version)")
     if ocrErrors + fails > 0 { parts.append("錯\(ocrErrors)/\(fails)") }
     if let f = format { parts.append("格式\(String(format: "%08X", f))") }
     return parts.joined(separator: " · ")
@@ -543,6 +636,11 @@ final class FrameOCR {
     r.minimumTextHeight = 0.02
     return r
   }()
+
+  /// v0.6 遠端設定 detector.minimumTextHeight；只在 workQueue 呼叫
+  func setMinimumTextHeight(_ value: Float) {
+    if request.minimumTextHeight != value { request.minimumTextHeight = value }
+  }
 
   /// 只在 workQueue 呼叫（request 不是執行緒安全的）
   func recognize(_ image: CGImage, orientation: CGImagePropertyOrientation) throws -> String {

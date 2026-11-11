@@ -69,7 +69,8 @@
     ],
     "extra": {
       "telemetryKey": "4QaC9xUMnxSiRSkQSQEKU-mWWzHsPBSZ6pZar8XVEjs",
-      "telemetryUrl": "https://wheat.yueshengift.xyz/pandatimer/api/telemetry"
+      "telemetryUrl": "https://wheat.yueshengift.xyz/pandatimer/api/telemetry",
+      "configUrl": "https://wheat.yueshengift.xyz/pandatimer/api/config"
     }
   }
 }

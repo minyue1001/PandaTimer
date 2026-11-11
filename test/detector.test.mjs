@@ -89,7 +89,7 @@ test('parseDetectorStatus：容錯', () => {
   assert.equal(parseDetectorStatus('not json'), null);
   assert.equal(parseDetectorStatus('[]'), null);
   const s = parseDetectorStatus(JSON.stringify({ armed: true, keepAlive: '音訊中', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2 }));
-  assert.deepEqual(s, { armed: true, keepAlive: '音訊中', keepAliveMode: 'none', locationAuth: 'unknown', keepAliveError: undefined, lastFixAt: null, islandCheck: '', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2, telemetryLastOk: null, telemetryPending: 0, telemetryError: undefined });
+  assert.deepEqual(s, { armed: true, keepAlive: '音訊中', keepAliveMode: 'none', locationAuth: 'unknown', keepAliveError: undefined, lastFixAt: null, islandCheck: '', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2, telemetryLastOk: null, telemetryPending: 0, telemetryError: undefined, configVersion: 'default' });
   const v5 = parseDetectorStatus(JSON.stringify({ armed: true, keepAlive: '定位中', keepAliveMode: 'location', locationAuth: 'whenInUse', lastFixAt: 5000, islandCheck: '動態島：已更新✓（背景）' }));
   assert.equal(v5.keepAliveMode, 'location');
   assert.equal(v5.locationAuth, 'whenInUse');
@@ -135,6 +135,7 @@ test('v0.6：telemetryLine 顯示最後成功時間／待送／錯誤', () => {
   const ok = new Date(2026, 10, 12, 9, 5, 7).getTime();
   assert.equal(telemetryLine({ ...base, telemetryLastOk: ok }), '回報：最後成功 09:05:07');
   assert.equal(telemetryLine({ ...base, telemetryLastOk: ok, telemetryPending: 3, telemetryError: 'HTTP 429' }), '回報：最後成功 09:05:07（待送 3）・HTTP 429');
+  assert.equal(telemetryLine({ ...base, telemetryLastOk: ok, configVersion: '2026-11-12.1' }), '回報：最後成功 09:05:07・設定 2026-11-12.1');
 });
 
 test('v0.6：extension 通知 userInfo（偵測時間＋序號）與 App 端讀法一致；鏡像鍵名一致', async () => {
@@ -163,6 +164,7 @@ test('v0.6：app.json 背景模式／定位說明／runtimeVersion 與 OtaBox �
   assert.match(app.extra.telemetryUrl, /^https:\/\/.+\/api\/telemetry$/);
   assert.ok(app.plugins.includes('./plugins/withTelemetry'));
   assert.equal(app.extra.telemetryReadKey, undefined);
+  assert.match(app.extra.configUrl, /^https:\/\/.+\/api\/config$/);
   const ota = fs.readFileSync(new URL('../src/OtaBox.tsx', import.meta.url), 'utf8');
   assert.ok(ota.includes(`const APP_VERSION = '${app.runtimeVersion}'`));
   // 零 entitlement：app.json 不得出現 entitlements 設定

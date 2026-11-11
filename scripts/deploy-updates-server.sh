@@ -7,6 +7,8 @@
 # 會做：上傳 server/ 與私鑰到 /opt/pandatimer-updates → 系統帳號 pandatimer → systemd pandatimer-updates
 #       → v0.6：兩把回報金鑰（本機 ~/.config/pandatimer/telemetry-{write,read}-key）寫成遠端 server.env（600），
 #         systemd 用 EnvironmentFile 讀；回報資料寫 /opt/pandatimer-updates/telemetry（ReadWritePaths）
+#       → v0.6：遠端設定 /opt/pandatimer-updates/config.json **不存在才**用 server/config.default.json 建立（已存在不覆蓋；
+#         之後改設定用 scripts/push-config.sh）
 #       → nginx 在 listen 443 的 wheat.yueshengift.xyz server 區塊插入 location ^~ /pandatimer/
 #       → 驗證既有站台狀態碼不變、服務都 active、/api/telemetry 金鑰錯回 401／讀取金鑰回 200；
 #         任一失敗自動回滾（還原 nginx；重跑時換回上一版程式＋server.env＋unit 並重啟，首次部署則停用服務）。
@@ -246,6 +248,14 @@ cmd_install() {
   chmod 600 "$BASE/server.env"
   chown -R root:root "$BASE/server"
   chmod -R u=rwX,go=rX "$BASE/server"
+  # 遠端設定：不存在才建立（push-config.sh 推上來的設定不能被部署蓋掉）
+  if [[ ! -f "$BASE/config.json" ]]; then
+    [[ -f "$BASE/server/config.default.json" ]] || die "缺 $BASE/server/config.default.json"
+    install -m 644 -o root -g root "$BASE/server/config.default.json" "$BASE/config.json"
+    say "• 已建立遠端設定 $BASE/config.json（來自 config.default.json）"
+  else
+    say "• 遠端設定 $BASE/config.json 已存在，不覆蓋"
+  fi
   if [[ -s "$BASE/keys/private-key.pem.new" ]]; then mv -f "$BASE/keys/private-key.pem.new" "$BASE/keys/private-key.pem"; fi
   [[ -s "$BASE/keys/private-key.pem" ]] || die "私鑰 $BASE/keys/private-key.pem 不存在"
   chown pandatimer:pandatimer "$BASE/keys/private-key.pem"
@@ -269,6 +279,7 @@ Environment=UPDATES_DIR=$BASE/updates
 Environment=PRIVATE_KEY_PATH=$BASE/keys/private-key.pem
 Environment=PUBLIC_URL=$PUBLIC_URL
 Environment=TELEMETRY_DIR=$BASE/telemetry
+Environment=CONFIG_PATH=$BASE/config.json
 EnvironmentFile=$BASE/server.env
 ExecStart=$NODE_BIN $BASE/server/index.mjs
 Restart=on-failure
@@ -381,6 +392,9 @@ cmd_verify() {
   local m
   m="$(curl -s --max-time 15 -H 'expo-platform: ios' -H 'expo-runtime-version: deploy-check' -H 'expo-protocol-version: 1' "https://$DOMAIN/pandatimer/api/manifest" </dev/null || true)"
   if [[ "$m" == *'"noUpdateAvailable"'* ]]; then say '@@manifest ok'; else say '@@manifest bad'; fi
+  # v0.6 遠端設定（公開）：經 nginx 回 JSON 且有 version
+  m="$(curl -s --max-time 15 "https://$DOMAIN/pandatimer/api/config" </dev/null || true)"
+  if [[ "$m" == *'"version"'* && "$m" == *'"picker"'* ]]; then say '@@config ok'; else say '@@config bad'; fi
   # v0.6 回報端點（經 nginx）：錯誤寫入金鑰 → 401；讀取金鑰（從 server.env 讀，經 600 暫存檔給 curl，不進指令列）→ 200
   printf '@@tele_bad %s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST -H 'x-pt-key: deploy-check-wrong-key' \
     -H 'content-type: application/json' --data '{"ev":"deploy-check"}' "https://$DOMAIN/pandatimer/api/telemetry" </dev/null || true)"
@@ -444,7 +458,10 @@ trap on_exit EXIT
 # ---------------------------------------------------------------- 1. 本機檢查
 echo "== 1/5 本機檢查"
 cd "$REPO"
-[[ -f "$REPO/server/index.mjs" && -f "$REPO/server/certs/certificate.pem" ]] || fail "缺 server/index.mjs 或 server/certs/certificate.pem"
+[[ -f "$REPO/server/index.mjs" && -f "$REPO/server/certs/certificate.pem" && -f "$REPO/server/config.default.json" ]] \
+  || fail "缺 server/index.mjs、server/certs/certificate.pem 或 server/config.default.json"
+node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(!c||typeof c.version!=="string") process.exit(1)' "$REPO/server/config.default.json" \
+  || fail "server/config.default.json 不是合法 JSON 或缺 version"
 node --check "$REPO/server/index.mjs" || fail "server/index.mjs 語法錯誤"
 [[ -f "$LOCAL_KEY" ]] || fail "找不到私鑰 $LOCAL_KEY"
 [[ "$(stat -c %a "$LOCAL_KEY")" == "600" ]] || fail "私鑰權限應為 600：$LOCAL_KEY"
@@ -482,7 +499,8 @@ if (( DRY_RUN )); then
   cat <<EOF
 
 == DRY RUN：以下動作「不會」執行，只是預告 ==
-  1. 打包 $REPO/server/{index.mjs,certs/certificate.pem,README.md} → $REMOTE:$BASE/server（舊版移到 server.prev）
+  1. 打包 $REPO/server/{index.mjs,config.default.json,certs/certificate.pem,README.md} → $REMOTE:$BASE/server（舊版移到 server.prev）
+     遠端設定 $BASE/config.json 不存在才由 config.default.json 建立（已存在不動；改設定用 scripts/push-config.sh）
   2. 上傳私鑰 $LOCAL_KEY → $REMOTE:$BASE/keys/private-key.pem（600，owner pandatimer）
      上傳回報金鑰（$WRITE_KEY_FILE、$READ_KEY_FILE）→ $REMOTE:$BASE/server.env（600，root）
   3. 若無則建立系統帳號 pandatimer；$BASE/updates、$BASE/keys、$BASE/telemetry 給 pandatimer；上一版程式/server.env/unit 留作回滾
@@ -490,7 +508,7 @@ if (( DRY_RUN )); then
      ReadWritePaths=$BASE/telemetry、Restart=on-failure）→ enable + restart → 驗 /api/health、/api/telemetry 錯誤金鑰 401
   5. nginx：$( [[ "$NGINX_STATE" == "already" ]] && echo "已含 /pandatimer/，不改" || echo "備份到 $BACKUP_DIR/$SITE_NAME.$TS → 插入上方 diff 的 location → nginx -t → reload（失敗即還原）" )
   6. 驗證：/、/wheat/、/wheat/admin/ 狀態碼與改前一致；$PUBLIC_URL/api/health = ok；
-     manifest 經 nginx 回 noUpdateAvailable；/api/telemetry 經 nginx：錯誤金鑰 401、讀取金鑰 200；
+     manifest 經 nginx 回 noUpdateAvailable；/api/config 回 JSON；/api/telemetry 經 nginx：錯誤金鑰 401、讀取金鑰 200；
      nginx / wheat-server@a / $SVC 皆 active；wheat-tw-tunnel 狀態不變
      任一失敗 → 還原 nginx；有上一版就換回並重啟，否則停用 $SVC；非零退出
 ✅ dry-run 完成（未改動任何東西）
@@ -501,7 +519,7 @@ fi
 # ---------------------------------------------------------------- 3. 上傳
 STAGE="upload"
 echo "== 3/5 上傳程式與私鑰"
-tar -C "$REPO/server" --owner=0 --group=0 -czf - index.mjs certs/certificate.pem README.md \
+tar -C "$REPO/server" --owner=0 --group=0 -czf - index.mjs config.default.json certs/certificate.pem README.md \
   | "${SSH[@]}" "set -euo pipefail; install -d -m 755 $BASE; rm -rf $BASE/server.incoming; install -d -m 755 $BASE/server.incoming; tar -xzf - -C $BASE/server.incoming --no-same-owner"
 "${SSH[@]}" "set -euo pipefail; umask 077; install -d -m 700 $BASE/keys; cat > $BASE/keys/private-key.pem.new" < "$LOCAL_KEY"
 "${SSH[@]}" "set -euo pipefail; umask 077; cat > $BASE/server.env.new" < "$ENV_FILE"
@@ -533,6 +551,7 @@ if [[ "$st" == "$TUNNEL_BEFORE" ]]; then echo "• wheat-tw-tunnel：$TUNNEL_BEF
 h="$(awk '$1=="@@health"{print $2}' "$POST_OUT")"
 if [[ "$h" == "ok" ]]; then echo "• $PUBLIC_URL/api/health = ok ✓"; else echo "• $PUBLIC_URL/api/health = '$h' ✗"; bad=1; fi
 if grep -q '^@@manifest ok' "$POST_OUT"; then echo "• manifest 經 nginx → noUpdateAvailable ✓"; else echo "• manifest 經 nginx 異常 ✗"; bad=1; fi
+if grep -q '^@@config ok' "$POST_OUT"; then echo "• /api/config 經 nginx → JSON（有 version）✓"; else echo "• /api/config 經 nginx 異常 ✗"; bad=1; fi
 tb="$(awk '$1=="@@tele_bad"{print $2}' "$POST_OUT")"; tr_="$(awk '$1=="@@tele_read"{print $2}' "$POST_OUT")"
 if [[ "$tb" == "401" ]]; then echo "• /api/telemetry 錯誤金鑰 → 401 ✓"; else echo "• /api/telemetry 錯誤金鑰 → '$tb' ✗"; bad=1; fi
 if [[ "$tr_" == "200" ]]; then echo "• /api/telemetry 讀取金鑰 → 200 ✓"; else echo "• /api/telemetry 讀取金鑰 → '$tr_' ✗"; bad=1; fi

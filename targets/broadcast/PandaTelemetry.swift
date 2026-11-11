@@ -33,7 +33,7 @@ final class PandaTelemetry {
     "seq", "gap", "frames", "ocr", "skip", "fails", "errs", "memMB", "peakMB",
     "accept", "min", "amt", "km", "kw", "screen", "interval", "triggers", "dups",
     "island", "islandErr", "keep", "auth", "fg", "orders", "others", "susp",
-    "note", "code", "sent", "dropped", "beatAge", "reason",
+    "note", "code", "sent", "dropped", "beatAge", "reason", "cfg",
   ]
 
   private let endpoint: URL?
@@ -48,6 +48,9 @@ final class PandaTelemetry {
   private var sending = false
   private var waiters: [() -> Void] = []
   private var timer: DispatchSourceTimer?
+  /// v0.6 遠端設定可調（telemetry.flushSeconds / batchSize）；預設＝上面的 static 值
+  private var flushEvery = PandaTelemetry.flushInterval
+  private var batchLimit = PandaTelemetry.batchSize
   private var session: URLSession?
   private var backoffUntil: Date?
   private var minuteStart = Date()
@@ -111,6 +114,19 @@ final class PandaTelemetry {
     }
   }
 
+  /// 遠端設定：批次秒數與筆數（超出範圍的值已由 RemoteConfig 換成預設）
+  func configure(flushSeconds: Int, batchSize: Int) {
+    queue.async {
+      let changed = flushSeconds != self.flushEvery
+      self.flushEvery = max(5, flushSeconds)
+      self.batchLimit = max(1, min(Self.maxPerPost, batchSize))
+      if changed, let t = self.timer {
+        t.schedule(
+          deadline: .now() + .seconds(self.flushEvery), repeating: .seconds(self.flushEvery), leeway: .seconds(5))
+      }
+    }
+  }
+
   /// 記一筆事件。urgent：新單/錯誤 → 立即送
   func log(_ event: String, _ fields: [String: Any] = [:], urgent: Bool = false) {
     guard isEnabled else { return }
@@ -135,7 +151,7 @@ final class PandaTelemetry {
       self.buffer.append(record)
       self.trim()
       self.ensureTimer()
-      if urgent || self.buffer.count >= Self.batchSize { self.send(force: urgent) }
+      if urgent || self.buffer.count >= self.batchLimit { self.send(force: urgent) }
       self.publish()
     }
   }
@@ -177,8 +193,7 @@ final class PandaTelemetry {
   private func ensureTimer() {
     guard timer == nil else { return }
     let t = DispatchSource.makeTimerSource(queue: queue)
-    t.schedule(
-      deadline: .now() + .seconds(Self.flushInterval), repeating: .seconds(Self.flushInterval), leeway: .seconds(5))
+    t.schedule(deadline: .now() + .seconds(flushEvery), repeating: .seconds(flushEvery), leeway: .seconds(5))
     t.setEventHandler { [weak self] in self?.send(force: false) }
     t.resume()
     timer = t
@@ -249,7 +264,7 @@ final class PandaTelemetry {
     }
     publish()
     let ok = (200..<300).contains(code)
-    if ok && !buffer.isEmpty && (!waiters.isEmpty || buffer.count >= Self.batchSize) {
+    if ok && !buffer.isEmpty && (!waiters.isEmpty || buffer.count >= batchLimit) {
       send(force: !waiters.isEmpty)
     } else {
       finishWaiters()

@@ -42,7 +42,8 @@ struct StartFromScreenshotIntent: LiveActivityIntent {
     } catch {
       throw PandaIntentError("截圖辨識失敗，請在 App 內手動開始")
     }
-    guard let minutes = MinutePicker.pick(text) else {
+    // v0.6：規則用遠端設定的快取（DetectorHub 在 App 程序抓 /api/config 後寫入），沒有就用預設
+    guard let minutes = MinutePicker.pick(text, config: PickerConfig.cached()) else {
       throw PandaIntentError("找不到分鐘數，請在 App 內手動開始")
     }
 

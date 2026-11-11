@@ -73,6 +73,7 @@ jobs:
             diff -u native/intents/DetectorCardPlan.swift "$f" || { echo "::error file=$f::DetectorCardPlan.swift 各份不一致"; exit 1; }
           done
           diff -u modules/live-activity/ios/PandaTelemetry.swift targets/broadcast/PandaTelemetry.swift || { echo "::error::PandaTelemetry.swift 兩份不一致"; exit 1; }
+          diff -u modules/live-activity/ios/RemoteConfig.swift targets/broadcast/RemoteConfig.swift || { echo "::error::RemoteConfig.swift 兩份不一致"; exit 1; }
           if grep -rn 'import ActivityKit' targets/broadcast; then echo "::error::broadcast extension 不得 import ActivityKit（v0.3 實測不可用）"; exit 1; fi
 
       # v0.6 遠端狀態回報：寫入金鑰在 app.json extra.telemetryKey（plugins/withTelemetry.js 寫進 Info.plist）
@@ -82,6 +83,7 @@ jobs:
             const e = require("./app.json").expo.extra || {};
             if (!/^[A-Za-z0-9_-]{32,}$/.test(e.telemetryKey || "")) { console.log("::error::app.json 缺 extra.telemetryKey（base64url ≥32 字）"); process.exit(1); }
             if (!/^https:\/\/.+\/api\/telemetry$/.test(e.telemetryUrl || "")) { console.log("::error::app.json extra.telemetryUrl 不對"); process.exit(1); }
+            if (!/^https:\/\/.+\/api\/config$/.test(e.configUrl || "")) { console.log("::error::app.json extra.configUrl 不對（遠端設定）"); process.exit(1); }
             console.log("telemetryKey OK（長度 " + e.telemetryKey.length + "），url " + e.telemetryUrl);
           '
 
@@ -121,6 +123,7 @@ jobs:
           TK=$(/usr/libexec/PlistBuddy -c 'Print :PandaTelemetryKey' "$PL")
           [ "$TK" = "$(node -p "require('./app.json').expo.extra.telemetryKey")" ] || { echo "::error::Info.plist PandaTelemetryKey 與 app.json 不一致"; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :PandaTelemetryURL' "$PL" | grep -q '^https://' || { echo "::error::Info.plist 缺 PandaTelemetryURL"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :PandaConfigURL' "$PL" | grep -q '^https://' || { echo "::error::Info.plist 缺 PandaConfigURL（遠端設定）"; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :PandaRuntimeVersion' "$PL"
           RV=$(/usr/libexec/PlistBuddy -c 'Print :EXUpdatesRuntimeVersion' ios/PandaTimer/Supporting/Expo.plist)
           WANT=$(node -p "require('./app.json').expo.runtimeVersion")
@@ -210,6 +213,8 @@ jobs:
           done
           /usr/libexec/PlistBuddy -c 'Print :PandaTelemetryURL' "$APP/Info.plist" | grep -q '^https://' \
             || { echo "::error::打包後主 App 缺 PandaTelemetryURL（遠端回報會停用）"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :PandaConfigURL' "$APP/Info.plist" | grep -q '^https://' \
+            || { echo "::error::打包後主 App 缺 PandaConfigURL（遠端設定會停用）"; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :PandaTelemetryKey' "$APP/Info.plist" | grep -q . \
             || { echo "::error::打包後主 App 缺 PandaTelemetryKey"; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"

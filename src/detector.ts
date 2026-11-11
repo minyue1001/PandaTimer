@@ -82,6 +82,8 @@ export type DetectorStatus = {
   telemetryLastOk: number | null;
   telemetryPending: number;
   telemetryError?: string;
+  /** v0.6 遠端設定版本（GET /api/config 的 version；沒抓過 → "default"） */
+  configVersion: string;
 };
 
 const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
@@ -113,6 +115,7 @@ export function parseDetectorStatus(raw: unknown): DetectorStatus | null {
     telemetryLastOk: num(o.telemetryLastOk),
     telemetryPending: num(o.telemetryPending) ?? 0,
     telemetryError: typeof o.telemetryError === 'string' ? o.telemetryError : undefined,
+    configVersion: typeof o.configVersion === 'string' ? o.configVersion : 'default',
   };
 }
 
@@ -149,5 +152,6 @@ export function telemetryLine(status: DetectorStatus | null): string | null {
   }
   if (status.telemetryPending > 0) text += `（待送 ${status.telemetryPending}）`;
   if (status.telemetryError) text += `・${status.telemetryError.slice(0, 40)}`;
+  if (status.configVersion && status.configVersion !== 'default') text += `・設定 ${status.configVersion}`;
   return text;
 }

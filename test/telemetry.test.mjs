@@ -47,12 +47,14 @@ test('withTelemetry plugin：從 extra 寫進 Info.plist、缺值就報錯', asy
   };
   const config = {
     name: 'x', slug: 'x', runtimeVersion: '0.6',
-    extra: { telemetryKey: 'k'.repeat(43), telemetryUrl: 'https://example.com/pandatimer/api/telemetry' },
+    extra: { telemetryKey: 'k'.repeat(43), telemetryUrl: 'https://example.com/pandatimer/api/telemetry', configUrl: 'https://example.com/pandatimer/api/config' },
   };
   const plist = await run(config);
   assert.equal(plist.PandaTelemetryKey, 'k'.repeat(43));
   assert.equal(plist.PandaTelemetryURL, 'https://example.com/pandatimer/api/telemetry');
   assert.equal(plist.PandaRuntimeVersion, '0.6');
+  assert.equal(plist.PandaConfigURL, 'https://example.com/pandatimer/api/config');
+  await assert.rejects(run({ ...config, extra: { ...config.extra, configUrl: undefined } }), /configUrl/);
   await assert.rejects(run({ ...config, extra: {} }), /telemetryKey/);
   await assert.rejects(run({ ...config, extra: { ...config.extra, telemetryUrl: 'http://x' } }), /https/);
 });

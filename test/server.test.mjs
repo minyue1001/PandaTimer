@@ -32,6 +32,7 @@ async function startServer(extraEnv = {}) {
       TELEMETRY_DIR: path.join(tmp, 'telemetry'),
       TELEMETRY_WRITE_KEY: WRITE_KEY,
       TELEMETRY_READ_KEY: READ_KEY,
+      CONFIG_PATH: path.join(tmp, 'config.json'),
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -220,4 +221,65 @@ test('沒設金鑰 → /api/telemetry 503，其他端點照常', async () => {
   const r = await fetch(`${off}/api/telemetry`, { method: 'POST', headers: { 'x-pt-key': 'x' }, body: '{}' });
   assert.equal(r.status, 503);
   assert.equal(await (await fetch(`${off}/api/health`)).text(), 'ok');
+});
+
+// ---------- v0.6 遠端設定 /api/config ----------
+const DEFAULT_CFG = JSON.parse(fs.readFileSync(new URL('../server/config.default.json', import.meta.url), 'utf8'));
+const cfgPath = () => path.join(tmp, 'config.json');
+
+test('config：檔案不存在 → 內建預設（config.default.json）＋ETag＋Cache-Control 60 秒；If-None-Match → 304', async () => {
+  fs.rmSync(cfgPath(), { force: true });
+  const r = await fetch(`${base}/api/config`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('cache-control'), 'public, max-age=60');
+  assert.equal(r.headers.get('x-config-source'), 'builtin');
+  const etag = r.headers.get('etag');
+  assert.match(etag, /^".+"$/);
+  const body = await r.json();
+  assert.deepEqual(body, DEFAULT_CFG);
+  assert.equal(body.picker.ratePerMinute, 4.08355);
+  const again = await fetch(`${base}/api/config`, { headers: { 'if-none-match': etag } });
+  assert.equal(again.status, 304);
+  // 公開：不需要任何金鑰；HEAD 也可以
+  assert.equal((await fetch(`${base}/api/config`, { method: 'HEAD' })).status, 200);
+});
+
+test('config：檔案只寫部分欄位 → 其餘用內建預設補齊；改檔立即生效、ETag 變', async () => {
+  const before = (await fetch(`${base}/api/config`)).headers.get('etag');
+  fs.writeFileSync(cfgPath(), JSON.stringify({ version: 'test-2', picker: { ratePerMinute: 5 }, detector: { dedupeSeconds: 120 } }));
+  const r = await fetch(`${base}/api/config`);
+  assert.equal(r.headers.get('x-config-source'), 'file');
+  assert.notEqual(r.headers.get('etag'), before);
+  const body = await r.json();
+  assert.equal(body.version, 'test-2');
+  assert.equal(body.picker.ratePerMinute, 5);
+  assert.equal(body.picker.minFare, DEFAULT_CFG.picker.minFare);
+  assert.equal(body.picker.minutePattern, DEFAULT_CFG.picker.minutePattern);
+  assert.equal(body.detector.dedupeSeconds, 120);
+  assert.equal(body.detector.ocrIntervalSeconds, DEFAULT_CFG.detector.ocrIntervalSeconds);
+  assert.deepEqual(body.telemetry, DEFAULT_CFG.telemetry);
+});
+
+test('config：檔案壞掉（不是 JSON 物件）→ 回內建預設、不當機', async () => {
+  fs.writeFileSync(cfgPath(), '{ this is not json, longer than before to change size');
+  const r = await fetch(`${base}/api/config`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-config-source'), 'builtin');
+  assert.equal((await r.json()).version, DEFAULT_CFG.version);
+  fs.writeFileSync(cfgPath(), '[1,2,3]');
+  assert.equal((await fetch(`${base}/api/config`)).headers.get('x-config-source'), 'builtin');
+});
+
+test('config：遠端設定新增的回報關鍵字，伺服器白名單也收', async () => {
+  const cfg = structuredClone(DEFAULT_CFG);
+  cfg.version = 'test-kw';
+  cfg.telemetry.keywords.push(['新按鈕', '新按钮']);
+  fs.writeFileSync(cfgPath(), JSON.stringify(cfg));
+  assert.equal((await (await fetch(`${base}/api/config`)).json()).version, 'test-kw');
+  const r = await post([{ src: 'ext', dev: 'kw', ev: 'screen', kw: ['新按鈕', '接受訂單', '店名不該進來'] }]);
+  assert.equal(r.status, 200);
+  const data = await (await get(`?date=${today()}&limit=5000`)).json();
+  const rec = data.records.filter((x) => x.dev === 'kw').pop();
+  assert.deepEqual(rec.kw, ['新按鈕', '接受訂單']);
+  fs.rmSync(cfgPath(), { force: true });
 });

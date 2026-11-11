@@ -66,7 +66,7 @@ const data = JSON.parse(fs.readFileSync(0, 'utf8'));
 const fmt = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 const order = ['min', 'amt', 'km', 'seq', 'gap', 'screen', 'accept', 'kw', 'island', 'islandErr', 'orders', 'others',
   'keep', 'auth', 'fg', 'susp', 'frames', 'ocr', 'skip', 'fails', 'errs', 'interval', 'triggers', 'dups', 'beatAge',
-  'note', 'reason', 'code', 'ver', 'rv', 'upd', 'dev'];
+  'note', 'reason', 'code', 'cfg', 'ver', 'rv', 'upd', 'dev'];
 for (const r of data.records || []) {
   if (raw === '1') { console.log(JSON.stringify(r)); continue; }
   const parts = [fmt.format(new Date(r.ts)), String(r.src || '?').padEnd(3), String(r.ev || '?').padEnd(11)];

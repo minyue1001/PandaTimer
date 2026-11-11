@@ -6,6 +6,8 @@
 //   GET /api/manifest   header: expo-platform / expo-runtime-version / expo-protocol-version / expo-expect-signature
 //   GET /api/assets?asset=<timestamp>/<相對路徑>&runtimeVersion=<rv>&platform=ios
 //   GET /api/health     → "ok"
+//   GET /api/config     公開、無金鑰：遠端設定 JSON（CONFIG_PATH；不存在/壞掉 → 內建預設 config.default.json），
+//        檔案缺的欄位以內建預設補齊（物件逐層合併、陣列整個取代）；ETag＋Cache-Control 60 秒，If-None-Match → 304
 //   POST /api/telemetry header x-pt-key: <寫入金鑰>；body JSON 物件或陣列（≤64KB；每來源每分鐘 ≤120 筆）
 //        → 只留白名單欄位（FIELD_RULES）、附伺服器時間 ts → TELEMETRY_DIR/YYYY-MM-DD.jsonl（台北日期；保留 14 天、單日 ≤20MB）
 //   GET /api/telemetry?date=YYYY-MM-DD&since=<ISO>&limit=N   header x-pt-read: <讀取金鑰>
@@ -22,6 +24,7 @@
 //   PUBLIC_URL (https://wheat.yueshengift.xyz/pandatimer)：manifest 內資產網址的前綴
 //   TELEMETRY_DIR (/opt/pandatimer-updates/telemetry)  TELEMETRY_WRITE_KEY  TELEMETRY_READ_KEY（兩把金鑰由
 //   systemd EnvironmentFile=/opt/pandatimer-updates/server.env 提供；沒設 → /api/telemetry 回 503）
+//   CONFIG_PATH (/opt/pandatimer-updates/config.json)；內建預設＝本檔旁的 config.default.json
 //   TELEMETRY_TZ (Asia/Taipei)  TELEMETRY_RATE_PER_MIN (120)  TELEMETRY_DAY_MAX_BYTES (20MB)  TELEMETRY_KEEP_DAYS (14)
 
 import http from 'node:http';
@@ -43,6 +46,8 @@ const TELEMETRY_RATE_PER_MIN = Number(process.env.TELEMETRY_RATE_PER_MIN || 120)
 const TELEMETRY_DAY_MAX_BYTES = Number(process.env.TELEMETRY_DAY_MAX_BYTES || 20 * 1024 * 1024);
 const TELEMETRY_KEEP_DAYS = Number(process.env.TELEMETRY_KEEP_DAYS || 14);
 const TELEMETRY_MAX_BODY = 64 * 1024;
+const CONFIG_PATH = path.resolve(process.env.CONFIG_PATH || '/opt/pandatimer-updates/config.json');
+const DEFAULT_CONFIG_PATH = new URL('./config.default.json', import.meta.url);
 const KEY_ID = 'main';
 const ALG = 'rsa-v1_5-sha256';
 
@@ -294,6 +299,72 @@ async function handleAsset(req, res, url) {
 }
 
 
+
+// ---------- 遠端設定（v0.6 /api/config） ----------
+const isPlainObject = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+function deepMerge(base, over) {
+  if (!isPlainObject(base) || !isPlainObject(over)) return over === undefined ? base : over;
+  const out = { ...base };
+  for (const [k, v] of Object.entries(over)) out[k] = isPlainObject(base[k]) && isPlainObject(v) ? deepMerge(base[k], v) : v;
+  return out;
+}
+
+let builtinConfig = null;
+function loadBuiltinConfig() {
+  if (builtinConfig) return builtinConfig;
+  try {
+    builtinConfig = JSON.parse(fs.readFileSync(DEFAULT_CONFIG_PATH, 'utf8'));
+  } catch {
+    builtinConfig = { version: 'builtin' };
+  }
+  return builtinConfig;
+}
+
+// 依 CONFIG_PATH 的 mtime/size 快取；每次請求 stat 一次（改檔立即生效，不用重啟）
+let configCache = { key: null, body: null, text: null, etag: null, source: null };
+function currentConfig() {
+  let key = 'missing';
+  let st = null;
+  try {
+    st = fs.statSync(CONFIG_PATH);
+    key = `${st.mtimeMs}|${st.size}`;
+  } catch { /* 不存在 → 內建預設 */ }
+  if (configCache.key === key && configCache.body) return configCache;
+  let body = loadBuiltinConfig();
+  let source = 'builtin';
+  if (st) {
+    try {
+      const file = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      if (!isPlainObject(file)) throw new Error('not an object');
+      body = deepMerge(body, file);
+      source = 'file';
+    } catch (e) {
+      console.error(`[config] ${CONFIG_PATH} 讀不到或不是 JSON 物件，改用內建預設：${e.message}`);
+    }
+  }
+  const text = JSON.stringify(body);
+  const etag = `"${crypto.createHash('sha256').update(text).digest('base64url').slice(0, 27)}"`;
+  configCache = { key, body, text, etag, source };
+  return configCache;
+}
+
+function handleConfig(req, res) {
+  const c = currentConfig();
+  const headers = {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'public, max-age=60',
+    etag: c.etag,
+    'x-config-source': c.source,
+  };
+  if (String(req.headers['if-none-match'] || '') === c.etag) {
+    res.writeHead(304, headers);
+    return res.end();
+  }
+  res.writeHead(200, { ...headers, 'content-length': Buffer.byteLength(c.text) });
+  if (req.method === 'HEAD') return res.end();
+  res.end(c.text);
+}
+
 // ---------- telemetry（v0.6 遠端狀態回報） ----------
 // ⚠️ 白名單關鍵字與 src/screenInfo.ts 的 KEYWORD_NAMES、targets/broadcast/OrderDetector.swift 的 ScreenInfo.keywords 一致；
 //    欄位鍵名與 PandaTelemetry.swift 的 allowedKeys 一致（test/telemetry.test.mjs 比對）。
@@ -301,7 +372,13 @@ const TELEMETRY_KEYWORDS = [
   '接受訂單', '拒絕', '前往取餐', '抵達餐廳', '已取餐', '前往送餐', '抵達', '送達', '完成訂單',
   '上線中', '休息中', '訂單詳情', '聯絡', '導航', '拍照', '確認取餐', '取消',
 ];
-const KEYWORD_SET = new Set(TELEMETRY_KEYWORDS);
+const BUILTIN_KEYWORDS = new Set(TELEMETRY_KEYWORDS);
+/** 白名單＝內建 ∪ 目前遠端設定 telemetry.keywords 的正式名稱（設定檔由擁有者維護） */
+function keywordAllowed(word) {
+  if (BUILTIN_KEYWORDS.has(word)) return true;
+  const rows = currentConfig().body?.telemetry?.keywords;
+  return Array.isArray(rows) && rows.some((r) => Array.isArray(r) && r[0] === word);
+}
 const N = 'num', B = 'bool', S = 'str';
 // 型別：num（有限數字）、bool、str（截 80 字）、kw（白名單字串陣列）
 const FIELD_RULES = {
@@ -309,7 +386,7 @@ const FIELD_RULES = {
   seq: N, gap: N, frames: N, ocr: N, skip: N, fails: N, errs: N, memMB: N, peakMB: N,
   accept: B, min: N, amt: N, km: N, kw: 'kw', screen: S, interval: N, triggers: N, dups: N,
   island: S, islandErr: S, keep: S, auth: S, fg: S, orders: N, others: S, susp: B,
-  note: S, code: N, sent: N, dropped: N, beatAge: N, reason: S,
+  note: S, code: N, sent: N, dropped: N, beatAge: N, reason: S, cfg: S,
 };
 const MAX_STR = 80;
 
@@ -324,7 +401,7 @@ function sanitizeRecord(r) {
     else if (type === B) { if (typeof v === 'boolean') out[k] = v; }
     else if (type === S) { if (typeof v === 'string' && v.length) out[k] = v.slice(0, MAX_STR); }
     else if (type === 'kw') {
-      if (Array.isArray(v)) out[k] = [...new Set(v.filter((x) => typeof x === 'string' && KEYWORD_SET.has(x)))];
+      if (Array.isArray(v)) out[k] = [...new Set(v.filter((x) => typeof x === 'string' && x.length <= 12 && keywordAllowed(x)))];
     }
   }
   if (typeof out.ev !== 'string') return null;
@@ -447,7 +524,7 @@ const server = http.createServer(async (req, res) => {
   let url;
   res.on('finish', () => {
     if (!url || url.pathname === '/api/health') return;
-    if (url.pathname === '/api/telemetry' && res.statusCode < 400) return; // 回報很頻繁，成功的不寫 log
+    if ((url.pathname === '/api/telemetry' || url.pathname === '/api/config') && res.statusCode < 400) return; // 很頻繁，成功的不寫 log
     console.log(`${req.method} ${url.pathname} ${res.statusCode} ${Date.now() - started}ms rv=${req.headers['expo-runtime-version'] || url.searchParams.get('runtimeVersion') || '-'}`);
   });
   try {
@@ -462,6 +539,8 @@ const server = http.createServer(async (req, res) => {
       case '/api/health':
         res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
         return res.end('ok');
+      case '/api/config':
+        return handleConfig(req, res);
       case '/api/manifest':
         return await handleManifest(req, res, url);
       case '/api/assets':
@@ -481,7 +560,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   const { port } = server.address();
-  console.log(`pandatimer-updates listening on http://${HOST}:${port} updatesDir=${UPDATES_DIR} publicUrl=${PUBLIC_URL} signing=${fs.existsSync(PRIVATE_KEY_PATH) ? 'on' : 'OFF'} telemetry=${TELEMETRY_WRITE_KEY && TELEMETRY_READ_KEY ? TELEMETRY_DIR : 'OFF'}`);
+  console.log(`pandatimer-updates listening on http://${HOST}:${port} updatesDir=${UPDATES_DIR} publicUrl=${PUBLIC_URL} signing=${fs.existsSync(PRIVATE_KEY_PATH) ? 'on' : 'OFF'} telemetry=${TELEMETRY_WRITE_KEY && TELEMETRY_READ_KEY ? TELEMETRY_DIR : 'OFF'} config=${currentConfig().source}:${currentConfig().body?.version}`);
   void pruneTelemetry(Date.now());
 });
 

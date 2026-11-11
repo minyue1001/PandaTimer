@@ -76,6 +76,9 @@ final class DetectorHub {
   let keepAlive = KeepAlive()
   /// v0.6 遠端狀態回報（App 端）
   let telemetry = PandaTelemetry(source: "app")
+  /// v0.6 遠端設定（App 端用 app.beatTimeoutSeconds、telemetry 批次；快取同時給主 App 的 intents 用 PickerConfig.cached()）
+  let remote = RemoteConfig()
+  private var lastConfigFetch: Date?
   private var registered = false
   private var emitter: (([String: Any?]) -> Void)?
   private var watchdog: DispatchSourceTimer?
@@ -97,12 +100,44 @@ final class DetectorHub {
   private var lastKeepLogged = ""
 
   private let watchdogInterval = 30
-  private let beatTimeout: TimeInterval = 150
+  private var beatTimeout: TimeInterval = 150
 
   // MARK: - 對外（由 LiveActivityModule 呼叫）
 
   func attach(_ emit: @escaping ([String: Any?]) -> Void) {
-    queue.async { self.emitter = emit }
+    queue.async {
+      self.emitter = emit
+      self.applyConfig()
+    }
+  }
+
+  // MARK: - 遠端設定（只在 queue 上）
+
+  private func applyConfig() {
+    let root = remote.snapshot()
+    beatTimeout = RemoteConfig.beatTimeout(root)
+    let t = RemoteConfig.telemetry(root)
+    telemetry.configure(flushSeconds: t.flushSeconds, batchSize: t.batchSize)
+    telemetry.setContext(["cfg": RemoteConfig.version(root)])
+  }
+
+  /// 抓遠端設定（逾時 3 秒；失敗沿用快取/預設）。force=false 時 60 秒內不重抓
+  private func refreshConfig(force: Bool) {
+    let now = Date()
+    if !force, let last = lastConfigFetch, now.timeIntervalSince(last) < 60 { return }
+    lastConfigFetch = now
+    remote.refresh(timeout: 3) { [weak self] changed in
+      guard let self = self else { return }
+      self.queue.async {
+        if changed {
+          self.applyConfig()
+          self.telemetry.log("config", ["cfg": self.remote.version, "note": "updated"], urgent: true)
+          self.pushCard(note: "遠端設定已更新 \(self.remote.version)")
+        } else if let err = self.remote.error {
+          self.telemetry.log("config", ["cfg": self.remote.version, "reason": err])
+        }
+      }
+    }
   }
 
   /// 註冊 4 個狀態名稱＋360 個 order.N.S。Darwin 回呼在主執行緒，進來後一律轉到 queue。
@@ -135,6 +170,7 @@ final class DetectorHub {
       self.lastSeq = nil
       self.keepAlive.start()
       self.startWatchdog()
+      self.refreshConfig(force: true)
       self.telemetry.log("arm", self.appFields(), urgent: true)
     }
   }
@@ -178,6 +214,7 @@ final class DetectorHub {
         "lastOrderHow": lastOrderHow,
         "islandCheck": islandCheck,
         "telemetryPending": tele.pending,
+        "configVersion": remote.version,
       ]
       if let b = lastBeat { d["lastBeatAt"] = Self.ms(b) }
       if let m = lastOrderMinutes { d["lastOrderMinutes"] = m }
@@ -201,6 +238,7 @@ final class DetectorHub {
     queue.async {
       self.appState = "fg"
       self.telemetry.log("fg", self.appFields())
+      self.refreshConfig(force: false)
       self.keepAlive.ensure()
       let tracking = self.armed || self.lastBeat != nil
       Task {
@@ -502,6 +540,7 @@ final class DetectorHub {
       parts.append("App 尚未收到心跳")
     }
     parts.append("保活:\(keepAlive.snapshot().text)")
+    parts.append("設定 \(remote.version)")
     if let m = lastOrderMinutes, let at = lastOrderAt {
       parts.append("最近新單:\(m)分 \(Self.hm(at))")
     }
@@ -531,6 +570,9 @@ final class DetectorHub {
     lastTick = now
     guard armed else { return }
     keepAlive.ensure()
+    if lastConfigFetch.map({ now.timeIntervalSince($0) >= RemoteConfig.refreshSeconds(remote.snapshot()) }) ?? true {
+      refreshConfig(force: true)
+    }
     let keep = keepAlive.snapshot()
     let keepTag = "\(keep.mode)|\(keep.locationAuth)|\(keep.error ?? "")"
     if keepTag != lastKeepLogged {

@@ -5,6 +5,11 @@
 資料：`/opt/pandatimer-updates/updates/<runtimeVersion>/<timestamp>/`（`expo export -p ios` 的 dist＋`expoConfig.json`）取 timestamp 最大者；目錄內有 `rollback` 檔＝回 rollBackToEmbedded；無版本＝noUpdateAvailable。
 金鑰：私鑰 `~/.config/pandatimer/keys/private-key.pem`（本機，600，**不進 repo**）→ 部署時複製到 `/opt/pandatimer-updates/keys/`；憑證 `server/certs/certificate.pem`（進 repo，App 內嵌，有效到 2036）。
 
+## v0.6 遠端設定（不用重裝就能調偵測參數）
+- `GET /api/config`（公開、無金鑰）：`CONFIG_PATH`＝`/opt/pandatimer-updates/config.json`，缺的欄位用內建預設 `server/config.default.json` 補齊；檔案不存在/壞掉＝回內建預設。ETag＋`Cache-Control: public, max-age=60`，改檔立即生效不用重啟。
+- 參數：`picker`（分鐘/金額正則與範圍、關鍵字、費率 4.08355、最低價 45、短單 8 分）、`detector`（接單鈕正則、去重 90 秒、OCR 間隔、裁切比例、長邊、minimumTextHeight、雜湊門檻、心跳、重抓間隔）、`telemetry`（白名單關鍵字、批次秒數/筆數）、`app`（心跳逾時）。欄位範圍見 `src/remoteConfig.ts` 的 `RANGES`，App 端不合法的欄位一律改用預設。
+- 改設定：編輯 `server/config.json`（**改 version**）→ `bash scripts/push-config.sh`（本機嚴格驗證→上傳→驗線上 version，失敗換回 `config.json.prev`）。部署腳本只在遠端沒有 config.json 時用預設建立，不會蓋掉。
+
 ## v0.6 遠端狀態回報（telemetry）
 - `POST /api/telemetry`：header `x-pt-key: <寫入金鑰>`，body JSON 物件或陣列（≤64KB、每來源每分鐘 ≤120 筆，超過 413/429）。伺服器只留白名單欄位（`FIELD_RULES`）、`kw` 只留白名單關鍵字、字串截 80 字，附伺服器時間 `ts` → `/opt/pandatimer-updates/telemetry/YYYY-MM-DD.jsonl`（台北日期，保留 14 天、單日 ≤20MB）。
 - `GET /api/telemetry?date=&since=<ISO>&limit=`：header `x-pt-read: <讀取金鑰>`。查詢用 `bash scripts/telemetry.sh [日期] [--since 10m] [--follow]`（唯讀，不經 ssh）。

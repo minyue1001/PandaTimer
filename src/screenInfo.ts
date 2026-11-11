@@ -2,7 +2,16 @@
 // ⚠️ 與 targets/broadcast/OrderDetector.swift 的 ScreenInfo 同一套規則（Swift 在 WSL 不能跑，這份是測試替身），
 //    白名單關鍵字另與 server/index.mjs 的 TELEMETRY_KEYWORDS 一致（伺服器會再過濾一次）；改一邊改三邊（test 會比對）。
 // 隱私鐵律：不得上傳 OCR 原文、地址、店名、顧客資訊 → 只回報「白名單關鍵字命中清單」、分鐘數、金額、公里數、畫面分類。
-import { amountKey, hasAcceptButton, normalizeOcrText, pickAmount, pickMinutes } from './ocrPick.ts';
+import {
+  amountKey,
+  DEFAULT_ACCEPT_PATTERN,
+  DEFAULT_PICKER,
+  hasAcceptButton,
+  normalizeOcrText,
+  pickAmount,
+  pickMinutes,
+  type PickerConfig,
+} from './ocrPick.ts';
 
 /** [正式名稱, ...OCR 可能辨成的寫法（簡體）]；回報只用正式名稱 */
 export const UI_KEYWORDS: readonly (readonly string[])[] = [
@@ -30,10 +39,10 @@ export const KEYWORD_NAMES: readonly string[] = UI_KEYWORDS.map((k) => k[0]);
 export type ScreenKind = 'newOrder' | 'detail' | 'delivering' | 'pickup' | 'idle' | 'other' | 'none';
 
 /** 白名單關鍵字命中清單（正式名稱，依白名單順序，不重複） */
-export function matchKeywords(raw: string | null | undefined): string[] {
+export function matchKeywords(raw: string | null | undefined, rows: readonly (readonly string[])[] = UI_KEYWORDS): string[] {
   if (!raw) return [];
   const compact = normalizeOcrText(raw).replace(/\s+/g, '');
-  return UI_KEYWORDS.filter((forms) => forms.some((f) => compact.includes(f))).map((forms) => forms[0]);
+  return rows.filter((forms) => forms.some((f) => compact.includes(f))).map((forms) => forms[0]);
 }
 
 const KM = /(?<![0-9.])([0-9]{1,2}(?:\.[0-9]{1,2})?)\s*(?:公里|km)/i;
@@ -67,14 +76,22 @@ export type ScreenSummary = {
   screen: ScreenKind;
 };
 
-/** OCR 文字 → 結構化摘要（Swift 版 ScreenInfo.analyze）。minutes 只在有接單鈕時才挑（同 OrderDetector.detect） */
-export function summarizeScreen(raw: string | null | undefined): ScreenSummary {
-  const accept = hasAcceptButton(raw);
-  const kw = matchKeywords(raw);
+export type ScreenRules = {
+  picker: PickerConfig;
+  acceptPattern: string;
+  keywords: readonly (readonly string[])[];
+};
+export const DEFAULT_SCREEN_RULES: ScreenRules = { picker: DEFAULT_PICKER, acceptPattern: DEFAULT_ACCEPT_PATTERN, keywords: UI_KEYWORDS };
+
+/** OCR 文字 → 結構化摘要（Swift 版 ScreenInfo.analyze）。minutes 只在有接單鈕時才挑（同 OrderDetector.detect）。
+ *  v0.6：規則可用遠端設定覆寫（picker / detector.acceptPattern / telemetry.keywords） */
+export function summarizeScreen(raw: string | null | undefined, rules: ScreenRules = DEFAULT_SCREEN_RULES): ScreenSummary {
+  const accept = hasAcceptButton(raw, rules.acceptPattern);
+  const kw = matchKeywords(raw, rules.keywords);
   return {
     accept,
-    minutes: accept ? pickMinutes(raw) : null,
-    amount: pickAmount(raw),
+    minutes: accept ? pickMinutes(raw, rules.picker) : null,
+    amount: pickAmount(raw, rules.picker),
     km: extractKm(raw),
     kw,
     screen: classifyScreen(accept, kw),

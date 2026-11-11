@@ -76,7 +76,7 @@ test('三處白名單一致：TS、Swift（ScreenInfo.keywords）、伺服器（
   const swiftRows = [...block.matchAll(/\[("[^\]]+)\]/g)].map((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]));
   assert.deepEqual(swiftRows, UI_KEYWORDS.map((r) => [...r]));
   const server = read('../server/index.mjs');
-  const sblock = server.slice(server.indexOf('const TELEMETRY_KEYWORDS = ['), server.indexOf('const KEYWORD_SET'));
+  const sblock = server.slice(server.indexOf('const TELEMETRY_KEYWORDS = ['), server.indexOf('const BUILTIN_KEYWORDS'));
   assert.deepEqual([...sblock.matchAll(/'([^']+)'/g)].map((m) => m[1]), [...KEYWORD_NAMES]);
   // Swift 的分類規則字串與 TS 相同
   for (const k of ['"newOrder"', '"detail"', '"delivering"', '"pickup"', '"idle"', '"other"', '"none"']) assert.ok(swift.includes(k), k);
