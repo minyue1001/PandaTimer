@@ -177,6 +177,11 @@
     "graceFactor": 1.05,
     "overrunCap": 1
   },
+  "pay": {
+    "ratePerMinute": 4.08355,
+    "minFare": 45,
+    "assumeStarredLate": true
+  },
   "delivery": {
     "enabled": true,
     "minOrderAgeSec": 120,

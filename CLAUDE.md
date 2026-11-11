@@ -80,6 +80,10 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 ## 本期統計（v0.7，`src/stats.ts`）
 - 彈性線 L＝預估×graceFactor；準時＝實際≤L；超時率＝平均 min(cap, max(0,(實際−L)/L))；取消不計（三期實單驗算 43/19、45/19、40/21，官方 44/19、47/14、39/20）。每 14 天一期，錨點 2026-09-28 00:00 台北。目標（準時目標 50%/底線 40%/超時 ≤20%）與本期補登（N0/P0/T0，綁期別）存 AsyncStorage，本期＝加權合併。
 
+## 收入／補錢（v0.8，`src/earnings.ts`，純 JS 可 OTA）
+- 預估報酬＝max(45, 預估分×4.08355)；補錢＝max(0, 實際報酬−預估報酬)（實際分鐘四捨五入）；被打星的晚到單不補。App 不知道誰被打星 → 顯示樂觀（全補）／保守（晚到全不補）兩情境，`pay.assumeStarredLate`（預設 true＝保守）決定「預計發放」採哪個。三期 1,109 單對帳誤差 <1 元（test/earnings.test.mjs，orders.json 在 scratchpad 不進 repo）。
+- 參數走遠端設定 `pay.ratePerMinute/minFare/assumeStarredLate`（`src/remoteConfig.ts` 驗證，server config*.json 有 `pay` 區塊）；補登多一欄選填「前幾天收入」（`Baseline.income`，同時加進兩情境）。Order 沒存 OCR 金額，`PaySample.estAmount` 是預留欄位。
+
 ## 動態島顯示
 `Text(deadline, style: .timer)` 倒數，過截止自動往上數；`staleDate = deadline` → `context.isStale` 顯示「已超時」（紅）。
 

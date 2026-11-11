@@ -126,6 +126,8 @@ export type Baseline = {
   count: number;
   onTimeRate: number;
   overrunRate: number;
+  /** v0.8：補登期間已領/應領的收入（元，可省略） */
+  income?: number;
 };
 export const BASELINE_STORAGE_KEY = 'pandatimer.periodBaseline.v1';
 export const MAX_BASELINE_COUNT = 2000;
@@ -147,7 +149,9 @@ export function parseBaseline(raw: unknown, currentPeriodId?: string): Baseline 
   if (!(typeof r.count === 'number' && Number.isInteger(r.count) && r.count >= 0 && r.count <= MAX_BASELINE_COUNT)) return null;
   if (!rate(r.onTimeRate) || !rate(r.overrunRate)) return null;
   if (currentPeriodId != null && r.periodId !== currentPeriodId) return null;
-  return { periodId: r.periodId, count: r.count, onTimeRate: r.onTimeRate as number, overrunRate: r.overrunRate as number };
+  const out: Baseline = { periodId: r.periodId, count: r.count, onTimeRate: r.onTimeRate as number, overrunRate: r.overrunRate as number };
+  if (typeof r.income === 'number' && Number.isFinite(r.income) && r.income > 0 && r.income <= 10_000_000) out.income = r.income;
+  return out;
 }
 
 /**

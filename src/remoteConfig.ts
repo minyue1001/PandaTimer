@@ -7,6 +7,7 @@ import { DEFAULT_ACCEPT_PATTERN, DEFAULT_PICKER, type PickerConfig } from './ocr
 import { UI_KEYWORDS } from './screenInfo.ts';
 import { DEFAULT_OFFER, type OfferSettings } from './offerTracker.ts';
 import { DEFAULT_STATS, type StatsParams } from './stats.ts';
+import { DEFAULT_PAY, type PayParams } from './earnings.ts';
 import { DEFAULT_DELIVERY, type DeliverySettings } from './deliveryDetector.ts';
 
 /** v0.7 extension OCR 記憶體保護 */
@@ -43,6 +44,8 @@ export type RemoteConfig = {
   offer: OfferSettings;
   /** v0.7 統計算法參數（JS 讀；彈性線倍數、單筆超時比例上限） */
   stats: StatsParams;
+  /** v0.8 收入（含補錢）算法參數（JS 讀） */
+  pay: PayParams;
   /** v0.7 自動送達（extension 看完成畫面、App 挑單） */
   delivery: DeliverySettings;
   /** v0.7 extension OCR 記憶體保護：目前 > memSkipMB 跳過該幀；OCR 中量到 > memHighMB → 之後 120 秒只認大字 */
@@ -74,6 +77,7 @@ export const DEFAULT_CONFIG: Readonly<RemoteConfig> = Object.freeze({
   app: { beatTimeoutSeconds: 150 },
   offer: { ...DEFAULT_OFFER },
   stats: { ...DEFAULT_STATS },
+  pay: { ...DEFAULT_PAY },
   delivery: { ...DEFAULT_DELIVERY },
   ocr: { ...DEFAULT_OCR },
 });
@@ -107,6 +111,8 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'offer.decideWindowSec': [5, 60, true], // 延遲訊號只編 0~60 秒
   'stats.graceFactor': [1, 2, false],
   'stats.overrunCap': [0.1, 10, false],
+  'pay.ratePerMinute': [0.1, 100, false],
+  'pay.minFare': [0, 1000, false],
   'delivery.minOrderAgeSec': [0, 1800, true],
   'ocr.memSkipMB': [20, 60, false],
   'ocr.memHighMB': [25, 80, false],
@@ -143,7 +149,7 @@ export function validateConfig(raw: unknown): { config: RemoteConfig; problems: 
   if (typeof src.version === 'string' && src.version.length > 0 && src.version.length <= 40) out.version = src.version;
   else problems.push('version 缺漏或不是 1~40 字的字串');
 
-  for (const section of ['picker', 'detector', 'telemetry', 'app', 'offer', 'stats', 'delivery', 'ocr'] as const) {
+  for (const section of ['picker', 'detector', 'telemetry', 'app', 'offer', 'stats', 'pay', 'delivery', 'ocr'] as const) {
     const s = src[section];
     if (s !== undefined && !isObj(s)) problems.push(`${section} 不是物件`);
     const sec = isObj(s) ? s : {};
@@ -167,6 +173,9 @@ export function validateConfig(raw: unknown): { config: RemoteConfig; problems: 
         if (g != null && g >= regex.groups && !((path.startsWith('offer.') || path.startsWith('delivery.')) && new RegExp(v as string, regex.flags).test(''))) target[key] = v;
         else problems.push(`${path} 正則編不過或捕捉群組不足 → 用預設`);
       } else if (path === 'delivery.enabled') {
+        if (typeof v === 'boolean') target[key] = v;
+        else problems.push(`${path} 要是 true/false → 用預設`);
+      } else if (path === 'pay.assumeStarredLate') {
         if (typeof v === 'boolean') target[key] = v;
         else problems.push(`${path} 要是 true/false → 用預設`);
       } else if (path === 'offer.ambiguousAs') {

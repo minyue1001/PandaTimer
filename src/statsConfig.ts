@@ -3,6 +3,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { validateConfig } from './remoteConfig';
+import { DEFAULT_PAY, type PayParams } from './earnings';
 import {
   BASELINE_STORAGE_KEY,
   DEFAULT_GOALS,
@@ -16,6 +17,7 @@ import {
 } from './stats';
 
 const STATS_CACHE_KEY = 'pandatimer.statsParams.v1';
+const PAY_CACHE_KEY = 'pandatimer.payParams.v1';
 
 /** 遠端設定 JSON（不可信）→ stats 參數（缺漏/不合法 → 預設） */
 export function statsFromConfig(raw: unknown): StatsParams {
@@ -31,8 +33,22 @@ export async function loadCachedStatsParams(): Promise<StatsParams> {
   }
 }
 
-/** 抓 /api/config（3 秒逾時）→ stats 參數並快取；失敗回 null（呼叫端沿用快取） */
-export async function fetchStatsParams(): Promise<StatsParams | null> {
+/** 遠端設定 JSON（不可信）→ pay 參數（缺漏/不合法 → 預設） */
+export function payFromConfig(raw: unknown): PayParams {
+  return validateConfig(raw).config.pay;
+}
+
+export async function loadCachedPayParams(): Promise<PayParams> {
+  try {
+    const raw = await AsyncStorage.getItem(PAY_CACHE_KEY);
+    return raw ? payFromConfig({ pay: JSON.parse(raw) }) : { ...DEFAULT_PAY };
+  } catch {
+    return { ...DEFAULT_PAY };
+  }
+}
+
+/** 抓 /api/config（3 秒逾時）→ stats／pay 參數並快取；失敗回 null（呼叫端沿用快取） */
+export async function fetchRemoteParams(): Promise<{ stats: StatsParams; pay: PayParams } | null> {
   const url = (Constants.expoConfig?.extra as { configUrl?: unknown } | undefined)?.configUrl;
   if (typeof url !== 'string' || !url.startsWith('https://')) return null;
   const ctrl = new AbortController();
@@ -40,9 +56,12 @@ export async function fetchStatsParams(): Promise<StatsParams | null> {
   try {
     const res = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json' } });
     if (!res.ok) return null;
-    const params = statsFromConfig(await res.json());
-    await AsyncStorage.setItem(STATS_CACHE_KEY, JSON.stringify(params)).catch(() => undefined);
-    return params;
+    const body: unknown = await res.json();
+    const stats = statsFromConfig(body);
+    const pay = payFromConfig(body);
+    await AsyncStorage.setItem(STATS_CACHE_KEY, JSON.stringify(stats)).catch(() => undefined);
+    await AsyncStorage.setItem(PAY_CACHE_KEY, JSON.stringify(pay)).catch(() => undefined);
+    return { stats, pay };
   } catch {
     return null;
   } finally {

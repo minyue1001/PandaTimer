@@ -46,7 +46,15 @@ import {
   type StatsParams,
 } from './src/stats';
 import {
-  fetchStatsParams,
+  DEFAULT_PAY,
+  money,
+  periodAndTodayEarnings,
+  type EarningsSummary,
+  type PayParams,
+} from './src/earnings';
+import {
+  fetchRemoteParams,
+  loadCachedPayParams,
   loadBaseline,
   loadCachedStatsParams,
   loadGoals,
@@ -94,12 +102,18 @@ function Main() {
 
   // v0.7 統計參數（遠端設定 stats）＋目標（AsyncStorage）
   const [statsParams, setStatsParams] = useState<StatsParams>(DEFAULT_STATS);
+  const [payParams, setPayParams] = useState<PayParams>(DEFAULT_PAY);
   const [goals, setGoals] = useState<Goals>(DEFAULT_GOALS);
   const [goalDraft, setGoalDraft] = useState<{ onTime: string; floor: string; overrun: string } | null>(null);
   useEffect(() => {
     let alive = true;
     void loadCachedStatsParams().then((p) => alive && setStatsParams(p));
-    void fetchStatsParams().then((p) => alive && p && setStatsParams(p));
+    void loadCachedPayParams().then((p) => alive && setPayParams(p));
+    void fetchRemoteParams().then((p) => {
+      if (!alive || !p) return;
+      setStatsParams(p.stats);
+      setPayParams(p.pay);
+    });
     void loadGoals().then((g) => alive && setGoals(g));
     return () => {
       alive = false;
@@ -108,7 +122,7 @@ function Main() {
   // v0.7 本期補登（App 上線前本期已跑的單）：綁期別，換期自動失效
   const periodId = periodOf(now).id;
   const [baseline, setBaseline] = useState<Baseline | null>(null);
-  const [baseDraft, setBaseDraft] = useState<{ count: string; onTime: string; overrun: string } | null>(null);
+  const [baseDraft, setBaseDraft] = useState<{ count: string; onTime: string; overrun: string; income: string } | null>(null);
   useEffect(() => {
     let alive = true;
     void loadBaseline(periodId).then((b) => alive && setBaseline(b));
@@ -119,13 +133,23 @@ function Main() {
   const onSaveBaseline = () => {
     if (!baseDraft) return;
     const count = /^\s*\d{1,4}\s*$/.test(baseDraft.count) ? parseInt(baseDraft.count, 10) : NaN;
-    const onTime = parsePercentInput(baseDraft.onTime);
-    const overrun = parsePercentInput(baseDraft.overrun);
+    // 只補收入（單數留 0）時，準時率／超時率可以不填
+    const onTime = baseDraft.onTime.trim() === '' && count === 0 ? 0 : parsePercentInput(baseDraft.onTime);
+    const overrun = baseDraft.overrun.trim() === '' && count === 0 ? 0 : parsePercentInput(baseDraft.overrun);
     if (!(count >= 0 && count <= 2000) || onTime == null || overrun == null) {
       Alert.alert('補登格式不對', '單數 0~2000；準時率、超時率輸入 0~100 的百分比（照報酬單上的數字）');
       return;
     }
-    const next: Baseline | null = count > 0 ? { periodId, count, onTimeRate: onTime, overrunRate: overrun } : null;
+    const incomeText = baseDraft.income.trim();
+    const income = incomeText === '' ? 0 : /^\d{1,8}(?:\.\d+)?$/.test(incomeText) ? parseFloat(incomeText) : NaN;
+    if (!Number.isFinite(income)) {
+      Alert.alert('前幾天收入格式不對', '請輸入數字（元），或留空');
+      return;
+    }
+    const next: Baseline | null =
+      count > 0 || income > 0
+        ? { periodId, count, onTimeRate: onTime, overrunRate: overrun, ...(income > 0 ? { income } : {}) }
+        : null;
     setBaseline(next);
     setBaseDraft(null);
     void saveBaseline(next);
@@ -245,6 +269,10 @@ function Main() {
   const st = useMemo(
     () => periodAndToday(orders, minuteTick * 60_000, statsParams, baseline),
     [orders, minuteTick, statsParams, baseline],
+  );
+  const earn = useMemo(
+    () => periodAndTodayEarnings(orders, minuteTick * 60_000, payParams, baseline),
+    [orders, minuteTick, payParams, baseline],
   );
   const gp = useMemo(() => goalProgress(st.current, goals), [st, goals]);
   const gt = goalText(gp, goals);
@@ -419,6 +447,9 @@ function Main() {
             <Stat label="今日準時率" value={pct(st.today.onTimeRate)} />
             <Stat label="今日超時率" value={pct(st.today.overrunRate)} />
           </View>
+          <Text style={styles.section}>收入</Text>
+          <EarnLines title="本期" e={earn.period} />
+          <EarnLines title="今日" e={earn.today} />
           <Text style={[styles.detLine, { color: onTimeColor ?? '#333' }]}>{gt.onTime}</Text>
           <Text style={[styles.detLine, { color: gp.overrunMet === false ? RED : gp.overrunMet ? GREEN : '#333' }]}>{gt.overrun}</Text>
           {goalDraft ? (
@@ -486,6 +517,13 @@ function Main() {
                   onChangeText={(t) => setBaseDraft({ ...baseDraft, overrun: t })}
                   placeholder="超時率%"
                 />
+                <TextInput
+                  style={styles.goalInput}
+                  keyboardType="decimal-pad"
+                  value={baseDraft.income}
+                  onChangeText={(t) => setBaseDraft({ ...baseDraft, income: t })}
+                  placeholder="前幾天收入$（可空）"
+                />
               </View>
               <View style={styles.row}>
                 <Pressable onPress={onSaveBaseline}>
@@ -508,8 +546,9 @@ function Main() {
                         count: String(baseline.count),
                         onTime: String(Math.round(baseline.onTimeRate * 1000) / 10),
                         overrun: String(Math.round(baseline.overrunRate * 1000) / 10),
+                        income: baseline.income != null ? String(baseline.income) : '',
                       }
-                    : { count: '', onTime: '', overrun: '' },
+                    : { count: '', onTime: '', overrun: '', income: '' },
                 )
               }
             >
@@ -551,6 +590,24 @@ function Main() {
         <OtaBox />
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function EarnLines({ title, e }: { title: string; e: EarningsSummary }) {
+  const cons = e.scenario === 'conservative';
+  const other = cons ? '若未被打星' : '若晚到單全被打星';
+  return (
+    <View style={{ gap: 2 }}>
+      <Text style={styles.detLine}>
+        {title}：預估收入 {money(e.estTotal)}（{e.count} 單{e.baselineIncome > 0 ? `，含補登 ${money(e.baselineIncome)}` : ''}）
+      </Text>
+      <Text style={styles.detLine}>
+        　補錢 {money(e.adjustment)}（若未被打星；晚到 {e.lateCount} 單）
+      </Text>
+      <Text style={[styles.detLine, { fontWeight: '700' }]}>
+        　預計發放 {money(e.payout)}（{cons ? '保守：晚到單全被打星' : '樂觀：都沒被打星'}；{other} {money(e.payoutOther)}）
+      </Text>
+    </View>
   );
 }
 
