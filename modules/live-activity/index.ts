@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import type { ActivityBrief } from '../../src/nativeEvents';
+import { parseDetectorStatus, type DetectorStatus } from '../../src/detector';
 import { requireOptionalNativeModule } from 'expo';
 
 type LiveActivityNative = {
@@ -12,6 +13,17 @@ type LiveActivityNative = {
   syncActiveOrders?(json: string): void;
   activitySummaries?(): string;
   startStandby?(): Promise<string>;
+  armDetection?(): string;
+  stopDetection?(): Promise<void>;
+  detectorStatus?(): string;
+  addListener?(event: 'onDetectorSignal', fn: (ev: DetectorEvent) => void): { remove(): void };
+};
+
+/** v0.4 原生 DetectorHub 送來的事件（extension 的 Darwin 訊號，或 App Intents 要求 drain） */
+export type DetectorEvent = {
+  type: 'order' | 'started' | 'stopped' | 'heartbeat' | 'drain' | 'beatTimeout';
+  minutes?: number;
+  how?: string;
 };
 
 // Expo Go / web / Android 沒有這個原生模組 → 為 null，所有呼叫安全地退化成 no-op。
@@ -103,6 +115,40 @@ export function activitySummaries(): ActivitySummary[] | null {
 export async function startStandby(): Promise<string> {
   if (!native?.startStandby) throw new Error('原生模組沒有 startStandby（需 v0.3 以上的原生版本）');
   return native.startStandby();
+}
+
+/** v0.4：開始偵測（前景呼叫）→ 原生開始靜音音訊保活＋看門狗。回傳最新狀態。 */
+export function armDetection(): DetectorStatus | null {
+  try {
+    return parseDetectorStatus(native?.armDetection?.());
+  } catch {
+    return null;
+  }
+}
+
+/** v0.4：停止偵測 → 停保活、偵測卡結束（倒數中的卡保留給那張單） */
+export async function stopDetection(): Promise<void> {
+  if (!native?.stopDetection) return;
+  await native.stopDetection();
+}
+
+/** v0.4：偵測狀態；舊版原生或非 iOS → null */
+export function detectorStatus(): DetectorStatus | null {
+  try {
+    return parseDetectorStatus(native?.detectorStatus?.());
+  } catch {
+    return null;
+  }
+}
+
+/** v0.4：訂閱原生偵測事件；回傳取消函式 */
+export function addDetectorListener(fn: (ev: DetectorEvent) => void): () => void {
+  try {
+    const sub = native?.addListener?.('onDetectorSignal', fn);
+    return () => sub?.remove();
+  } catch {
+    return () => undefined;
+  }
 }
 
 export { BroadcastPicker, type BroadcastPickerHandle } from './BroadcastPicker';

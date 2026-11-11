@@ -13,6 +13,7 @@
       "infoPlist": {
         "CFBundleDisplayName": "熊貓倒數",
         "NSSupportsLiveActivities": true,
+        "UIBackgroundModes": ["audio"],
         "ITSAppUsesNonExemptEncryption": false
       }
     },

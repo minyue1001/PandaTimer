@@ -1,22 +1,22 @@
-import ActivityKit
 import CoreGraphics
-import CoreImage
 import CoreMedia
+import CoreVideo
 import Foundation
 import ReplayKit
 import UserNotifications
 import Vision
 
-// v0.3「螢幕廣播自動偵測」最小驗證版（ReplayKit Broadcast Upload Extension，獨立程序、記憶體上限約 50MB）。
-// 沒有 App Group → 不能跟 App 共享資料。唯一通道：App 前景先開一張「待命」Live Activity，
-// 這裡用 Activity<PandaTimerAttributes>.activities 找到它並 update（是否可行＝本版要驗證的事）。
-// 看不到卡片時改用本地通知回報（結果 B），讓使用者不用 Mac/Console 也看得出結果。
+// v0.4 螢幕廣播偵測 extension（ReplayKit Broadcast Upload Extension，獨立程序、記憶體上限約 50MB）。
+// v0.3 實機結論：ActivityKit 在 broadcast extension 內完全不可用（看不到 App 的卡、自己 request 也報
+// 「Target does not include NSSupportsLiveActivities plist key」）→ 這裡**不碰 ActivityKit**。
+// 只做 OCR 偵測，結果用 Darwin notification 通知 App（名稱編碼資料，見 PandaSignal），App 保活中自己更新動態島。
+// 另外保留本地通知「偵測到新單：N 分鐘」給使用者確認（不響聲）。
 //
-// 省記憶體：每秒最多處理 1 幀、忙就丟幀；裁切畫面下方 60%（新單資訊卡在下半）再縮到長邊 ≤ 1000px；
-// CIContext 只建一次；每幀包 autoreleasepool。
-//
-// SampleHandler 只轉呼叫；邏輯放在一般類別 BroadcastDetector（不繼承 SDK 類別，避免 SDK 對
-// RPBroadcastSampleHandler 加的 actor 標註影響背景佇列上的呼叫）。
+// 省記憶體（v0.3 峰值 44MB → 目標 ≤35MB）：
+//  - 不用 CIContext：直接讀 pixel buffer 的亮度平面（420f 的 Y），只取畫面下方 55%，整數倍平均縮到長邊 ≤800px，
+//    得到 8-bit 灰階小圖（約 0.5MB）再交給 Vision；
+//  - OCR 最多每 1.5 秒一次；64×64 平均雜湊與上次 OCR 的畫面幾乎相同就跳過（最多 10 秒強制再 OCR 一次）；
+//  - VNRecognizeTextRequest 只建一次重用、minimumTextHeight 0.018；每幀包 autoreleasepool。
 class SampleHandler: RPBroadcastSampleHandler {
   private let detector = BroadcastDetector()
 
@@ -38,50 +38,74 @@ class SampleHandler: RPBroadcastSampleHandler {
   }
 }
 
+// MARK: - extension → App 訊號（Darwin notification；⚠️ 名稱與 modules/live-activity/ios/DetectorHub.swift、
+// src/detector.ts 一致）
+
+enum PandaSignal {
+  static let started = "com.pandatimer.broadcast.started"
+  static let stopped = "com.pandatimer.broadcast.stopped"
+  static let heartbeat = "com.pandatimer.broadcast.heartbeat"
+  static let orderPrefix = "com.pandatimer.order."
+
+  static func post(_ name: String) {
+    CFNotificationCenterPostNotification(
+      CFNotificationCenterGetDarwinNotifyCenter(), CFNotificationName(name as CFString), nil, nil, true)
+  }
+
+  /// N 必須在 1…90（MinutePicker 已限制；App 只註冊這 90 個名稱）
+  static func postOrder(_ minutes: Int) -> Bool {
+    guard minutes >= 1, minutes <= 90 else { return false }
+    post("\(orderPrefix)\(minutes)")
+    return true
+  }
+}
+
 final class BroadcastDetector {
   // MARK: - 參數
-  private let ocrInterval: CFAbsoluteTime = 1.0
+  private let ocrInterval: CFAbsoluteTime = 1.5
+  private let forceOcrInterval: CFAbsoluteTime = 10
+  private let sameFrameMaxBits = 40  // 4096 bits 中差異 ≤40（≈1%）視為同一畫面
   private let heartbeatInterval: Int = 60
   private let dedupeWindow: TimeInterval = 180
-  private let blindNoticeInterval: TimeInterval = 600
-  private let maxLongEdge: CGFloat = 1000
-  private let bottomFraction: CGFloat = 0.6
+  private let maxLongEdge = 800
+  private let bottomFraction = 0.55
+  private let memoryAlertMB: Double = 40
 
   // MARK: - 狀態
   private let workQueue = DispatchQueue(label: "com.pandatimer.broadcast.work", qos: .userInitiated)
   private let lock = NSLock()
-  private let ciContext = CIContext(options: [
-    .useSoftwareRenderer: true,  // 背景程序送 GPU 工作可能被拒，CPU 較穩（1 秒 1 幀負擔得起）
-    .cacheIntermediates: false,
-    .workingColorSpace: NSNull(),
-  ])
+  private let ocr = FrameOCR()
   private var heartbeatTimer: DispatchSourceTimer?
 
   // lock 保護（ReplayKit 回呼執行緒 ↔ workQueue）
   private var framesReceived = 0
   private var busy = false
-  private var lastOcrStart: CFAbsoluteTime = 0
+  private var lastCheckStart: CFAbsoluteTime = 0
+  private var lastOcrAt: CFAbsoluteTime = 0
+  private var lastHash: [UInt64]?
+  private var skipped = 0
   private var imageFailures = 0
+  private var badFormat: OSType?
 
   // 只在 workQueue 存取
   private var ocrCount = 0
   private var ocrErrors = 0
   private var currentMB: Double = 0
   private var peakMB: Double = 0
+  private var alertedPeakMB: Double = 0
   private var lastSawAccept = false
   private var lastTriggerMinutes: Int?
   private var lastTriggerAt: Date?
   private var triggerCount = 0
-  private var lastBlindNoticeAt: Date?
 
   // MARK: - 生命週期（由 SampleHandler 轉呼叫）
 
   func start() {
+    PandaSignal.post(PandaSignal.started)
     workQueue.async {
       RunRecord.reportPreviousIfCrashed()
       self.sampleMemory()
       RunRecord.save(diag: self.diag(), finished: false)
-      self.pushHeartbeat()
     }
     let timer = DispatchSource.makeTimerSource(queue: workQueue)
     timer.schedule(
@@ -89,7 +113,7 @@ final class BroadcastDetector {
       repeating: .seconds(heartbeatInterval),
       leeway: .seconds(5))
     timer.setEventHandler { [weak self] in
-      self?.pushHeartbeat()
+      self?.heartbeat()
     }
     timer.resume()
     heartbeatTimer = timer
@@ -98,57 +122,80 @@ final class BroadcastDetector {
   func finish() {
     heartbeatTimer?.cancel()
     heartbeatTimer = nil
-    // 程序在這個方法 return 後就會被結束 → 等最後一次 update 送出（最多 3 秒）
+    PandaSignal.post(PandaSignal.stopped)
+    // 程序在這個方法 return 後就會被結束 → 等最後一則（靜音）摘要通知送出（最多 2 秒）
     let done = DispatchSemaphore(value: 0)
     workQueue.async {
-      let text = "偵測已停止 \(Clock.hms(Date())) · \(self.diag())"
-      RunRecord.save(diag: text, finished: true)
-      guard let activity = DetectorCard.find().activity else {
-        done.signal()
-        return
-      }
-      let current = activity.content
-      var state = current.state
-      let counting = state.mode == "countdown" && state.deadline > Date()
-      if !counting { state.mode = "stopped" }  // 倒數中就保留倒數，只換診斷字
-      state.heartbeat = Date()
-      state.diag = text
-      let content = ActivityContent(state: state, staleDate: counting ? current.staleDate : nil)
+      self.sampleMemory()
+      let text = self.diag()
+      RunRecord.save(diag: "偵測已停止 \(Clock.hms(Date())) · \(text)", finished: true)
       Task.detached {
-        await activity.update(content)
+        await Notifier.post("偵測已停止", text, passive: true)
         done.signal()
       }
     }
-    _ = done.wait(timeout: .now() + 3)
+    _ = done.wait(timeout: .now() + 2)
   }
+
+  /// 每 60 秒：心跳給 App；記錄本輪診斷（被系統殺掉時下次開始會回報）；峰值 >40MB 發靜音通知
+  private func heartbeat() {
+    PandaSignal.post(PandaSignal.heartbeat)
+    sampleMemory()
+    let text = diag()
+    RunRecord.save(diag: text, finished: false)
+    if peakMB > memoryAlertMB && peakMB >= alertedPeakMB + 3 {
+      alertedPeakMB = peakMB
+      Task.detached {
+        await Notifier.post("偵測記憶體偏高", "峰值超過 40MB（上限約 50MB，超過會被系統關掉）\n\(text)", passive: true)
+      }
+    }
+  }
+
+  // MARK: - 每幀
 
   func process(_ sampleBuffer: CMSampleBuffer) {
     let now = CFAbsoluteTimeGetCurrent()
     lock.lock()
     framesReceived += 1
-    let shouldProcess = !busy && now - lastOcrStart >= ocrInterval
-    if shouldProcess {
+    let shouldCheck = !busy && now - lastCheckStart >= ocrInterval
+    if shouldCheck {
       busy = true
-      lastOcrStart = now
+      lastCheckStart = now
     }
     lock.unlock()
-    guard shouldProcess else { return }  // 節流＋忙就丟幀
+    guard shouldCheck else { return }  // 節流＋忙就丟幀
 
-    // 在回呼內就把畫面縮成小 CGImage，不把 ReplayKit 的 pixel buffer 留到別的執行緒（避免卡住它的 buffer pool）
-    var image: CGImage?
+    // 在回呼內就把畫面縮成小灰階圖，不把 ReplayKit 的 pixel buffer 帶到別的執行緒
+    var made: GrayFrame?
+    var format: OSType?
     autoreleasepool {
-      image = makeImage(sampleBuffer)
+      (made, format) = GrayFrame.make(
+        sampleBuffer, bottomFraction: bottomFraction, maxLongEdge: maxLongEdge)
     }
-    guard let cgImage = image else {
+    guard let frame = made else {
       lock.lock()
       imageFailures += 1
+      if let f = format { badFormat = f }
       busy = false
       lock.unlock()
       return
     }
+
+    lock.lock()
+    let same = lastHash.map { GrayFrame.distance($0, frame.hash) <= sameFrameMaxBits } ?? false
+    if same && now - lastOcrAt < forceOcrInterval {
+      skipped += 1
+      busy = false
+      lock.unlock()
+      return
+    }
+    lastHash = frame.hash
+    lastOcrAt = now
+    lock.unlock()
+
     workQueue.async {
       autoreleasepool {
-        self.runOCR(cgImage)
+        self.runOCR(frame)
       }
       self.lock.lock()
       self.busy = false
@@ -156,34 +203,14 @@ final class BroadcastDetector {
     }
   }
 
-  // MARK: - 影像與 OCR
-
-  private func makeImage(_ sampleBuffer: CMSampleBuffer) -> CGImage? {
-    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
-    var image = CIImage(cvPixelBuffer: pixelBuffer)
-    if let raw = CMGetAttachment(
-      sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber,
-      let orientation = CGImagePropertyOrientation(rawValue: raw.uint32Value)
-    {
-      image = image.oriented(orientation)
-    }
-    let extent = image.extent
-    guard extent.width > 0, extent.height > 0 else { return nil }
-    // CIImage 原點在左下 → 畫面下方 60% 是 y 較小的那段
-    let crop = CGRect(
-      x: extent.minX, y: extent.minY, width: extent.width, height: (extent.height * bottomFraction).rounded())
-    image = image.cropped(to: crop)
-    let scale = min(1, maxLongEdge / max(crop.width, crop.height))
-    if scale < 1 {
-      image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-    }
-    return ciContext.createCGImage(image, from: image.extent.integral)
-  }
-
-  private func runOCR(_ cgImage: CGImage) {
+  private func runOCR(_ frame: GrayFrame) {
     let text: String
     do {
-      text = try FrameOCR.recognize(cgImage)
+      guard let image = frame.cgImage() else {
+        ocrErrors += 1
+        return
+      }
+      text = try ocr.recognize(image, orientation: frame.orientation)
     } catch {
       ocrErrors += 1
       return
@@ -203,59 +230,13 @@ final class BroadcastDetector {
     lastTriggerMinutes = minutes
     lastTriggerAt = now
     triggerCount += 1
-    trigger(minutes: minutes, at: now)
-  }
-
-  // MARK: - Live Activity
-
-  private func trigger(minutes: Int, at now: Date) {
-    let deadline = now.addingTimeInterval(Double(minutes) * 60)
-    let text = diag()
-    let state = PandaTimerAttributes.ContentState(
-      deadline: deadline, estimateMinutes: minutes, mode: "countdown", heartbeat: now, diag: text)
-    let found = DetectorCard.find()
-    Task.detached {
-      let outcome: String
-      if let activity = found.activity {
-        await activity.update(ActivityContent(state: state, staleDate: deadline))
-        outcome = "動態島已改成 \(minutes) 分倒數（結果 A）"
-      } else {
-        outcome = await DetectorCard.requestNew(
-          minutes: minutes, deadline: deadline, beat: now, diag: text, total: found.total)
-      }
-      await Notifier.post("偵測到新單：\(minutes) 分鐘", "\(outcome)\n\(text)")
-    }
-  }
-
-  /// 每 60 秒：只更新心跳與診斷字，倒數內容不動
-  private func pushHeartbeat() {
-    sampleMemory()
-    let text = diag()
-    RunRecord.save(diag: text, finished: false)
-    let found = DetectorCard.find()
-    guard let activity = found.activity else {
-      noteBlind(total: found.total, text: text)
-      return
-    }
-    let current = activity.content
-    var state = current.state
-    if state.mode == "stopped" { state.mode = "standby" }  // 上一輪停止留下的卡 → 回到待命
-    state.heartbeat = Date()
-    state.diag = text
-    let content = ActivityContent(state: state, staleDate: state.mode == "countdown" ? current.staleDate : nil)
-    Task.detached {
-      await activity.update(content)
-    }
-  }
-
-  private func noteBlind(total: Int, text: String) {
-    let now = Date()
-    if let last = lastBlindNoticeAt, now.timeIntervalSince(last) < blindNoticeInterval { return }
-    lastBlindNoticeAt = now
+    let sent = PandaSignal.postOrder(minutes)
+    let text2 = diag()
     Task.detached {
       await Notifier.post(
-        "⚠️ 偵測程式看不到動態島（結果 B）",
-        "偵測仍在執行，但系統內 \(total) 張熊貓卡片裡沒有偵測卡。\n\(text)")
+        "偵測到新單：\(minutes) 分鐘",
+        (sent ? "已通知 App 開倒數與記錄" : "分鐘數超出 1–90，未通知 App") + "\n\(text2)",
+        passive: false)
     }
   }
 
@@ -271,64 +252,161 @@ final class BroadcastDetector {
     lock.lock()
     let frames = framesReceived
     let fails = imageFailures
+    let skips = skipped
+    let format = badFormat
     lock.unlock()
     var parts = [
       "幀 \(frames)",
       "OCR \(ocrCount)",
+      "跳 \(skips)",
       "\(Int(currentMB.rounded()))/\(Int(peakMB.rounded()))MB",
       lastSawAccept ? "末次:有接單鈕" : "末次:無",
     ]
     if triggerCount > 0, let m = lastTriggerMinutes { parts.append("觸發\(triggerCount)(\(m)分)") }
     if ocrErrors + fails > 0 { parts.append("錯\(ocrErrors)/\(fails)") }
+    if let f = format { parts.append("格式\(String(format: "%08X", f))") }
     return parts.joined(separator: " · ")
   }
 }
 
-// MARK: - 偵測卡（ActivityKit；獨立 enum，不受 RPBroadcastSampleHandler 的 actor 隔離影響）
+// MARK: - 灰階小圖（直接取亮度，不經 CIContext）
 
-enum DetectorCard {
-  /// 只認「偵測卡」：mode == standby/stopped，或 heartbeat 有值（由偵測程式管理的倒數）。
-  /// 不碰 App 一般開單的倒數卡，以免把真正進行中的單改掉。total＝系統裡看得到的熊貓卡片總數（診斷用）。
-  static func find() -> (activity: Activity<PandaTimerAttributes>?, total: Int) {
-    let all = Activity<PandaTimerAttributes>.activities.filter {
-      $0.activityState != .ended && $0.activityState != .dismissed
+struct GrayFrame {
+  let width: Int
+  let height: Int
+  let pixels: [UInt8]
+  let orientation: CGImagePropertyOrientation
+  let hash: [UInt64]  // 64×64 平均雜湊，4096 bits
+
+  /// 失敗時回傳 (nil, 不支援的像素格式或 nil)
+  static func make(_ sampleBuffer: CMSampleBuffer, bottomFraction: Double, maxLongEdge: Int)
+    -> (GrayFrame?, OSType?)
+  {
+    guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return (nil, nil) }
+    var orientation = CGImagePropertyOrientation.up
+    if let raw = CMGetAttachment(
+      sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber,
+      let o = CGImagePropertyOrientation(rawValue: raw.uint32Value)
+    {
+      orientation = o
     }
-    let mine =
-      all.first { $0.content.state.mode == "standby" }
-      ?? all.first { $0.content.state.mode == "stopped" }
-      ?? all.first { $0.content.state.heartbeat != nil }
-    return (mine, all.count)
+    let format = CVPixelBufferGetPixelFormatType(pb)
+    let isBGRA = format == kCVPixelFormatType_32BGRA
+    let isYUV =
+      format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+      || format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    guard isBGRA || isYUV else { return (nil, format) }
+
+    CVPixelBufferLockBaseAddress(pb, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+    let base: UnsafeMutableRawPointer?
+    let width: Int
+    let height: Int
+    let stride: Int
+    let bpp: Int
+    if isYUV {
+      base = CVPixelBufferGetBaseAddressOfPlane(pb, 0)
+      width = CVPixelBufferGetWidthOfPlane(pb, 0)
+      height = CVPixelBufferGetHeightOfPlane(pb, 0)
+      stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+      bpp = 1
+    } else {
+      base = CVPixelBufferGetBaseAddress(pb)
+      width = CVPixelBufferGetWidth(pb)
+      height = CVPixelBufferGetHeight(pb)
+      stride = CVPixelBufferGetBytesPerRow(pb)
+      bpp = 4
+    }
+    guard let raw = base, width > 0, height > 0 else { return (nil, nil) }
+    let src = raw.assumingMemoryBound(to: UInt8.self)
+
+    // 直立（.up）：新單資訊卡在下半 → 只取下方 bottomFraction 的列；其他方向不裁，方向交給 Vision
+    let y0 = orientation == .up ? Int(Double(height) * (1 - bottomFraction)) : 0
+    let cropH = height - y0
+    let factor = max(1, (max(width, cropH) + maxLongEdge - 1) / maxLongEdge)
+    let outW = width / factor
+    let outH = cropH / factor
+    guard outW > 0, outH > 0 else { return (nil, nil) }
+    let area = factor * factor
+    var pixels = [UInt8](repeating: 0, count: outW * outH)
+    pixels.withUnsafeMutableBufferPointer { out in
+      for oy in 0..<outH {
+        let rowBase = y0 + oy * factor
+        for ox in 0..<outW {
+          var sum = 0
+          for dy in 0..<factor {
+            let row = src + (rowBase + dy) * stride
+            for dx in 0..<factor {
+              let p = row + (ox * factor + dx) * bpp
+              if bpp == 1 {
+                sum += Int(p[0])
+              } else {
+                sum += (Int(p[0]) + 2 * Int(p[1]) + Int(p[2])) >> 2  // BGRA → 近似亮度
+              }
+            }
+          }
+          out[oy * outW + ox] = UInt8(sum / area)
+        }
+      }
+    }
+    let frame = GrayFrame(
+      width: outW, height: outH, pixels: pixels, orientation: orientation,
+      hash: averageHash(pixels, width: outW, height: outH))
+    return (frame, nil)
   }
 
-  /// 找不到偵測卡時，試試偵測程式能不能自己開一張（多半會被拒，結果寫進通知當診斷）
-  static func requestNew(minutes: Int, deadline: Date, beat: Date, diag: String, total: Int) async -> String {
-    do {
-      // 與 native/intents 的 IntentLiveActivity.start 同寫法：只捕捉 Sendable 的值，在 MainActor 上 request
-      let id = try await MainActor.run { () throws -> String in
-        let state = PandaTimerAttributes.ContentState(
-          deadline: deadline, estimateMinutes: minutes, mode: "countdown", heartbeat: beat, diag: diag)
-        let activity = try Activity<PandaTimerAttributes>.request(
-          attributes: PandaTimerAttributes(acceptedAt: beat),
-          content: ActivityContent(state: state, staleDate: deadline),
-          pushType: nil)
-        return activity.id
+  static func averageHash(_ pixels: [UInt8], width: Int, height: Int) -> [UInt64] {
+    let n = 64
+    var samples = [Int](repeating: 0, count: n * n)
+    var total = 0
+    for y in 0..<n {
+      let sy = min(height - 1, y * height / n)
+      for x in 0..<n {
+        let sx = min(width - 1, x * width / n)
+        let v = Int(pixels[sy * width + sx])
+        samples[y * n + x] = v
+        total += v
       }
-      return "看不到偵測卡，但偵測程式自己開了新動態島（結果 C，\(id.prefix(6))）"
-    } catch {
-      return "看不到偵測卡（系統內熊貓卡 \(total) 張），自己開也失敗（結果 B）：\(error.localizedDescription)"
     }
+    let mean = total / (n * n)
+    var bits = [UInt64](repeating: 0, count: n * n / 64)
+    for i in 0..<(n * n) where samples[i] > mean {
+      bits[i >> 6] |= UInt64(1) << UInt64(i & 63)
+    }
+    return bits
+  }
+
+  static func distance(_ a: [UInt64], _ b: [UInt64]) -> Int {
+    guard a.count == b.count else { return Int.max }
+    var d = 0
+    for i in 0..<a.count { d += (a[i] ^ b[i]).nonzeroBitCount }
+    return d
+  }
+
+  func cgImage() -> CGImage? {
+    guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
+    return CGImage(
+      width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: width,
+      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+      provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
   }
 }
 
-// MARK: - OCR（行合併邏輯同 native/intents/PandaIntents.swift 的 ScreenshotOCR）
+// MARK: - OCR（request 只建一次重用；行合併邏輯同 native/intents/PandaIntents.swift 的 ScreenshotOCR）
 
-enum FrameOCR {
-  static func recognize(_ image: CGImage) throws -> String {
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate  // .fast 不支援中文
-    request.recognitionLanguages = ["zh-Hant", "en-US"]
-    request.usesLanguageCorrection = false
-    let handler = VNImageRequestHandler(cgImage: image, options: [:])
+final class FrameOCR {
+  private let request: VNRecognizeTextRequest = {
+    let r = VNRecognizeTextRequest()
+    r.recognitionLevel = .accurate  // .fast 不支援中文
+    r.recognitionLanguages = ["zh-Hant", "en-US"]
+    r.usesLanguageCorrection = false
+    r.minimumTextHeight = 0.018  // 相對圖高；小圖長邊 800px → 約 14px 以下的字略過
+    return r
+  }()
+
+  /// 只在 workQueue 呼叫（request 不是執行緒安全的）
+  func recognize(_ image: CGImage, orientation: CGImagePropertyOrientation) throws -> String {
+    let handler = VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
     try handler.perform([request])
     let observations = request.results ?? []
 
@@ -380,17 +458,17 @@ enum Memory {
 }
 
 // MARK: - 本地通知（授權沿用 App 的；extension 無法跳授權詢問）
-// 不先查 authorizationStatus：extension 讀到的狀態是否等於 App 的沒把握，直接 add，失敗就算了。
+// 一律不響聲；passive＝只進通知中心不亮螢幕。不用 timeSensitive/critical（需要 entitlement）。
 
 enum Notifier {
-  static func post(_ title: String, _ body: String) async {
-    let center = UNUserNotificationCenter.current()
+  static func post(_ title: String, _ body: String, passive: Bool) async {
     let content = UNMutableNotificationContent()
     content.title = title
     content.body = body
-    content.sound = .default
+    content.sound = nil
+    content.interruptionLevel = passive ? .passive : .active
     let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-    try? await center.add(request)
+    try? await UNUserNotificationCenter.current().add(request)
   }
 }
 
@@ -413,7 +491,7 @@ enum RunRecord {
     let diag = (last["diag"] as? String) ?? ""
     let when = Clock.hms(Date(timeIntervalSince1970: at))
     Task.detached {
-      await Notifier.post("⚠️ 上次偵測異常中止", "最後紀錄 \(when)：\(diag)（可能記憶體超過上限被系統關掉）")
+      await Notifier.post("⚠️ 上次偵測異常中止", "最後紀錄 \(when)：\(diag)（可能記憶體超過上限被系統關掉）", passive: false)
     }
   }
 }

@@ -60,11 +60,13 @@ jobs:
       - name: Guard - identical shared Swift files
         run: |
           set -e
-          for f in modules/live-activity/ios/PandaTimerAttributes.swift targets/widget/PandaTimerAttributes.swift targets/broadcast/PandaTimerAttributes.swift; do
+          # v0.4：broadcast extension 不再用 ActivityKit（實測不可用），PandaTimerAttributes 剩 3 份
+          for f in modules/live-activity/ios/PandaTimerAttributes.swift targets/widget/PandaTimerAttributes.swift; do
             diff -u native/intents/PandaTimerAttributes.swift "$f" || { echo "::error file=$f::PandaTimerAttributes.swift 各份不一致"; exit 1; }
           done
           diff -u native/intents/MinutePicker.swift targets/broadcast/MinutePicker.swift || { echo "::error::MinutePicker.swift 兩份不一致"; exit 1; }
           diff -u native/intents/DeliverActivityIntent.swift targets/widget/DeliverActivityIntent.swift || { echo "::error::DeliverActivityIntent.swift 兩份不一致"; exit 1; }
+          if grep -rn 'import ActivityKit' targets/broadcast; then echo "::error::broadcast extension 不得 import ActivityKit（v0.3 實測不可用）"; exit 1; fi
 
       - name: Expo prebuild (iOS)
         run: npx expo prebuild -p ios --clean --no-install
@@ -88,6 +90,9 @@ jobs:
           # v0.3：PandaBroadcast target 必須存在（否則下面的 appex 檢查會晚 10 分鐘才失敗）
           grep -q 'PRODUCT_BUNDLE_IDENTIFIER = com.pandatimer.app.broadcast;' ios/PandaTimer.xcodeproj/project.pbxproj \
             || { echo "::error::pbxproj 沒有 PandaBroadcast（com.pandatimer.app.broadcast）"; exit 1; }
+          # v0.4：背景音訊保活靠 Info.plist 的 UIBackgroundModes=audio（不是 entitlement）
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' ios/PandaTimer/Info.plist | grep -qx '[[:space:]]*audio' \
+            || { echo "::error::主 App Info.plist 的 UIBackgroundModes 沒有 audio"; exit 1; }
 
       - name: Pod install
         working-directory: ios
@@ -160,6 +165,8 @@ jobs:
             fi
           done
           /usr/libexec/PlistBuddy -c 'Print :NSSupportsLiveActivities' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$APP/Info.plist" | grep -qx '[[:space:]]*audio' \
+            || { echo "::error::打包後主 App 的 UIBackgroundModes 沒有 audio"; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
           mkdir -p build/ipa/Payload

@@ -158,10 +158,22 @@ export function initNativeBridge(feedback?: Feedback): () => void {
   const appSub = AppState.addEventListener('change', (s) => {
     if (s === 'active') void drainFromNative().then(report).catch(() => undefined);
   });
+  // v0.4：自動偵測新單／動態島送達（App Intents）→ 原生已寫好事件佇列，這裡立刻 drain 入帳。
+  // App 在背景時靠音訊保活 JS 仍在跑；就算沒跑到，回前景的 drain 也會補上（事件留在佇列裡）。
+  const detSub = LiveActivity.addDetectorListener((ev) => {
+    if (ev.type !== 'order' && ev.type !== 'drain') return;
+    void drainFromNative()
+      .then((n) => {
+        if (ev.type === 'order') feedback?.(`自動偵測新單：${ev.minutes ?? '?'} 分（已記錄）`);
+        else report(n);
+      })
+      .catch(() => undefined);
+  });
   return () => {
     disposed = true;
     unsubscribe?.();
     appSub.remove();
+    detSub();
   };
 }
 

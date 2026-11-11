@@ -84,3 +84,24 @@ test('orphanActivityIds：偵測卡一律保留，其餘照舊對帳', () => {
   assert.deepEqual(orphanActivityIds(alive, ['A1', undefined]), ['A2']);
   assert.deepEqual(orphanActivityIds([], ['A1']), []);
 });
+
+test('v0.4 自動單：source 保留；沿用偵測卡時舊單讓出 activityId', () => {
+  const ev = parseNativeEvents([
+    { type: 'start', id: 'a1', acceptedAt: 0, estimateMin: 20, deadline: 20 * MIN, activityId: 'DET', notifIds: [], source: 'auto' },
+    { type: 'start', id: 'a2', acceptedAt: 5 * MIN, estimateMin: 27, deadline: 32 * MIN, activityId: 'DET', notifIds: [], source: 'auto' },
+    { type: 'start', id: 'x', acceptedAt: 6 * MIN, estimateMin: 10, deadline: 16 * MIN, source: 'weird' },
+  ]);
+  assert.equal(ev[0].source, 'auto');
+  assert.equal('source' in ev[2], false);
+  const out = applyNativeEvents([jsOrder('j1', 1 * MIN, { activityId: 'OTHER' })], ev);
+  const a1 = out.find((o) => o.id === 'a1');
+  const a2 = out.find((o) => o.id === 'a2');
+  assert.equal(a1.activityId, undefined);
+  assert.equal(a2.activityId, 'DET');
+  assert.equal(a2.source, 'auto');
+  assert.equal(out.find((o) => o.id === 'j1').activityId, 'OTHER');
+  // 之後動態島送達（只帶 activityId）→ 結的是最新那單 a2
+  const after = applyNativeEvents(out, parseNativeEvents([{ type: 'done', at: 30 * MIN, activityId: 'DET' }]));
+  assert.equal(after.find((o) => o.id === 'a2').status, 'delivered');
+  assert.equal(after.find((o) => o.id === 'a1').status, 'active');
+});

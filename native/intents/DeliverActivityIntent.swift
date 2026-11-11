@@ -77,12 +77,28 @@ enum PandaSharedStore {
       active.append(order)
       writeArray(active, activeKey)
     }
+    postDrain()
+  }
+
+  /// v0.4：事件佇列有新東西 → Darwin 通知「com.pandatimer.drain」。App 程序（保活中）的
+  /// DetectorHub 收到就叫 JS 立刻 drain，自動偵測的單送達後不必等回前景才入帳。
+  /// widget 端也編得過但不會執行（LiveActivityIntent 的 perform 在 App 程序跑）。
+  static func postDrain() {
+    CFNotificationCenterPostNotification(
+      CFNotificationCenterGetDarwinNotifyCenter(),
+      CFNotificationName("com.pandatimer.drain" as CFString), nil, nil, true)
   }
 
   /// 結單：activityId 有值 → 結對應那張動態島的單；nil → 結最早接單的一筆。
   /// 從鏡像移除並寫入 done 事件，回傳被結的單（鏡像裡找不到則 nil）。
   /// 指定 activityId 但鏡像沒有時，仍寫入只帶 activityId 的 done 事件，交給 JS 以 activityId 對應。
   static func finishOrder(activityId: String?, at date: Date) -> ActiveOrder? {
+    let finished = finishOrderLocked(activityId: activityId, at: date)
+    postDrain()
+    return finished
+  }
+
+  private static func finishOrderLocked(activityId: String?, at date: Date) -> ActiveOrder? {
     withLock { () -> ActiveOrder? in
       var active = readArray(activeKey)
       var index: Int?

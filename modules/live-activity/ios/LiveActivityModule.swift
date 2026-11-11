@@ -18,6 +18,20 @@ public class LiveActivityModule: Module {
   public func definition() -> ModuleDefinition {
     Name("LiveActivity")
 
+    // v0.4：extension → App 的 Darwin 訊號（新單/心跳/開始/停止/drain）轉成 JS 事件
+    Events("onDetectorSignal")
+
+    OnCreate {
+      DetectorHub.shared.attach { [weak self] body in
+        self?.sendEvent("onDetectorSignal", body)
+      }
+      DetectorHub.shared.registerIfNeeded()
+    }
+
+    OnAppBecomesActive {
+      DetectorHub.shared.appBecameActive()
+    }
+
     // 系統版本夠新、且使用者沒在設定裡關掉「即時動態」
     Function("isSupported") { () -> Bool in
       if #available(iOS 16.2, *) {
@@ -55,7 +69,8 @@ public class LiveActivityModule: Module {
       }
     }.runOnQueue(.main)
 
-    // 結束指定 id 的 Live Activity（找不到也算成功）
+    // 結束指定 id 的 Live Activity（找不到也算成功）。
+    // v0.4：由偵測程式管理的卡（heartbeat 有值）不結束，改回「偵測中」待命（同 PandaSharedStore.cleanup）。
     AsyncFunction("end") { (id: String, promise: Promise) in
       guard #available(iOS 16.2, *) else {
         promise.resolve(nil)
@@ -64,7 +79,14 @@ public class LiveActivityModule: Module {
       let targets = Activity<PandaTimerAttributes>.activities.filter { $0.id == id }
       Task {
         for activity in targets {
-          await activity.end(nil, dismissalPolicy: .immediate)
+          var state = activity.content.state
+          if state.heartbeat != nil {
+            state.mode = "standby"
+            state.diag = "已送達，回到偵測 · " + (state.diag ?? "")
+            await activity.update(ActivityContent(state: state, staleDate: nil))
+          } else {
+            await activity.end(nil, dismissalPolicy: .immediate)
+          }
         }
         promise.resolve(nil)
       }
@@ -144,6 +166,23 @@ public class LiveActivityModule: Module {
       }
     }
 
+    // v0.4：App「開始偵測」（前景）→ 背景音訊保活＋看門狗。回傳 detectorStatus 的 JSON。
+    Function("armDetection") { () -> String in
+      DetectorHub.shared.registerIfNeeded()
+      DetectorHub.shared.arm()
+      return DetectorHub.shared.statusJSON()
+    }
+
+    // v0.4：App「停止偵測」→ 停保活、偵測卡結束（倒數中的卡交還給那張單）
+    AsyncFunction("stopDetection") { () async -> Void in
+      await DetectorHub.shared.disarm()
+    }
+
+    // v0.4：偵測狀態 JSON（armed/keepAlive/lastBeatAt/lastOrderMinutes/lastOrderAt/lastOrderHow/autoCountSinceLaunch）
+    Function("detectorStatus") { () -> String in
+      return DetectorHub.shared.statusJSON()
+    }
+
     // 系統「螢幕廣播」選擇器（RPSystemBroadcastPickerView）。JS 用 ref.show() 程式觸發，
     // 觸發不了（回傳 false）時使用者可直接點這個 view 本身。
     View(BroadcastPickerView.self) {
@@ -207,9 +246,41 @@ public class LiveActivityModule: Module {
   }
 }
 
-private enum NativeSync {
+enum NativeSync {
   static let eventsKey = "pandatimer.native.events.v1"
   static let activeKey = "pandatimer.native.activeOrders.v1"
+
+  /// v0.4 自動偵測開單：與 PandaSharedStore.recordStart 同格式（start 事件＋進行中鏡像），同一把鎖。
+  /// takesOverActivity：沿用偵測卡（同一張卡被改成新倒數）→ 鏡像裡其他單的同一 activityId 要拿掉，
+  /// 否則動態島「送達」會結到舊單。JS 端 applyNativeEvents 也做同樣處理。
+  static func recordStart(_ order: [String: Any], takesOverActivity: Bool) {
+    let defaults = UserDefaults.standard
+    objc_sync_enter(defaults)
+    defer { objc_sync_exit(defaults) }
+    var event = order
+    event["type"] = "start"
+    var events = readArray(eventsKey)
+    events.append(event)
+    writeArray(events, eventsKey)
+    var active = readArray(activeKey)
+    if takesOverActivity, let aid = order["activityId"] as? String {
+      active = active.map { item in
+        guard (item["activityId"] as? String) == aid else { return item }
+        var copy = item
+        copy.removeValue(forKey: "activityId")
+        return copy
+      }
+    }
+    active.append(order)
+    writeArray(active, activeKey)
+  }
+
+  static func writeArray(_ array: [[String: Any]], _ key: String) {
+    guard let data = try? JSONSerialization.data(withJSONObject: array, options: []),
+          let text = String(data: data, encoding: .utf8)
+    else { return }
+    UserDefaults.standard.set(text, forKey: key)
+  }
 
   static func readArray(_ key: String) -> [[String: Any]] {
     guard let text = UserDefaults.standard.string(forKey: key),

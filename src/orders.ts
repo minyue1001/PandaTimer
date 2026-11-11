@@ -19,6 +19,8 @@ export type Order = {
   activityId?: string;
   /** 已排程的本地通知 id */
   notifIds?: string[];
+  /** v0.4：'auto'＝螢幕廣播自動偵測開的單（其餘為手動/捷徑） */
+  source?: 'auto';
 };
 
 export const DEFAULT_ESTIMATE = 18;

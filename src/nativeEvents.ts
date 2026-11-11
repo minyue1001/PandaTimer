@@ -1,6 +1,8 @@
 // 原生（App Intents，背景、不跑 JS）寫進 UserDefaults 的事件 → 合併進 JS 訂單。純函式，只有 type import。
 // 事件格式由 native/intents/DeliverActivityIntent.swift 的 PandaSharedStore 寫入：
-//   start: { type:'start', id, acceptedAt, estimateMin, deadline, activityId?, notifIds? }   (時間皆 ms)
+//   start: { type:'start', id, acceptedAt, estimateMin, deadline, activityId?, notifIds?, source? }   (時間皆 ms)
+//     v0.4 自動偵測開的單由 modules/live-activity 的 DetectorHub 寫入同一佇列（source:'auto'）。
+//     若沿用了偵測卡（同一張卡改成新倒數），其他進行中訂單的同一 activityId 要拿掉（動態島只代表最新那單）。
 //   done:  { type:'done', at, orderId?, activityId? }
 //     有 orderId → 只結那一單；否則有 activityId → 只結對應動態島那一單；都沒有 → 最早一筆進行中。
 //     指定了但找不到（例如已在 App 內按過送達/取消）→ 忽略，不誤結別張單。
@@ -14,6 +16,7 @@ export type NativeStartEvent = {
   deadline: number;
   activityId?: string;
   notifIds?: string[];
+  source?: 'auto';
 };
 export type NativeDoneEvent = { type: 'done'; at: number; orderId?: string; activityId?: string };
 export type NativeEvent = NativeStartEvent | NativeDoneEvent;
@@ -37,6 +40,7 @@ export function parseNativeEvents(raw: unknown): NativeEvent[] {
         deadline: r.deadline,
         activityId: isStr(r.activityId) ? r.activityId : undefined,
         notifIds: Array.isArray(r.notifIds) ? r.notifIds.filter(isStr) : [],
+        ...(r.source === 'auto' ? { source: 'auto' as const } : {}),
       });
     } else if (r.type === 'done' && isNum(r.at)) {
       out.push({
@@ -62,6 +66,13 @@ export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order
   for (const ev of events) {
     if (ev.type === 'start') {
       if (list.some((o) => o.id === ev.id)) continue; // 重複事件
+      const takenId = ev.activityId;
+      if (takenId) {
+        // 同一張動態島被新單接手（偵測卡疊單覆蓋）→ 舊單不再擁有它，免得送達/結束時動到新單的卡
+        list = list.map((o) =>
+          o.status === 'active' && o.activityId === takenId ? { ...o, activityId: undefined } : o,
+        );
+      }
       list = [
         {
           id: ev.id,
@@ -71,6 +82,7 @@ export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order
           status: 'active',
           activityId: ev.activityId,
           notifIds: ev.notifIds ?? [],
+          ...(ev.source ? { source: ev.source } : {}),
         },
         ...list,
       ];
