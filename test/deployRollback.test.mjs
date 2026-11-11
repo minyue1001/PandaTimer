@@ -1,7 +1,12 @@
 // scripts/deploy-updates-server.sh 的遠端回滾邏輯（restore-prev / nginx-restore）本機模擬：
 // 從腳本抽出單引號 heredoc 的遠端 lib，BASE/SYSTEMD_DIR/NGINX 都指到暫存目錄，systemctl/curl/journalctl 換成 stub（PATH 最前面），
 // 絕不碰真的 systemd、nginx 或任何遠端主機。
-import test from 'node:test';
+import nodeTest from 'node:test';
+// 這支測試模擬的是遠端 Linux 主機上的部署 lib（GNU coreutils／bash 5）；CI 的 macOS runner 工具行為不同 → 只在 Linux 跑
+const test = process.platform === 'linux'
+  ? nodeTest
+  : (name, fn) => nodeTest(name, { skip: '遠端部署 lib 只在 Linux 執行' }, fn);
+test.after = nodeTest.after;
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
