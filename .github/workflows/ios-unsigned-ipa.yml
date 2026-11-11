@@ -66,6 +66,8 @@ jobs:
           done
           diff -u native/intents/MinutePicker.swift targets/broadcast/MinutePicker.swift || { echo "::error::MinutePicker.swift 兩份不一致"; exit 1; }
           diff -u native/intents/DeliverActivityIntent.swift targets/widget/DeliverActivityIntent.swift || { echo "::error::DeliverActivityIntent.swift 兩份不一致"; exit 1; }
+          # v0.5：偵測卡「開始倒數」按鈕的 intent（主 App 執行、widget 畫按鈕）
+          diff -u native/intents/StartDetectedCountdownIntent.swift targets/widget/StartDetectedCountdownIntent.swift || { echo "::error::StartDetectedCountdownIntent.swift 兩份不一致"; exit 1; }
           if grep -rn 'import ActivityKit' targets/broadcast; then echo "::error::broadcast extension 不得 import ActivityKit（v0.3 實測不可用）"; exit 1; fi
 
       - name: Expo prebuild (iOS)
@@ -90,9 +92,20 @@ jobs:
           # v0.3：PandaBroadcast target 必須存在（否則下面的 appex 檢查會晚 10 分鐘才失敗）
           grep -q 'PRODUCT_BUNDLE_IDENTIFIER = com.pandatimer.app.broadcast;' ios/PandaTimer.xcodeproj/project.pbxproj \
             || { echo "::error::pbxproj 沒有 PandaBroadcast（com.pandatimer.app.broadcast）"; exit 1; }
-          # v0.4：背景音訊保活靠 Info.plist 的 UIBackgroundModes=audio（不是 entitlement）
-          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' ios/PandaTimer/Info.plist | grep -qx '[[:space:]]*audio' \
-            || { echo "::error::主 App Info.plist 的 UIBackgroundModes 沒有 audio"; exit 1; }
+          # v0.5：保活靠 Info.plist 的 UIBackgroundModes=[location, audio]＋兩個定位說明字串（都不是 entitlement）
+          PL=ios/PandaTimer/Info.plist
+          for M in location audio; do
+            /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$PL" | grep -qx "[[:space:]]*$M" \
+              || { echo "::error::主 App Info.plist 的 UIBackgroundModes 沒有 $M"; exit 1; }
+          done
+          for K in NSLocationWhenInUseUsageDescription NSLocationAlwaysAndWhenInUseUsageDescription; do
+            /usr/libexec/PlistBuddy -c "Print :$K" "$PL" | grep -q . \
+              || { echo "::error::主 App Info.plist 缺 $K（背景定位保活需要）"; exit 1; }
+          done
+          RV=$(/usr/libexec/PlistBuddy -c 'Print :EXUpdatesRuntimeVersion' ios/PandaTimer/Supporting/Expo.plist)
+          WANT=$(node -p "require('./app.json').expo.runtimeVersion")
+          echo "EXUpdatesRuntimeVersion=$RV（app.json：$WANT）"
+          [ "$RV" = "$WANT" ] || { echo "::error::Expo.plist 的 EXUpdatesRuntimeVersion=$RV 與 app.json runtimeVersion=$WANT 不一致"; exit 1; }
 
       - name: Pod install
         working-directory: ios
@@ -153,20 +166,28 @@ jobs:
           # v0.2 App Intents：metadata 必須擷取進主 App，否則捷徑 App 看不到「熊貓倒數」的動作（編譯不會報錯，只會靜默消失）
           AI="$APP/Metadata.appintents/extract.actionsdata"
           test -f "$AI" || { echo "::error::$AI 不存在（App Intents metadata 沒被擷取）"; ls -la "$APP"; exit 1; }
-          for N in StartFromScreenshotIntent DeliveredIntent DeliverActivityIntent; do
+          for N in StartFromScreenshotIntent DeliveredIntent DeliverActivityIntent StartDetectedCountdownIntent; do
             grep -q "$N" "$AI" || { echo "::error::主 App 的 App Intents metadata 缺 $N"; exit 1; }
           done
           echo "App Intents metadata OK: $(wc -c < "$AI") bytes"
           for X in "$APP"/PlugIns/PandaWidget.appex; do
-            if [ -f "$X/Metadata.appintents/extract.actionsdata" ] && grep -q DeliverActivityIntent "$X/Metadata.appintents/extract.actionsdata"; then
-              echo "widget metadata 含 DeliverActivityIntent: $X"
-            else
-              echo "::warning::$X 沒有含 DeliverActivityIntent 的 App Intents metadata（動態島送達按鈕可能無效）"
-            fi
+            for N in DeliverActivityIntent StartDetectedCountdownIntent; do
+              if [ -f "$X/Metadata.appintents/extract.actionsdata" ] && grep -q "$N" "$X/Metadata.appintents/extract.actionsdata"; then
+                echo "widget metadata 含 $N: $X"
+              else
+                echo "::warning::$X 沒有含 $N 的 App Intents metadata（動態島按鈕可能無效）"
+              fi
+            done
           done
           /usr/libexec/PlistBuddy -c 'Print :NSSupportsLiveActivities' "$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$APP/Info.plist" | grep -qx '[[:space:]]*audio' \
-            || { echo "::error::打包後主 App 的 UIBackgroundModes 沒有 audio"; exit 1; }
+          for M in location audio; do
+            /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$APP/Info.plist" | grep -qx "[[:space:]]*$M" \
+              || { echo "::error::打包後主 App 的 UIBackgroundModes 沒有 $M"; exit 1; }
+          done
+          for K in NSLocationWhenInUseUsageDescription NSLocationAlwaysAndWhenInUseUsageDescription; do
+            /usr/libexec/PlistBuddy -c "Print :$K" "$APP/Info.plist" | grep -q . \
+              || { echo "::error::打包後主 App 缺 $K"; exit 1; }
+          done
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
           mkdir -p build/ipa/Payload

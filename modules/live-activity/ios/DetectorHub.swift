@@ -1,17 +1,22 @@
 import ActivityKit
 import AVFoundation
+import CoreLocation
 import Foundation
+import UIKit
 import UserNotifications
 
-// v0.4：螢幕廣播 extension（PandaBroadcast）→ App 的訊號中樞。
+// v0.4/v0.5：螢幕廣播 extension（PandaBroadcast）→ App 的訊號中樞。
 // 實測（v0.3）：ActivityKit 在 broadcast extension 內完全不可用 → extension 只負責 OCR，
 // 用 Darwin notification（跨程序、不需 App Group/entitlement）以「名稱」編碼資料通知 App：
 //   com.pandatimer.order.<N>（N=1…90 分）、com.pandatimer.broadcast.started/.stopped/.heartbeat、
 //   com.pandatimer.drain（App Intents 寫了事件佇列 → 請 JS drain）。
 // ⚠️ 名稱與 targets/broadcast/SampleHandler.swift 的 Signal、src/detector.ts 的 parseSignalName 必須一致。
-// App 端要活著才收得到 → 偵測期間用背景音訊（靜音、mixWithOthers）保活，見 KeepAlive。
-// 動態島與訂單紀錄都在原生端完成（不依賴 JS 是否在跑）：開卡/改卡 → 排 2 則提醒 → 寫 start 事件進
-// UserDefaults 佇列（與 App Intents 同格式）→ 發事件叫 JS drain。
+// App 端要活著才收得到 → 偵測期間保活，見 KeepAlive。
+// v0.4 實測（iOS 26.6.2）：只靠靜音音訊保活時，背景的 Activity.update 全部無聲失效
+//   （liveactivitiesd：「Process is only playing background media so is forbidden to update activity」）。
+// v0.5：保活改用背景定位（音訊只當備援）；每次更新後回讀檢查；另有兩條一鍵備援：
+//   ① 點「偵測到新單」通知 → App 進前景 → appBecameActive 把最新自動單的倒數推到動態島；
+//   ② 偵測卡上的「開始倒數」按鈕（native/intents/StartDetectedCountdownIntent.swift，讀 LastAutoStore）。
 final class DetectorHub {
   static let shared = DetectorHub()
 
@@ -61,6 +66,7 @@ final class DetectorHub {
   private var lastOrderMinutes: Int?
   private var lastOrderAt: Date?
   private var lastOrderHow = ""
+  private var islandCheck = ""
   private var autoCount = 0
   private var beatAlerted = false
 
@@ -97,7 +103,7 @@ final class DetectorHub {
   }
   private var registeredOnMain = false  // 只在主執行緒存取
 
-  /// App「開始偵測」（前景）：開始音訊保活＋看門狗
+  /// App「開始偵測」（前景）：開始保活（定位優先、音訊備援）＋看門狗
   func arm() {
     queue.async {
       self.armed = true
@@ -108,7 +114,7 @@ final class DetectorHub {
     }
   }
 
-  /// App「停止偵測」：停保活；偵測卡若在倒數就交還給那張單（heartbeat=nil），否則結束
+  /// App「停止偵測」：停保活（定位＋音訊）；偵測卡若在倒數就交還給那張單（heartbeat=nil），否則結束
   func disarm() async {
     queue.sync {
       self.armed = false
@@ -129,17 +135,22 @@ final class DetectorHub {
 
   func statusJSON() -> String {
     let dict: [String: Any] = queue.sync {
+      let keep = keepAlive.snapshot()
       var d: [String: Any] = [
         "registered": registered,
         "armed": armed,
-        "keepAlive": keepAlive.snapshot().text,
+        "keepAlive": keep.text,
+        "keepAliveMode": keep.mode,
+        "locationAuth": keep.locationAuth,
         "autoCountSinceLaunch": autoCount,
         "lastOrderHow": lastOrderHow,
+        "islandCheck": islandCheck,
       ]
       if let b = lastBeat { d["lastBeatAt"] = Self.ms(b) }
       if let m = lastOrderMinutes { d["lastOrderMinutes"] = m }
       if let at = lastOrderAt { d["lastOrderAt"] = Self.ms(at) }
-      if let e = keepAlive.snapshot().error { d["keepAliveError"] = e }
+      if let e = keep.error { d["keepAliveError"] = e }
+      if let fix = keep.lastFixAt { d["lastFixAt"] = Self.ms(fix) }
       return d
     }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
@@ -148,11 +159,23 @@ final class DetectorHub {
     return text
   }
 
-  /// App 回到前景：補一次偵測卡（背景更新可能被系統擋掉）、確認保活仍在播
+  /// App 回到前景（含點「偵測到新單」通知打開 App）：
+  /// 最新自動單還沒送達 → 把它的倒數強制推到動態島（背景更新可能被系統擋掉，前景一定可以）＋回讀檢查；
+  /// 沒有待補的單 → 照舊只更新心跳/診斷字。不會重複記錄訂單（只改卡，不寫事件）。
   func appBecameActive() {
     queue.async {
-      self.keepAlive.ensurePlaying()
-      if self.armed || self.lastBeat != nil { self.pushCard(note: nil) }
+      self.keepAlive.ensure()
+      let tracking = self.armed || self.lastBeat != nil
+      Task {
+        if let check = await Self.restorePendingCountdown(reason: "回前景補推") {
+          self.queue.async {
+            self.islandCheck = check
+            self.emit(["type": "restored", "how": check])
+          }
+        } else if tracking {
+          self.queue.async { self.pushCard(note: nil) }
+        }
+      }
     }
   }
 
@@ -170,7 +193,7 @@ final class DetectorHub {
       lastBeat = now
       beatAlerted = false
       if !armed {
-        // 使用者從控制中心直接開廣播、App 剛好還活著：試著保活（背景啟動音訊可能被拒，失敗寫進狀態）
+        // 使用者從控制中心直接開廣播、App 剛好還活著：試著保活（背景啟動定位/音訊可能被拒，結果寫進狀態）
         armed = true
         armedAt = now
         keepAlive.start()
@@ -207,17 +230,33 @@ final class DetectorHub {
     lastOrderAt = now
     autoCount += 1
     lastOrderHow = "處理中…"
-    let deadline = now.addingTimeInterval(Double(minutes) * 60)
     let beat = lastBeat ?? now
     let diag = diagText(note: "自動新單 \(minutes) 分")
+    let orderId = "\(Int64(Self.ms(now)))-a\(UUID().uuidString.prefix(4).lowercased())"
+    // 收到訊號就先寫「最近一次自動偵測」：動態島「開始倒數」按鈕與回前景補推都讀這個
+    LastAutoStore.write(.init(
+      orderId: orderId, minutes: minutes, detectedAt: now,
+      deadline: now.addingTimeInterval(Double(minutes) * 60), activityId: nil))
 
     Task {
+      // App 曾被暫停 → 用 extension 那則「偵測到新單」通知裡的偵測時間（找不到就用收到訊號的時間）
+      var acceptedAt = now
+      var timeNote = ""
+      if wasSuspended {
+        if let t = await DetectorNotify.detectedAt(minutes: minutes, notAfter: now) {
+          acceptedAt = t
+          timeNote = "（App 曾被暫停，接單時間已改用偵測通知的 \(Self.hms(t))）"
+        } else {
+          timeNote = "（⚠️ App 曾被暫停，接單時間可能偏晚）"
+        }
+      }
+      let deadline = acceptedAt.addingTimeInterval(Double(minutes) * 60)
       let outcome = await Self.openOrderCard(
-        minutes: minutes, acceptedAt: now, deadline: deadline, beat: beat, diag: diag)
+        minutes: minutes, acceptedAt: acceptedAt, deadline: deadline, beat: beat, diag: diag)
       let notifIds = await DetectorReminders.schedule(deadline: deadline, estimateMin: minutes)
-      let acceptedMs = Self.ms(now)
+      let acceptedMs = Self.ms(acceptedAt)
       var order: [String: Any] = [
-        "id": "\(Int64(acceptedMs))-a\(UUID().uuidString.prefix(4).lowercased())",
+        "id": orderId,
         "acceptedAt": acceptedMs,
         "estimateMin": minutes,
         "deadline": Self.ms(deadline),
@@ -226,13 +265,21 @@ final class DetectorHub {
       ]
       if let aid = outcome.activityId { order["activityId"] = aid }
       NativeSync.recordStart(order, takesOverActivity: outcome.reusedDetectorCard)
-      let how = outcome.text + (wasSuspended ? "（⚠️ App 曾被暫停，接單時間可能偏晚）" : "")
+      LastAutoStore.write(.init(
+        orderId: orderId, minutes: minutes, detectedAt: acceptedAt, deadline: deadline,
+        activityId: outcome.activityId))
+      // 更新是否真的生效：1 秒後重新從 Activity.activities 讀同 id 的 content.state 比對
+      let check = await Self.verifyCountdown(activityId: outcome.activityId, deadline: deadline)
+      let how = outcome.text + timeNote
       self.queue.async {
         self.lastOrderHow = how
-        self.emit(["type": "order", "minutes": minutes, "how": how])
+        self.islandCheck = check
+        self.emit(["type": "order", "minutes": minutes, "how": how, "check": check])
       }
       await DetectorNotify.post(
-        title: "App 已記錄自動新單：\(minutes) 分", body: how, passive: true)
+        title: "App 已記錄自動新單：\(minutes) 分",
+        body: "\(check)\n\(how)\n動態島沒變的話：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」",
+        passive: true)
     }
   }
 
@@ -261,14 +308,14 @@ final class DetectorHub {
           pushType: nil)
         return activity.id
       }
-      return OrderCardOutcome(activityId: id, reusedDetectorCard: false, text: "動態島：背景新開倒數卡成功")
+      return OrderCardOutcome(activityId: id, reusedDetectorCard: false, text: "新開倒數卡成功")
     } catch {
       requestError = error.localizedDescription
     }
     guard let card = detectorCard() else {
       return OrderCardOutcome(
         activityId: nil, reusedDetectorCard: false,
-        text: "動態島：背景開卡被拒（\(requestError)），也找不到偵測卡 → 只記錄＋提醒通知")
+        text: "開新卡被拒（\(requestError)），也找不到偵測卡 → 只記錄＋提醒通知")
     }
     let old = card.content.state
     let overwrote = old.mode == "countdown" && old.deadline > Date()
@@ -281,9 +328,61 @@ final class DetectorHub {
     await card.update(ActivityContent(state: state, staleDate: deadline))
     return OrderCardOutcome(
       activityId: card.id, reusedDetectorCard: true,
-      text: "動態島：背景開新卡被拒（\(requestError)），已把偵測卡改成 \(minutes) 分倒數"
-        + (overwrote ? "（疊單：前一張自動單的倒數被覆蓋）" : "")
-        + "；若動態島沒變＝系統擋了背景更新")
+      text: "開新卡被拒（\(requestError)），已把偵測卡改成 \(minutes) 分倒數"
+        + (overwrote ? "（疊單：前一張自動單的倒數被覆蓋）" : ""))
+  }
+
+  /// 更新後 1 秒回讀：同 id 的卡 content.state 是否為新的倒數（mode/deadline）。
+  /// ⚠️ 讀到的是本程序 ActivityKit 的狀態；若系統（liveactivitiesd）拒絕但本地狀態已改，這裡仍會是 ✓ —
+  /// 所以通知/App 上的 ✓ 只代表「本地已改」，真正以動態島畫面為準（✗ 則一定沒更新成功）。
+  static func verifyCountdown(activityId: String?, deadline: Date) async -> String {
+    let place = await appStateText()
+    guard let id = activityId else { return "動態島：沒有卡可更新✗（\(place)）" }
+    try? await Task.sleep(nanoseconds: 1_000_000_000)
+    guard let activity = Activity<PandaTimerAttributes>.activities.first(where: { $0.id == id }) else {
+      return "動態島：卡不見了✗（\(place)）"
+    }
+    let state = activity.content.state
+    let ok = activity.activityState == .active
+      && (state.mode ?? "countdown") == "countdown"
+      && abs(state.deadline.timeIntervalSince(deadline)) < 1
+    return ok ? "動態島：已更新✓（\(place)）" : "動態島：疑似被系統擋✗（\(place)）"
+  }
+
+  static func appStateText() async -> String {
+    await MainActor.run { () -> String in
+      switch UIApplication.shared.applicationState {
+      case .active: return "前景"
+      case .inactive: return "前景切換中"
+      default: return "背景"
+      }
+    }
+  }
+
+  /// 最新自動單（LastAutoStore）還在進行中 → 把它的倒數推到卡上（優先該單的卡，否則偵測卡），回傳回讀結果。
+  /// 沒有待補的單回 nil。只改動態島，不寫訂單事件（不會重複記錄）。
+  static func restorePendingCountdown(reason: String) async -> String? {
+    let now = Date()
+    guard let record = LastAutoStore.read(), LastAutoStore.isOrderActive(record, now: now),
+          now < record.deadline.addingTimeInterval(60 * 60)
+    else { return nil }
+    let alive = Activity<PandaTimerAttributes>.activities.filter {
+      $0.activityState != .ended && $0.activityState != .dismissed
+    }
+    let card: Activity<PandaTimerAttributes>?
+    if let aid = record.activityId {
+      card = alive.first { $0.id == aid }
+    } else {
+      card = detectorCard()
+    }
+    guard let activity = card else { return nil }
+    var state = activity.content.state
+    state.mode = "countdown"
+    state.deadline = record.deadline
+    state.estimateMinutes = record.minutes
+    state.diag = "\(reason) \(hms(now)) · 自動新單 \(record.minutes) 分 @\(hm(record.detectedAt))"
+    await activity.update(ActivityContent(state: state, staleDate: record.deadline))
+    return await verifyCountdown(activityId: activity.id, deadline: record.deadline)
   }
 
   static func isDetectorCard(_ activity: Activity<PandaTimerAttributes>) -> Bool {
@@ -335,7 +434,7 @@ final class DetectorHub {
     return parts.joined(separator: " · ")
   }
 
-  // MARK: - 看門狗（30 秒）：記錄「App 還活著」、補播保活、心跳逾時警告
+  // MARK: - 看門狗（30 秒）：記錄「App 還活著」、補播備援音訊、心跳逾時警告
 
   private func startWatchdog() {
     guard watchdog == nil else { return }
@@ -357,7 +456,7 @@ final class DetectorHub {
     let now = Date()
     lastTick = now
     guard armed else { return }
-    keepAlive.ensurePlaying()
+    keepAlive.ensure()
     let since = lastBeat ?? armedAt ?? now
     let gap = now.timeIntervalSince(since)
     if gap > beatTimeout && !beatAlerted {
@@ -402,21 +501,284 @@ final class DetectorHub {
   static func hm(_ date: Date) -> String { hmFormatter.string(from: date) }
 }
 
-// MARK: - 背景音訊保活（靜音、可與其他 App 混音，不打斷 pandarider 提示音或使用者音樂）
+// MARK: - 最近一次自動偵測（UserDefaults.standard，主 App 程序內共用）
+// ⚠️ 鍵名與 JSON 格式和 native/intents/StartDetectedCountdownIntent.swift 的 DetectedCountdownStore 一致
+//    （test/detector.test.mjs 會比對鍵名字串）。
+//   {"orderId":String,"minutes":Int,"detectedAt":ms,"deadline":ms,"activityId"?:String}
 
-final class KeepAlive {
+enum LastAutoStore {
+  static let key = "pandatimer.detector.lastAuto.v1"
+  /// 訂單剛偵測到、還沒寫進進行中鏡像的寬限時間
+  static let recordingGrace: TimeInterval = 30
+
+  struct Record {
+    let orderId: String
+    let minutes: Int
+    let detectedAt: Date
+    let deadline: Date
+    let activityId: String?
+  }
+
+  static func write(_ record: Record) {
+    var dict: [String: Any] = [
+      "orderId": record.orderId,
+      "minutes": record.minutes,
+      "detectedAt": DetectorHub.ms(record.detectedAt),
+      "deadline": DetectorHub.ms(record.deadline),
+    ]
+    if let aid = record.activityId { dict["activityId"] = aid }
+    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
+          let text = String(data: data, encoding: .utf8)
+    else { return }
+    let defaults = UserDefaults.standard
+    objc_sync_enter(defaults)
+    defer { objc_sync_exit(defaults) }
+    defaults.set(text, forKey: key)
+  }
+
+  static func read() -> Record? {
+    let defaults = UserDefaults.standard
+    objc_sync_enter(defaults)
+    defer { objc_sync_exit(defaults) }
+    guard let text = defaults.string(forKey: key), let data = text.data(using: .utf8),
+          let dict = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any],
+          let orderId = dict["orderId"] as? String,
+          let minutes = (dict["minutes"] as? NSNumber)?.intValue,
+          let detectedMs = (dict["detectedAt"] as? NSNumber)?.doubleValue,
+          let deadlineMs = (dict["deadline"] as? NSNumber)?.doubleValue
+    else { return nil }
+    return Record(
+      orderId: orderId, minutes: minutes,
+      detectedAt: Date(timeIntervalSince1970: detectedMs / 1000),
+      deadline: Date(timeIntervalSince1970: deadlineMs / 1000),
+      activityId: dict["activityId"] as? String)
+  }
+
+  /// 該單仍在進行中：進行中鏡像有它的 id，或剛偵測到（寬限內，記錄還在路上）
+  static func isOrderActive(_ record: Record, now: Date) -> Bool {
+    if now.timeIntervalSince(record.detectedAt) < recordingGrace { return true }
+    let defaults = UserDefaults.standard
+    objc_sync_enter(defaults)
+    defer { objc_sync_exit(defaults) }
+    return NativeSync.readArray(NativeSync.activeKey).contains { ($0["id"] as? String) == record.orderId }
+  }
+}
+
+// MARK: - 保活（v0.5）：背景定位優先；定位授權被拒或定位失敗才用靜音音訊備援
+// 定位正常時不播音訊，避免程序被判成「只播背景媒體」而不准更新動態島。
+// CLLocationManager 只在主執行緒建立/存取（delegate 回呼也在主執行緒）。
+
+final class KeepAlive: NSObject, CLLocationManagerDelegate {
+  struct Snapshot {
+    let wanted: Bool
+    /// none / auth（等授權）/ location / audio（備援）
+    let mode: String
+    let audio: AudioKeepAlive.Snapshot
+    let locationAuth: String
+    let lastFixAt: Date?
+    let error: String?
+
+    var text: String {
+      guard wanted else { return "無" }
+      switch mode {
+      case "location": return "定位中"
+      case "auth": return "等待定位授權"
+      case "audio":
+        if audio.playing { return "音訊中(備援)" }
+        return audio.interrupted ? "音訊備援中斷" : "音訊備援失敗"
+      default: return "無"
+      }
+    }
+  }
+
+  private let audio = AudioKeepAlive()
+  private let lock = NSLock()
+  private struct Published {
+    var wanted = false
+    var mode = "none"
+    var auth = "unknown"
+    var fix: Date?
+    var error: String?
+  }
+  private var published = Published()
+
+  // 只在主執行緒存取
+  private var manager: CLLocationManager?
+  private var backgroundSession: AnyObject?  // iOS 17 CLBackgroundActivitySession
+  private var wanted = false
+  private var mode = "none"
+  private var fallbackReason: String?  // "denied" | "failed"
+  private var locationError: String?
+  private(set) var lastLocation: CLLocation?  // 以後做到點提醒用；本版只存記憶體
+
+  func snapshot() -> Snapshot {
+    lock.lock()
+    let p = published
+    lock.unlock()
+    let audioSnap = audio.snapshot()
+    var error = p.error
+    if p.mode == "audio", let e = audioSnap.error { error = (error.map { $0 + "；" } ?? "") + "音訊：\(e)" }
+    return Snapshot(
+      wanted: p.wanted, mode: p.mode, audio: audioSnap, locationAuth: p.auth, lastFixAt: p.fix, error: error)
+  }
+
+  func start() {
+    onMain {
+      self.wanted = true
+      self.setupManager()
+      self.apply()
+    }
+  }
+
+  func stop() {
+    onMain {
+      self.wanted = false
+      self.manager?.stopUpdatingLocation()
+      self.invalidateBackgroundSession()
+      self.audio.stop()
+      self.mode = "none"
+      self.fallbackReason = nil
+      self.locationError = nil
+      self.publish()
+    }
+  }
+
+  /// 看門狗/回前景：備援音訊被中斷就補播；定位模式不用動
+  func ensure() {
+    onMain {
+      guard self.wanted else { return }
+      if self.mode == "audio" { self.audio.ensurePlaying() }
+    }
+  }
+
+  private func onMain(_ work: @escaping () -> Void) {
+    if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
+  }
+
+  private func setupManager() {
+    guard manager == nil else { return }
+    let m = CLLocationManager()
+    m.delegate = self
+    m.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    m.distanceFilter = 50
+    m.activityType = .otherNavigation
+    m.pausesLocationUpdatesAutomatically = false
+    m.showsBackgroundLocationIndicator = true
+    manager = m
+  }
+
+  private func apply() {
+    guard wanted, let m = manager else {
+      publish()
+      return
+    }
+    switch m.authorizationStatus {
+    case .notDetermined:
+      mode = "auth"
+      m.requestWhenInUseAuthorization()
+    case .authorizedWhenInUse, .authorizedAlways:
+      // 需要 Info.plist UIBackgroundModes 含 location（不是 entitlement），否則這行會 assert
+      m.allowsBackgroundLocationUpdates = true
+      if #available(iOS 17.0, *), backgroundSession == nil {
+        backgroundSession = CLBackgroundActivitySession()
+      }
+      m.startUpdatingLocation()
+      if !(mode == "audio" && fallbackReason == "failed") {
+        // 授權 OK（或剛從「被拒」改成允許）→ 定位保活，停掉音訊
+        mode = "location"
+        fallbackReason = nil
+        locationError = nil
+        audio.stop()
+      }
+    case .denied, .restricted:
+      fallback("denied", "定位權限被拒（設定›熊貓倒數›位置 選「使用 App 期間」）")
+    @unknown default:
+      fallback("denied", "定位授權狀態未知")
+    }
+    publish()
+  }
+
+  private func fallback(_ reason: String, _ message: String) {
+    guard wanted else { return }
+    if reason == "denied" {
+      manager?.stopUpdatingLocation()
+      invalidateBackgroundSession()
+    }
+    mode = "audio"
+    fallbackReason = reason
+    locationError = message
+    audio.start()
+  }
+
+  private func invalidateBackgroundSession() {
+    if #available(iOS 17.0, *), let session = backgroundSession as? CLBackgroundActivitySession {
+      session.invalidate()
+    }
+    backgroundSession = nil
+  }
+
+  private func publish() {
+    let auth = manager.map { Self.authText($0.authorizationStatus) } ?? "unknown"
+    let next = Published(
+      wanted: wanted, mode: wanted ? mode : "none", auth: auth, fix: lastLocation?.timestamp, error: locationError)
+    lock.lock()
+    published = next
+    lock.unlock()
+  }
+
+  private static func authText(_ status: CLAuthorizationStatus) -> String {
+    switch status {
+    case .notDetermined: return "notDetermined"
+    case .authorizedWhenInUse: return "whenInUse"
+    case .authorizedAlways: return "always"
+    case .denied: return "denied"
+    case .restricted: return "restricted"
+    @unknown default: return "unknown"
+    }
+  }
+
+  // MARK: CLLocationManagerDelegate（主執行緒）
+
+  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    onMain { self.apply() }
+  }
+
+  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    onMain {
+      if let last = locations.last { self.lastLocation = last }
+      if self.wanted && self.mode == "audio" && self.fallbackReason == "failed" {
+        // 定位恢復 → 回到定位保活、停備援音訊
+        self.mode = "location"
+        self.fallbackReason = nil
+        self.locationError = nil
+        self.audio.stop()
+      }
+      self.publish()
+    }
+  }
+
+  func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+    let code = (error as? CLError)?.code
+    onMain {
+      if code == .locationUnknown { return }  // 暫時拿不到位置，系統會繼續試
+      if code == .denied {
+        self.fallback("denied", "定位權限被拒（設定›熊貓倒數›位置 選「使用 App 期間」）")
+      } else {
+        self.fallback("failed", "定位失敗：\(error.localizedDescription)")
+      }
+      self.publish()
+    }
+  }
+}
+
+// MARK: - 備援：背景音訊保活（靜音、可與其他 App 混音，不打斷 pandarider 提示音或使用者音樂）
+
+final class AudioKeepAlive {
   struct Snapshot {
     let wanted: Bool
     let playing: Bool
     let interrupted: Bool
     let error: String?
-
-    var text: String {
-      if !wanted { return "未保活" }
-      if interrupted { return "中斷" }
-      if playing { return "音訊中" }
-      return error == nil ? "未播放" : "失敗"
-    }
   }
 
   private let q = DispatchQueue(label: "com.pandatimer.detector.keepalive")
@@ -478,11 +840,14 @@ final class KeepAlive {
 
   func stop() {
     q.async {
+      let had = self.wanted || self.player != nil
       self.wanted = false
       self.interrupted = false
       self.player?.stop()
       self.player = nil
-      try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+      if had {
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+      }
       self.publish()
     }
   }
@@ -567,6 +932,24 @@ enum DetectorNotify {
     content.interruptionLevel = passive ? .passive : .active
     let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
     try? await UNUserNotificationCenter.current().add(request)
+  }
+
+  /// extension 發的「偵測到新單」通知（userInfo pandatimer=detected）裡的偵測時間：
+  /// 同分鐘數、在 notAfter 之前 10 分鐘內的最新一則。找不到回 nil。
+  static func detectedAt(minutes: Int, notAfter: Date) async -> Date? {
+    let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
+    var best: Date?
+    for notification in delivered {
+      let info = notification.request.content.userInfo
+      guard (info["pandatimer"] as? String) == "detected",
+            (info["minutes"] as? NSNumber)?.intValue == minutes,
+            let ms = (info["detectedAt"] as? NSNumber)?.doubleValue
+      else { continue }
+      let t = Date(timeIntervalSince1970: ms / 1000)
+      guard t <= notAfter.addingTimeInterval(5), notAfter.timeIntervalSince(t) < 600 else { continue }
+      if best.map({ t > $0 }) ?? true { best = t }
+    }
+    return best
   }
 }
 

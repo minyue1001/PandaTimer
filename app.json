@@ -4,7 +4,7 @@
     "slug": "panda-timer",
     "scheme": "pandatimer",
     "version": "1.0.0",
-    "runtimeVersion": "0.4",
+    "runtimeVersion": "0.5",
     "updates": {
       "url": "https://wheat.yueshengift.xyz/pandatimer/api/manifest",
       "enabled": true,
@@ -22,7 +22,9 @@
       "infoPlist": {
         "CFBundleDisplayName": "熊貓倒數",
         "NSSupportsLiveActivities": true,
-        "UIBackgroundModes": ["audio"],
+        "UIBackgroundModes": ["location", "audio"],
+        "NSLocationWhenInUseUsageDescription": "偵測中保持 App 在背景運作，以便自動更新動態島倒數",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "偵測中保持 App 在背景運作，以便自動更新動態島倒數（只需要「使用 App 期間」）",
         "ITSAppUsesNonExemptEncryption": false
       }
     },

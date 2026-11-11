@@ -57,7 +57,12 @@ struct PandaLiveActivity: Widget {
         }
         DynamicIslandExpandedRegion(.bottom) {
           if isDetectorCard(context.state) {
-            DetectorDetail(state: context.state)
+            HStack(alignment: .center) {
+              DetectorDetail(state: context.state)
+              if context.state.mode == "standby" {
+                StartCountdownButton()
+              }
+            }
           } else {
             HStack(alignment: .center) {
               Text(statusLabel(context))
@@ -109,7 +114,12 @@ struct LockScreenView: View {
             .font(.headline)
             .foregroundStyle(Color.white)
         }
-        DetectorDetail(state: context.state)
+        HStack(alignment: .center) {
+          DetectorDetail(state: context.state)
+          if context.state.mode == "standby" {
+            StartCountdownButton()
+          }
+        }
       }
       .padding(16)
     } else {
@@ -161,6 +171,21 @@ struct DeliverButton: View {
     }
     .buttonStyle(.borderedProminent)
     .tint(Color.green)
+  }
+}
+
+/// v0.5 一鍵備援：偵測卡（standby）上的「開始倒數」。背景更新被系統擋、動態島還停在「偵測中」時按這顆，
+/// 由系統在 App 程序執行 StartDetectedCountdownIntent，把卡改成最近一次自動偵測那單的倒數。
+struct StartCountdownButton: View {
+  var body: some View {
+    Button(intent: StartDetectedCountdownIntent()) {
+      Text("開始倒數")
+        .font(.headline.bold())
+        .foregroundStyle(Color.white)
+        .padding(.horizontal, 4)
+    }
+    .buttonStyle(.borderedProminent)
+    .tint(pandaPink)
   }
 }
 

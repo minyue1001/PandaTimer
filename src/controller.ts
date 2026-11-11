@@ -161,10 +161,17 @@ export function initNativeBridge(feedback?: Feedback): () => void {
   // v0.4：自動偵測新單／動態島送達（App Intents）→ 原生已寫好事件佇列，這裡立刻 drain 入帳。
   // App 在背景時靠音訊保活 JS 仍在跑；就算沒跑到，回前景的 drain 也會補上（事件留在佇列裡）。
   const detSub = LiveActivity.addDetectorListener((ev) => {
+    // v0.5：回前景（含點「偵測到新單」通知）原生已把最新自動單的倒數補推到動態島
+    if (ev.type === 'restored') {
+      if (ev.how) feedback?.(`回前景補推倒數：${ev.how}`);
+      return;
+    }
     if (ev.type !== 'order' && ev.type !== 'drain') return;
     void drainFromNative()
       .then((n) => {
-        if (ev.type === 'order') feedback?.(`自動偵測新單：${ev.minutes ?? '?'} 分（已記錄）`);
+        if (ev.type === 'order') {
+          feedback?.(`自動偵測新單：${ev.minutes ?? '?'} 分（已記錄）${ev.check ? `・${ev.check}` : ''}`);
+        }
         else report(n);
       })
       .catch(() => undefined);

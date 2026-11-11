@@ -38,9 +38,17 @@ export function allSignalNames(): string[] {
 
 export type DetectorStatus = {
   armed: boolean;
-  /** 未保活／音訊中／中斷／未播放／失敗 */
+  /** v0.5：無／等待定位授權／定位中／音訊中(備援)／音訊備援中斷／音訊備援失敗 */
   keepAlive: string;
+  /** none / auth / location / audio */
+  keepAliveMode: string;
+  /** unknown / notDetermined / whenInUse / always / denied / restricted */
+  locationAuth: string;
   keepAliveError?: string;
+  /** 最近一次定位時間（只存記憶體，以後做到點提醒用） */
+  lastFixAt: number | null;
+  /** 最近一次動態島更新的回讀結果，例如「動態島：已更新✓（背景）」 */
+  islandCheck: string;
   lastBeatAt: number | null;
   lastOrderMinutes: number | null;
   lastOrderAt: number | null;
@@ -64,7 +72,11 @@ export function parseDetectorStatus(raw: unknown): DetectorStatus | null {
   return {
     armed: o.armed === true,
     keepAlive: typeof o.keepAlive === 'string' ? o.keepAlive : '未知',
+    keepAliveMode: typeof o.keepAliveMode === 'string' ? o.keepAliveMode : 'none',
+    locationAuth: typeof o.locationAuth === 'string' ? o.locationAuth : 'unknown',
     keepAliveError: typeof o.keepAliveError === 'string' ? o.keepAliveError : undefined,
+    lastFixAt: num(o.lastFixAt),
+    islandCheck: typeof o.islandCheck === 'string' ? o.islandCheck : '',
     lastBeatAt: num(o.lastBeatAt),
     lastOrderMinutes: num(o.lastOrderMinutes),
     lastOrderAt: num(o.lastOrderAt),
@@ -79,6 +91,12 @@ export function countAutoToday(orders: Order[], now: number): number {
   d.setHours(0, 0, 0, 0);
   const since = d.getTime();
   return orders.filter((o) => o.source === 'auto' && o.status !== 'canceled' && o.acceptedAt >= since).length;
+}
+
+/** v0.5：定位授權還沒有結果（尚未建立 CLLocationManager 或系統詢問視窗還沒按）→ 開廣播選擇器前要等 */
+export function locationAuthPending(status: DetectorStatus | null): boolean {
+  if (!status || !status.armed) return false;
+  return status.keepAliveMode === 'auth' || status.locationAuth === 'notDetermined' || status.locationAuth === 'unknown';
 }
 
 /** 心跳多久前（秒）；沒有心跳 → null */

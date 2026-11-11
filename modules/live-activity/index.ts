@@ -21,9 +21,11 @@ type LiveActivityNative = {
 
 /** v0.4 原生 DetectorHub 送來的事件（extension 的 Darwin 訊號，或 App Intents 要求 drain） */
 export type DetectorEvent = {
-  type: 'order' | 'started' | 'stopped' | 'heartbeat' | 'drain' | 'beatTimeout';
+  type: 'order' | 'started' | 'stopped' | 'heartbeat' | 'drain' | 'beatTimeout' | 'restored';
   minutes?: number;
   how?: string;
+  /** v0.5：更新後回讀結果（動態島：已更新✓／疑似被系統擋✗） */
+  check?: string;
 };
 
 // Expo Go / web / Android 沒有這個原生模組 → 為 null，所有呼叫安全地退化成 no-op。
@@ -117,7 +119,7 @@ export async function startStandby(): Promise<string> {
   return native.startStandby();
 }
 
-/** v0.4：開始偵測（前景呼叫）→ 原生開始靜音音訊保活＋看門狗。回傳最新狀態。 */
+/** 開始偵測（前景呼叫）→ 原生開始保活（v0.5：背景定位優先、靜音音訊備援）＋看門狗。回傳最新狀態。 */
 export function armDetection(): DetectorStatus | null {
   try {
     return parseDetectorStatus(native?.armDetection?.());

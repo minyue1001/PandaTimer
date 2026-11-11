@@ -166,19 +166,19 @@ public class LiveActivityModule: Module {
       }
     }
 
-    // v0.4：App「開始偵測」（前景）→ 背景音訊保活＋看門狗。回傳 detectorStatus 的 JSON。
+    // App「開始偵測」（前景）→ 保活（v0.5：背景定位優先、靜音音訊只當備援）＋看門狗。回傳 detectorStatus 的 JSON。
     Function("armDetection") { () -> String in
       DetectorHub.shared.registerIfNeeded()
       DetectorHub.shared.arm()
       return DetectorHub.shared.statusJSON()
     }
 
-    // v0.4：App「停止偵測」→ 停保活、偵測卡結束（倒數中的卡交還給那張單）
+    // App「停止偵測」→ 停保活（定位＋音訊）、偵測卡結束（倒數中的卡交還給那張單）
     AsyncFunction("stopDetection") { () async -> Void in
       await DetectorHub.shared.disarm()
     }
 
-    // v0.4：偵測狀態 JSON（armed/keepAlive/lastBeatAt/lastOrderMinutes/lastOrderAt/lastOrderHow/autoCountSinceLaunch）
+    // 偵測狀態 JSON（armed/keepAlive/keepAliveMode/locationAuth/lastFixAt/islandCheck/lastBeatAt/lastOrder*/autoCountSinceLaunch）
     Function("detectorStatus") { () -> String in
       return DetectorHub.shared.statusJSON()
     }

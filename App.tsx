@@ -19,7 +19,7 @@ import {
   listenDeepLinks,
   startOrder,
 } from './src/controller';
-import { beatAgeSec, countAutoToday } from './src/detector';
+import { beatAgeSec, countAutoToday, locationAuthPending } from './src/detector';
 import { ensurePermission } from './src/notify';
 import { OtaBox } from './src/OtaBox';
 import {
@@ -103,7 +103,8 @@ function Main() {
     void startOrder(v, showToast).then(() => showToast(`已開始：預估 ${v} 分`));
   };
 
-  // v0.4 自動偵測：前景開「偵測中」動態島（App 之後在背景更新它）＋開始靜音保活，再叫出系統的螢幕廣播視窗
+  // 自動偵測：前景開「偵測中」動態島（App 之後在背景更新它）＋開始保活（v0.5：背景定位優先、音訊備援），
+  // 等定位授權視窗有結果後（避免和廣播視窗搶畫面）再叫出系統的螢幕廣播視窗
   const onStartDetect = async () => {
     let msg: string;
     try {
@@ -113,7 +114,17 @@ function Main() {
     } catch (e) {
       msg = `動態島待命卡建立失敗：${e instanceof Error ? e.message : String(e)}（仍可廣播，結果改看通知）。`;
     }
-    const st = LiveActivity.armDetection();
+    let st = LiveActivity.armDetection();
+    if (st) {
+      setDetectMsg(`${msg}等待定位授權（請選「使用 App 期間」）…`);
+      const until = Date.now() + 30_000;
+      await new Promise((r) => setTimeout(r, 400));
+      st = LiveActivity.detectorStatus() ?? st;
+      while (locationAuthPending(st) && Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 400));
+        st = LiveActivity.detectorStatus() ?? st;
+      }
+    }
     msg += st ? `保活：${st.keepAlive}${st.keepAliveError ? `（${st.keepAliveError}）` : ''}。` : '（原生版本太舊，沒有保活）';
     const shown = (await pickerRef.current?.show()) ?? false;
     setDetectMsg(shown ? `${msg}請在跳出的視窗按「開始直播」。` : `${msg}沒跳出視窗的話，請點右邊的圓形按鈕。`);
@@ -122,7 +133,7 @@ function Main() {
   const onStopDetect = () => {
     void LiveActivity.stopDetection()
       .catch(() => undefined)
-      .then(() => setDetectMsg('已停止保活、收掉偵測卡。螢幕廣播請點左上角紅色時間 → 停止。'));
+      .then(() => setDetectMsg('已停止保活（定位/音訊）、收掉偵測卡。螢幕廣播請點左上角紅色時間 → 停止。'));
   };
 
   const onDone = (id: string) => {
@@ -159,13 +170,24 @@ function Main() {
         {/* 0. 自動偵測（v0.4 測試） */}
         <View style={styles.card}>
           <Text style={styles.section}>自動偵測（測試）</Text>
-          <Text style={styles.note}>1. 按「開始偵測」 → 2. 在跳出的視窗按「開始直播」。停止：點左上角紅色時間 → 停止。</Text>
+          <Text style={styles.note}>
+            1. 按「開始偵測」（定位權限選「使用 App 期間」）→ 2. 在跳出的視窗按「開始直播」。停止：點左上角紅色時間 → 停止。
+            動態島沒變時：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」。
+          </Text>
           {det && (
             <View style={styles.detBox}>
               <Text style={styles.detLine}>
-                保活：{det.armed ? det.keepAlive : '未保活'}
+                保活：{det.armed ? det.keepAlive : '無'}
+                {det.armed && det.keepAliveMode === 'location' && det.lastFixAt
+                  ? `（上次定位 ${formatClock(det.lastFixAt)}）`
+                  : ''}
                 {det.keepAliveError ? `（${det.keepAliveError}）` : ''}
               </Text>
+              {!!det.islandCheck && (
+                <Text style={[styles.detLine, det.islandCheck.includes('✗') ? { color: RED } : { color: GREEN }]}>
+                  {det.islandCheck}
+                </Text>
+              )}
               <Text style={[styles.detLine, beatAge != null && beatAge > 150 ? { color: RED } : null]}>
                 最後心跳：
                 {det.lastBeatAt ? `${formatClock(det.lastBeatAt)}（${beatAge} 秒前）` : '尚未收到'}
