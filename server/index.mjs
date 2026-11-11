@@ -427,7 +427,10 @@ function rateAllow(key, n, now) {
     if (!b || now - b.start >= 60_000) { b = { start: now, count: 0 }; rateBuckets.set(k, b); }
     return { ok: b.count + n <= limit, commit: () => { b.count += n; } };
   };
-  if (rateBuckets.size > 5000) rateBuckets.clear();
+  if (rateBuckets.size > 5000) {
+    // 只清掉來源 bucket，保留全域 '*'，避免輪換 dev 欄位繞過全域上限
+    for (const k of rateBuckets.keys()) if (k !== '*') rateBuckets.delete(k);
+  }
   const one = take(`s:${key}`, TELEMETRY_RATE_PER_MIN);
   const all = take('*', TELEMETRY_RATE_PER_MIN * 4);
   if (!one.ok || !all.ok) return false;
