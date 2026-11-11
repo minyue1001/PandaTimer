@@ -55,6 +55,12 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - 診斷：偵測卡 diag 由 App 寫（App 已收到心跳/保活狀態/最近新單）；extension 的幀/OCR/MB 只在「偵測到新單」通知、峰值>40MB（passive）、停止摘要（passive）、上次異常中止時發通知。心跳 >150 秒沒來 → App 通知「偵測沒有回應」。
 - 已知限制：背景只播音訊的程序**鎖屏時**更新動態島可能被系統拒（liveactivitiesd「only playing background media」，未鎖屏回報可行）→ 回前景會補推；mixable session 被電話中斷後不保證收到 ended → 看門狗/回前景補播，但 App 若已被暫停就要使用者回 App。
 
+## OTA 更新（expo-updates，自架伺服器見 `server/README.md`）
+- app.json：`runtimeVersion:"0.4"`（固定字串）、`updates.url=https://wheat.yueshengift.xyz/pandatimer/api/manifest`、code signing 憑證 `server/certs/certificate.pem`（keyid main, rsa-v1_5-sha256）；`src/OtaBox.tsx` 在 App 底部顯示版本/更新 id/時間，回前景自動檢查＋下載，**不自動 reload**，出現「有新版，點此套用」按鈕才 `reloadAsync()`（`__DEV__` 或未啟用時隱藏）。
+- 純 JS 改動 → `bash scripts/publish-update.sh 0.4`（`--list` 看版本；`--republish <ts>` 回滾；`--rollback-embedded` 回內建）。
+- 原生改動（Swift、plugin、原生套件、app.json 原生設定）→ 升 runtimeVersion（app.json＋OtaBox 的 APP_VERSION＋發佈參數）＋CI 編 ipa＋Sideloadly 重裝。
+- 憑證換了＝所有已裝 App 拒收舊簽章更新，需重裝；私鑰在 `~/.config/pandatimer/keys/`，不進 repo。
+
 ## 動態島顯示
 `Text(deadline, style: .timer)` 倒數，過截止自動往上數；`staleDate = deadline` → `context.isStale` 顯示「已超時」（紅）。
 

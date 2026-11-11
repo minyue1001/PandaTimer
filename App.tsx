@@ -21,6 +21,7 @@ import {
 } from './src/controller';
 import { beatAgeSec, countAutoToday } from './src/detector';
 import { ensurePermission } from './src/notify';
+import { OtaBox } from './src/OtaBox';
 import {
   activeOrders,
   clampEstimate,
@@ -304,6 +305,7 @@ function Main() {
             );
           })}
         </View>
+        <OtaBox />
       </ScrollView>
     </SafeAreaView>
   );

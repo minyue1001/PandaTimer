@@ -4,6 +4,15 @@
     "slug": "panda-timer",
     "scheme": "pandatimer",
     "version": "1.0.0",
+    "runtimeVersion": "0.4",
+    "updates": {
+      "url": "https://wheat.yueshengift.xyz/pandatimer/api/manifest",
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "codeSigningCertificate": "./server/certs/certificate.pem",
+      "codeSigningMetadata": { "keyid": "main", "alg": "rsa-v1_5-sha256" }
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
