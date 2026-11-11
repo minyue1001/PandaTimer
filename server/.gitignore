@@ -1,0 +1,5 @@
+# 根目錄 .gitignore 有 *.pem；App 內嵌的「公開」憑證必須進 repo（CI prebuild 會讀它）
+!certs/certificate.pem
+# 私鑰永遠不進 repo（放在 ~/.config/pandatimer/keys/）
+private-key.pem
+keys/
