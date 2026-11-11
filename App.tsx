@@ -20,7 +20,7 @@ import {
   startOrder,
 } from './src/controller';
 import * as Updates from 'expo-updates';
-import { beatAgeSec, countAutoToday, locationAuthPending, telemetryLine } from './src/detector';
+import { beatAgeSec, countAutoToday, locationAuthPending, offerLine, telemetryLine } from './src/detector';
 import { ensurePermission } from './src/notify';
 import { OtaBox } from './src/OtaBox';
 import {
@@ -30,16 +30,37 @@ import {
   formatClock,
   formatDuration,
   history,
-  isLate,
-  SHORT_ORDER_MAX_MIN,
-  todayStats,
   type Order,
 } from './src/orders';
+import {
+  DEFAULT_GOALS,
+  DEFAULT_STATS,
+  goalProgress,
+  goalText,
+  isOnTime,
+  parsePercentInput,
+  periodAndToday,
+  periodOf,
+  type Baseline,
+  type Goals,
+  type StatsParams,
+} from './src/stats';
+import {
+  fetchStatsParams,
+  loadBaseline,
+  loadCachedStatsParams,
+  loadGoals,
+  saveBaseline,
+  saveGoals,
+} from './src/statsConfig';
 import { subscribe } from './src/store';
 
 const PINK = '#D70F64';
 const RED = '#E53935';
 const GREEN = '#2E7D32';
+const YELLOW = '#F9A825';
+/** v0.7 準時率三層顏色：≥目標 綠、底線～目標 黃、<底線 紅 */
+const LEVEL_COLOR = { met: GREEN, between: YELLOW, below: RED } as const;
 
 function pct(x: number | null): string {
   return x == null ? '—' : `${Math.round(x * 1000) / 10}%`;
@@ -70,6 +91,69 @@ function Main() {
   }, []);
 
   useEffect(() => subscribe(setOrders), []);
+
+  // v0.7 統計參數（遠端設定 stats）＋目標（AsyncStorage）
+  const [statsParams, setStatsParams] = useState<StatsParams>(DEFAULT_STATS);
+  const [goals, setGoals] = useState<Goals>(DEFAULT_GOALS);
+  const [goalDraft, setGoalDraft] = useState<{ onTime: string; floor: string; overrun: string } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void loadCachedStatsParams().then((p) => alive && setStatsParams(p));
+    void fetchStatsParams().then((p) => alive && p && setStatsParams(p));
+    void loadGoals().then((g) => alive && setGoals(g));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  // v0.7 本期補登（App 上線前本期已跑的單）：綁期別，換期自動失效
+  const periodId = periodOf(now).id;
+  const [baseline, setBaseline] = useState<Baseline | null>(null);
+  const [baseDraft, setBaseDraft] = useState<{ count: string; onTime: string; overrun: string } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void loadBaseline(periodId).then((b) => alive && setBaseline(b));
+    return () => {
+      alive = false;
+    };
+  }, [periodId]);
+  const onSaveBaseline = () => {
+    if (!baseDraft) return;
+    const count = /^\s*\d{1,4}\s*$/.test(baseDraft.count) ? parseInt(baseDraft.count, 10) : NaN;
+    const onTime = parsePercentInput(baseDraft.onTime);
+    const overrun = parsePercentInput(baseDraft.overrun);
+    if (!(count >= 0 && count <= 2000) || onTime == null || overrun == null) {
+      Alert.alert('補登格式不對', '單數 0~2000；準時率、超時率輸入 0~100 的百分比（照報酬單上的數字）');
+      return;
+    }
+    const next: Baseline | null = count > 0 ? { periodId, count, onTimeRate: onTime, overrunRate: overrun } : null;
+    setBaseline(next);
+    setBaseDraft(null);
+    void saveBaseline(next);
+  };
+  const onClearBaseline = () => {
+    setBaseline(null);
+    setBaseDraft(null);
+    void saveBaseline(null);
+  };
+
+  const onSaveGoals = () => {
+    if (!goalDraft) return;
+    const onTime = parsePercentInput(goalDraft.onTime);
+    const floor = parsePercentInput(goalDraft.floor);
+    const overrun = parsePercentInput(goalDraft.overrun);
+    if (onTime == null || floor == null || overrun == null) {
+      Alert.alert('目標格式不對', '請輸入 0~100 的百分比，例如 50、40、20');
+      return;
+    }
+    if (floor > onTime) {
+      Alert.alert('底線不能高於目標', '例如 準時率目標 50、底線 40');
+      return;
+    }
+    const next = { onTimeRate: onTime, onTimeFloor: floor, overrunRate: overrun };
+    setGoals(next);
+    setGoalDraft(null);
+    void saveGoals(next);
+  };
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -156,13 +240,22 @@ function Main() {
   };
 
   const active = useMemo(() => activeOrders(orders), [orders]);
-  const stats = useMemo(() => todayStats(orders, now), [orders, now]);
+  // 本期（14 天報酬週期，台北時區）＋今日；分鐘級即可，不必每秒重算
+  const minuteTick = Math.floor(now / 60_000);
+  const st = useMemo(
+    () => periodAndToday(orders, minuteTick * 60_000, statsParams, baseline),
+    [orders, minuteTick, statsParams, baseline],
+  );
+  const gp = useMemo(() => goalProgress(st.current, goals), [st, goals]);
+  const gt = goalText(gp, goals);
+  const onTimeColor = gp.onTimeLevel ? LEVEL_COLOR[gp.onTimeLevel] : undefined;
   const recent = useMemo(() => history(orders, 50), [orders]);
   const laSupported = useMemo(() => LiveActivity.isSupported(), []);
   // 原生偵測狀態每秒讀一次（同步、很便宜）
   const det = useMemo(() => LiveActivity.detectorStatus(), [now]);
   const autoToday = useMemo(() => countAutoToday(orders, now), [orders, now]);
   const beatAge = beatAgeSec(det, now);
+  const offerText = offerLine(det, now);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -178,6 +271,8 @@ function Main() {
           <Text style={styles.section}>自動偵測（測試）</Text>
           <Text style={styles.note}>
             1. 按「開始偵測」（定位權限選「使用 App 期間」）→ 2. 在跳出的視窗按「開始直播」。停止：點左上角紅色時間 → 停止。
+            v0.7：看到新單邀請先不倒數，等你按「接受」後（偵測到接單後的畫面）才開始倒數並記錄；拒絕或逾時不記。
+            看到「完成訂單」畫面會自動記錄送達（接單 2 分鐘內的單不會被自動結；手動送達照樣可用）。
             多單：動態島倒數最早截止那單，其他單列在下面；按「送達」自動切到下一單。
             動態島沒變時：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」。
           </Text>
@@ -205,6 +300,11 @@ function Main() {
                   ? `・最近 ${det.lastOrderMinutes} 分 ${formatClock(det.lastOrderAt)}`
                   : ''}
               </Text>
+              {!!offerText && (
+                <Text style={[styles.detLine, det.offerPendingAt != null && offerText.startsWith('偵測到邀請') ? { color: GREEN } : null]}>
+                  {offerText}
+                </Text>
+              )}
               {!!det.lastOrderHow && <Text style={styles.note}>{det.lastOrderHow}</Text>}
               <Text style={[styles.note, det.telemetryError ? { color: RED } : null]}>{telemetryLine(det)}</Text>
             </View>
@@ -295,20 +395,132 @@ function Main() {
           );
         })}
 
-        {/* 3. 今日統計 */}
+        {/* 3. 本期統計（v0.7：對齊 foodpanda 報酬單的近似算法＋目標） */}
         <View style={styles.card}>
-          <Text style={styles.section}>今日統計</Text>
+          <Text style={styles.section}>本期（{st.period.label}）</Text>
+          {st.current.baselineCount > 0 && (
+            <Text style={styles.note}>
+              含補登 {st.current.baselineCount} 單（App 紀錄 {st.own.count} 單）
+            </Text>
+          )}
           <View style={styles.statsGrid}>
-            <Stat label="單數" value={String(stats.count)} />
-            <Stat label="準時率" value={pct(stats.onTimeRate)} />
-            <Stat label="平均超出比例" value={pct(stats.avgOverRatio)} />
+            <Stat label="單數" value={String(st.current.count)} />
+            <Stat label="今日單數" value={String(st.today.count)} />
             <Stat
-              label={`短單(≤${SHORT_ORDER_MAX_MIN}分)晚到`}
-              value={`${stats.shortLate}/${stats.shortCount}`}
+              label={`準時率（目標 ${pct(goals.onTimeRate)}／底線 ${pct(goals.onTimeFloor)}）`}
+              value={pct(st.current.onTimeRate)}
+              color={onTimeColor}
             />
+            <Stat
+              label={`超時率（目標 ≤${pct(goals.overrunRate)}）`}
+              value={pct(st.current.overrunRate)}
+              color={gp.overrunMet == null ? undefined : gp.overrunMet ? GREEN : RED}
+            />
+            <Stat label="今日準時率" value={pct(st.today.onTimeRate)} />
+            <Stat label="今日超時率" value={pct(st.today.overrunRate)} />
           </View>
+          <Text style={[styles.detLine, { color: onTimeColor ?? '#333' }]}>{gt.onTime}</Text>
+          <Text style={[styles.detLine, { color: gp.overrunMet === false ? RED : gp.overrunMet ? GREEN : '#333' }]}>{gt.overrun}</Text>
+          {goalDraft ? (
+            <View style={styles.row}>
+              <TextInput
+                style={styles.goalInput}
+                keyboardType="decimal-pad"
+                value={goalDraft.onTime}
+                onChangeText={(t) => setGoalDraft({ ...goalDraft, onTime: t })}
+                placeholder="準時目標%"
+              />
+              <TextInput
+                style={styles.goalInput}
+                keyboardType="decimal-pad"
+                value={goalDraft.floor}
+                onChangeText={(t) => setGoalDraft({ ...goalDraft, floor: t })}
+                placeholder="準時底線%"
+              />
+              <TextInput
+                style={styles.goalInput}
+                keyboardType="decimal-pad"
+                value={goalDraft.overrun}
+                onChangeText={(t) => setGoalDraft({ ...goalDraft, overrun: t })}
+                placeholder="超時率%"
+              />
+              <Pressable onPress={onSaveGoals}>
+                <Text style={styles.goalBtn}>儲存</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <Pressable
+              onPress={() =>
+                setGoalDraft({
+                  onTime: String(Math.round(goals.onTimeRate * 1000) / 10),
+                  floor: String(Math.round(goals.onTimeFloor * 1000) / 10),
+                  overrun: String(Math.round(goals.overrunRate * 1000) / 10),
+                })
+              }
+            >
+              <Text style={styles.cancel}>改目標（準時目標／準時底線／超時上限）</Text>
+            </Pressable>
+          )}
+          {baseDraft ? (
+            <View style={{ gap: 8 }}>
+              <Text style={styles.note}>補登本期在 App 之前跑的成績（照報酬單／foodpanda App 上的數字）：</Text>
+              <View style={styles.row}>
+                <TextInput
+                  style={styles.goalInput}
+                  keyboardType="number-pad"
+                  value={baseDraft.count}
+                  onChangeText={(t) => setBaseDraft({ ...baseDraft, count: t })}
+                  placeholder="已完成單數"
+                />
+                <TextInput
+                  style={styles.goalInput}
+                  keyboardType="decimal-pad"
+                  value={baseDraft.onTime}
+                  onChangeText={(t) => setBaseDraft({ ...baseDraft, onTime: t })}
+                  placeholder="準時率%"
+                />
+                <TextInput
+                  style={styles.goalInput}
+                  keyboardType="decimal-pad"
+                  value={baseDraft.overrun}
+                  onChangeText={(t) => setBaseDraft({ ...baseDraft, overrun: t })}
+                  placeholder="超時率%"
+                />
+              </View>
+              <View style={styles.row}>
+                <Pressable onPress={onSaveBaseline}>
+                  <Text style={styles.goalBtn}>儲存補登</Text>
+                </Pressable>
+                <Pressable onPress={onClearBaseline}>
+                  <Text style={styles.cancel}>清除補登</Text>
+                </Pressable>
+                <Pressable onPress={() => setBaseDraft(null)}>
+                  <Text style={styles.cancel}>取消</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : (
+            <Pressable
+              onPress={() =>
+                setBaseDraft(
+                  baseline
+                    ? {
+                        count: String(baseline.count),
+                        onTime: String(Math.round(baseline.onTimeRate * 1000) / 10),
+                        overrun: String(Math.round(baseline.overrunRate * 1000) / 10),
+                      }
+                    : { count: '', onTime: '', overrun: '' },
+                )
+              }
+            >
+              <Text style={styles.cancel}>
+                {baseline ? `修改補登（本期之前 ${baseline.count} 單）` : '補登本期之前的成績'}
+              </Text>
+            </Pressable>
+          )}
           <Text style={styles.note}>
-            平均超出比例＝每單 max(0,(實際−預估)/預估) 的平均，近似 foodpanda 超時率（不含平台未公開的彈性時間）。
+            算法（依三期報酬單反推的近似）：彈性線＝預估 × {statsParams.graceFactor}；實際 ≤ 彈性線算準時；
+            每單超時比例＝(實際−彈性線)/彈性線（0~{Math.round(statsParams.overrunCap * 100)}%）的平均＝超時率。取消單不計。每 14 天一期（台北時間週一 00:00 起）。
           </Text>
         </View>
 
@@ -317,7 +529,8 @@ function Main() {
           <Text style={styles.section}>最近 {recent.length} 筆</Text>
           {recent.length === 0 && <Text style={styles.meta}>還沒有紀錄</Text>}
           {recent.map((o) => {
-            const late = isLate(o);
+            // v0.7：與本期統計同一條彈性線（預估 × graceFactor）
+            const late = o.actualMin != null && !isOnTime({ est: o.estimateMin, act: o.actualMin }, statsParams);
             const over = (o.actualMin ?? 0) - o.estimateMin;
             return (
               <View key={o.id} style={styles.histRow}>
@@ -341,10 +554,10 @@ function Main() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <View style={styles.stat}>
-      <Text style={styles.statValue}>{value}</Text>
+      <Text style={[styles.statValue, color ? { color } : null]}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </View>
   );
@@ -410,6 +623,17 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 32, fontWeight: '800', color: '#111' },
   statLabel: { fontSize: 16, color: '#666', marginTop: 2 },
   note: { fontSize: 13, color: '#888', lineHeight: 18 },
+  goalInput: {
+    flex: 1,
+    height: 48,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#DDD',
+    fontSize: 22,
+    textAlign: 'center',
+    color: '#111',
+  },
+  goalBtn: { fontSize: 20, fontWeight: '800', color: PINK, paddingHorizontal: 8 },
   histRow: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -102,8 +102,20 @@ enum PandaSharedStore {
     return finished
   }
 
+  /// v0.7 自動送達互斥（鍵名＝modules/live-activity/ios/DetectorHub.swift 的 AutoDelivery）：
+  /// 自動結單後 20 秒內的送達按鈕/捷徑不再結（同一趟送達只結一次）；手動結單時記時間，90 秒內不自動結。
+  static let lastManualKey = "pandatimer.native.lastManualDoneAt.v1"
+  static let lastAutoKey = "pandatimer.native.lastAutoDoneAt.v1"
+  static let autoGuardSeconds: Double = 20
+
   private static func finishOrderLocked(activityId: String?, at date: Date) -> ActiveOrder? {
     withLock { () -> ActiveOrder? in
+      let nowMs = ms(date)
+      if let auto = (UserDefaults.standard.object(forKey: lastAutoKey) as? NSNumber)?.doubleValue,
+         nowMs - auto >= 0, nowMs - auto < autoGuardSeconds * 1000
+      {
+        return nil
+      }
       var active = readArray(activeKey)
       var index: Int?
       if let activityId = activityId {
@@ -130,7 +142,8 @@ enum PandaSharedStore {
         writeArray(active, activeKey)
       }
       if finished == nil && activityId == nil { return nil }
-      var event: [String: Any] = ["type": "done", "at": ms(date)]
+      UserDefaults.standard.set(nowMs, forKey: lastManualKey)
+      var event: [String: Any] = ["type": "done", "at": nowMs]
       if let order = finished {
         event["orderId"] = order.id
         if let aid = order.activityId { event["activityId"] = aid }

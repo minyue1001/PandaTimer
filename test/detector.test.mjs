@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  acceptDelayName,
   allSignalNames,
+  offerLine,
+  offerPendingName,
+  restoreAcceptedAt,
   beatAgeSec,
   countAutoToday,
   locationAuthPending,
@@ -55,9 +59,9 @@ test('parseSignalName：狀態訊號與垃圾', () => {
   assert.equal(parseSignalName(5), null);
 });
 
-test('allSignalNames：364 個（< 1000）、每個都解析得回來、無重複', () => {
+test('allSignalNames：v0.7 共 517 個（< 1000）、每個都解析得回來、無重複', () => {
   const names = allSignalNames();
-  assert.equal(names.length, 4 + 90 * 4);
+  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1);
   assert.ok(names.length < 1000);
   assert.equal(new Set(names).size, names.length);
   for (const n of names) assert.notEqual(parseSignalName(n), null, n);
@@ -89,7 +93,7 @@ test('parseDetectorStatus：容錯', () => {
   assert.equal(parseDetectorStatus('not json'), null);
   assert.equal(parseDetectorStatus('[]'), null);
   const s = parseDetectorStatus(JSON.stringify({ armed: true, keepAlive: '音訊中', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2 }));
-  assert.deepEqual(s, { armed: true, keepAlive: '音訊中', keepAliveMode: 'none', locationAuth: 'unknown', keepAliveError: undefined, lastFixAt: null, islandCheck: '', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2, telemetryLastOk: null, telemetryPending: 0, telemetryError: undefined, configVersion: 'default' });
+  assert.deepEqual(s, { armed: true, keepAlive: '音訊中', keepAliveMode: 'none', locationAuth: 'unknown', keepAliveError: undefined, lastFixAt: null, islandCheck: '', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2, telemetryLastOk: null, telemetryPending: 0, telemetryError: undefined, configVersion: 'default', offerPendingMinutes: null, offerPendingAt: null, offerNote: '' });
   const v5 = parseDetectorStatus(JSON.stringify({ armed: true, keepAlive: '定位中', keepAliveMode: 'location', locationAuth: 'whenInUse', lastFixAt: 5000, islandCheck: '動態島：已更新✓（背景）' }));
   assert.equal(v5.keepAliveMode, 'location');
   assert.equal(v5.locationAuth, 'whenInUse');
@@ -158,7 +162,7 @@ test('v0.6：app.json 背景模式／定位說明／runtimeVersion 與 OtaBox �
   assert.deepEqual([...plist.UIBackgroundModes].sort(), ['audio', 'location']);
   assert.ok(plist.NSLocationWhenInUseUsageDescription.length > 5);
   assert.ok(plist.NSLocationAlwaysAndWhenInUseUsageDescription.length > 5);
-  assert.equal(app.runtimeVersion, '0.6');
+  assert.equal(app.runtimeVersion, '0.7');
   // v0.6 遠端回報：寫入金鑰在 extra（進 App 可接受），網址 https；讀取金鑰絕不進 repo
   assert.match(app.extra.telemetryKey, /^[A-Za-z0-9_-]{32,}$/);
   assert.match(app.extra.telemetryUrl, /^https:\/\/.+\/api\/telemetry$/);
@@ -169,4 +173,65 @@ test('v0.6：app.json 背景模式／定位說明／runtimeVersion 與 OtaBox �
   assert.ok(ota.includes(`const APP_VERSION = '${app.runtimeVersion}'`));
   // 零 entitlement：app.json 不得出現 entitlements 設定
   assert.equal(app.ios.entitlements, undefined);
+});
+
+test('v0.7 offer.pending / offer.cleared / accept.delay：編碼與解析、邊界', () => {
+  assert.deepEqual(parseSignalName('com.pandatimer.offer.pending.27'), { kind: 'offerPending', minutes: 27 });
+  assert.deepEqual(parseSignalName('com.pandatimer.offer.cleared'), { kind: 'offerCleared' });
+  assert.deepEqual(parseSignalName('com.pandatimer.delivered'), { kind: 'delivered' });
+  assert.equal(parseSignalName('com.pandatimer.delivered.1'), null);
+  assert.deepEqual(parseSignalName('com.pandatimer.accept.delay.0'), { kind: 'acceptDelay', seconds: 0 });
+  assert.deepEqual(parseSignalName('com.pandatimer.accept.delay.60'), { kind: 'acceptDelay', seconds: 60 });
+  for (const bad of ['offer.pending.0', 'offer.pending.91', 'offer.pending.07', 'offer.pending.', 'offer.pending.5.0', 'accept.delay.61', 'accept.delay.00', 'accept.delay.-1', 'accept.delay.', 'offer.cleared.1']) {
+    assert.equal(parseSignalName(`com.pandatimer.${bad}`), null, bad);
+  }
+  for (let m = 1; m <= 90; m++) assert.deepEqual(parseSignalName(offerPendingName(m)), { kind: 'offerPending', minutes: m });
+  assert.equal(offerPendingName(0), null);
+  assert.equal(offerPendingName(91), null);
+  assert.equal(acceptDelayName(12.4), 'com.pandatimer.accept.delay.12');
+  assert.equal(acceptDelayName(-3), 'com.pandatimer.accept.delay.0');
+  assert.equal(acceptDelayName(99), 'com.pandatimer.accept.delay.60');
+});
+
+test('v0.7 restoreAcceptedAt：延遲配對（前後 2 秒）、App 暫停用通知時間、配不到用收到時間', () => {
+  const t = 1_000_000;
+  assert.equal(restoreAcceptedAt({ receivedAt: t, suspended: false, delay: { seconds: 12, at: t - 50 } }), t - 12_000);
+  assert.equal(restoreAcceptedAt({ receivedAt: t, suspended: false, delay: { seconds: 12, at: t + 1500 } }), t - 12_000); // 亂序：延遲晚到
+  assert.equal(restoreAcceptedAt({ receivedAt: t, suspended: false, delay: { seconds: 12, at: t - 2500 } }), t); // 太舊
+  assert.equal(restoreAcceptedAt({ receivedAt: t, suspended: false, delay: null }), t);
+  assert.equal(restoreAcceptedAt({ receivedAt: t, suspended: true, notifiedAt: t - 90_000, delay: { seconds: 5, at: t } }), t - 90_000);
+  assert.equal(restoreAcceptedAt({ receivedAt: t, suspended: true, notifiedAt: null }), t);
+});
+
+test('v0.7 offerLine：等待接單中（秒數）、過期不顯示、最近判定', () => {
+  const base = parseDetectorStatus(JSON.stringify({ armed: true }));
+  assert.equal(offerLine(null, 0), null);
+  assert.equal(offerLine(base, 0), null);
+  const p = parseDetectorStatus(JSON.stringify({ armed: true, offerPendingMinutes: 27, offerPendingAt: 10_000 }));
+  assert.equal(offerLine(p, 22_000), '偵測到邀請 27 分，等你接單…（12 秒）');
+  assert.equal(offerLine({ ...p, offerNote: '已接單 18 分（18:00:00）' }, 10_000 + 181_000), '最近：已接單 18 分（18:00:00）');
+  assert.equal(offerLine({ ...p, offerPendingAt: null, offerNote: '未接單 27 分（18:01:02）' }, 0), '最近：未接單 27 分（18:01:02）');
+});
+
+test('v0.7：Swift 兩邊（extension 送、App 註冊/解析）的新訊號名稱與 TS 一致；送 order 前先送延遲', async () => {
+  const fs = await import('node:fs');
+  const read = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const hub = read('../modules/live-activity/ios/DetectorHub.swift');
+  const ext = read('../targets/broadcast/SampleHandler.swift');
+  for (const s of ['com.pandatimer.offer.pending.', 'com.pandatimer.offer.cleared', 'com.pandatimer.accept.delay.', 'com.pandatimer.delivered']) {
+    assert.ok(hub.includes(`"${s}"`), `DetectorHub 缺 ${s}`);
+    assert.ok(ext.includes(`"${s}"`), `SampleHandler 缺 ${s}`);
+  }
+  assert.ok(ext.includes('static let maxAcceptDelay = 60') && hub.includes('static let maxAcceptDelay = 60'));
+  assert.ok(hub.includes('static let delayPairWindow: TimeInterval = 2'));
+  // extension：延遲訊號一定在 order 訊號之前送
+  const body = ext.slice(ext.indexOf('private func decided('), ext.indexOf('/// 畫面分類或接單鈕狀態有變才記一筆'));
+  const iDelay = body.indexOf('PandaSignal.postAcceptDelay(');
+  const iOrder = body.indexOf('PandaSignal.postOrder(');
+  assert.ok(iDelay > 0 && iOrder > iDelay, '要先送 accept.delay 再送 order');
+  // 只有判定接單才送 order（runOCR 不得直接送）
+  const ocr = ext.slice(ext.indexOf('private func runOCR('), ext.indexOf('// MARK: - v0.7 邀請 → 接單判定'));
+  assert.ok(!ocr.includes('postOrder('), 'runOCR 不得直接送 order 訊號');
+  assert.ok(hub.includes('for n in 1...maxMinutes { names.append("\\(offerPendingPrefix)\\(n)") }'));
+  assert.ok(hub.includes('for d in 0...maxAcceptDelay { names.append("\\(acceptDelayPrefix)\\(d)") }'));
 });

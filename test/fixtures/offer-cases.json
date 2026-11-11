@@ -1,0 +1,140 @@
+{
+  "_comment": "v0.7 OfferTracker 樣本（src/offerTracker.ts 與 targets/broadcast/OfferTracker.swift 同一套規則；Swift 不能在本機/CI 跑單元測試，以 TS 結果為準）。steps：[秒, 畫面代號 | \"tick\" | \"finish\"]；畫面代號對應 screens 的 OCR 文字（經 summarizeScreen 用預設規則判讀）。expect 只比對 decided/seen/dup/resumed 事件的關鍵欄位。",
+  "screens": {
+    "INVITE_27": "狀態\n上線中\n每單收入\n110.26 $ 6.7公里\n27 分鐘\n鬍鬚張魯肉飯 (台北美食文化館)\n台北市XX區XX路XX巷XX號X樓\n送餐資訊\n拒絕\n接受訂單",
+    "INVITE_18": "狀態\n上線中\n每單收入\n73.50 $ 3.1公里\n18 分鐘\n某某便當\n拒絕\n接受訂單",
+    "INVITE_NOMIN": "每單收入\n拒絕\n接受訂單",
+    "PICKUP": "前往取餐\n鬍鬚張魯肉飯\n導航\n訂單詳情",
+    "REJECTED": "已拒絕訂單\n狀態\n上線中",
+    "IDLE_MAP": "狀態\n上線中\n今日收入",
+    "BOTH": "上線中\n前往取餐",
+    "OTHER_APP": "LINE\n王小明：晚點到",
+    "BLANK": ""
+  },
+  "cases": [
+    {
+      "name": "接單：邀請消失後看到接單後畫面 → accept，acceptedAt＝goneAt（第一次沒看到的時間）",
+      "steps": [[0, "INVITE_27"], [1.5, "INVITE_27"], [3, "INVITE_27"], [4.5, "BLANK"], [6, "BLANK"], [7.5, "PICKUP"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 27, "acceptedAt": 4.5, "waitSec": 3, "hit": ["前往取餐", "取餐"] }
+      ]
+    },
+    {
+      "name": "拒單：邀請消失後看到「已拒絕」→ reject（不送訊號）",
+      "steps": [[0, "INVITE_27"], [1.5, "BLANK"], [3, "REJECTED"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "reject", "reason": "rejected", "minutes": 27, "acceptedAt": null, "waitSec": 1.5 }
+      ]
+    },
+    {
+      "name": "拒單：回到地圖（只有「上線中」、沒有訂單卡字）→ reject",
+      "steps": [[0, "INVITE_18"], [1.5, "IDLE_MAP"], [3, "IDLE_MAP"]],
+      "expect": [
+        { "type": "seen", "minutes": 18 },
+        { "type": "decided", "result": "reject", "reason": "rejected", "minutes": 18, "acceptedAt": null, "waitSec": 1.5 }
+      ]
+    },
+    {
+      "name": "逾時（ambiguousAs=accept，預設）：切到別的 App、畫面靜止 → 計時器 tick 判接單",
+      "steps": [[0, "INVITE_27"], [2, "OTHER_APP"], [4, "OTHER_APP"], [10, "BOTH"], [26.9, "tick"], [27, "tick"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "accept", "reason": "timeout", "minutes": 27, "acceptedAt": 2, "waitSec": 25 }
+      ]
+    },
+    {
+      "name": "逾時（ambiguousAs=reject）",
+      "settings": { "ambiguousAs": "reject", "decideWindowSec": 10 },
+      "steps": [[0, "INVITE_27"], [2, "BLANK"], [4, "BLANK"], [12, "tick"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "reject", "reason": "timeout", "minutes": 27, "acceptedAt": null, "waitSec": 10 }
+      ]
+    },
+    {
+      "name": "邀請連續兩張：第一張消失後還沒判定就來第二張 → 第一張依 ambiguousAs（superseded）、第二張另外判定",
+      "steps": [[0, "INVITE_27"], [1.5, "BLANK"], [3, "BLANK"], [4.5, "INVITE_18"], [6, "INVITE_18"], [7.5, "BLANK"], [9, "BLANK"], [10.5, "PICKUP"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "accept", "reason": "superseded", "minutes": 27, "acceptedAt": 1.5, "waitSec": 3 },
+        { "type": "seen", "minutes": 18 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 18, "acceptedAt": 7.5, "waitSec": 3 }
+      ]
+    },
+    {
+      "name": "邀請直接換成另一張（沒消失過）→ 前一張未接（replaced）",
+      "steps": [[0, "INVITE_27"], [1.5, "INVITE_18"], [3, "BLANK"], [4.5, "BLANK"], [6, "REJECTED"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "reject", "reason": "replaced", "minutes": 27, "acceptedAt": null, "waitSec": 0 },
+        { "type": "seen", "minutes": 18 },
+        { "type": "decided", "result": "reject", "reason": "rejected", "minutes": 18, "acceptedAt": null, "waitSec": 3 }
+      ]
+    },
+    {
+      "name": "邀請被短暫遮住（少於 goneAfterMisses 次）不算消失；之後才真的消失",
+      "steps": [[0, "INVITE_27"], [1.5, "PICKUP"], [3, "INVITE_27"], [4.5, "BLANK"], [6, "INVITE_27"], [7.5, "BLANK"], [9, "BLANK"], [10.5, "PICKUP"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 27, "acceptedAt": 7.5, "waitSec": 3 }
+      ]
+    },
+    {
+      "name": "被切走又回到同一張邀請（deciding 中）→ resumed，不判定",
+      "steps": [[0, "INVITE_27"], [1.5, "OTHER_APP"], [3, "OTHER_APP"], [8, "INVITE_27"], [9.5, "BLANK"], [11, "BLANK"], [12.5, "REJECTED"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "resumed", "minutes": 27 },
+        { "type": "decided", "result": "reject", "reason": "rejected", "minutes": 27, "acceptedAt": null, "waitSec": 3 }
+      ]
+    },
+    {
+      "name": "有接單鈕但挑不出分鐘數（動畫中）→ 等下一次 OCR；兩邊都命中的畫面不判定",
+      "steps": [[0, "INVITE_NOMIN"], [1.5, "INVITE_27"], [3, "INVITE_NOMIN"], [4.5, "BLANK"], [6, "BOTH"], [7.5, "BOTH"], [9, "PICKUP"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 27, "acceptedAt": 4.5, "waitSec": 4.5 }
+      ]
+    },
+    {
+      "name": "接單後同一組（分鐘, 金額）90 秒內又出現 → dup（不算新邀請）；消失後再出現也一樣",
+      "steps": [[0, "INVITE_27"], [1.5, "BLANK"], [3, "BLANK"], [27, "tick"], [30, "INVITE_27"], [31.5, "INVITE_27"], [33, "BLANK"], [34.5, "BLANK"], [36, "INVITE_27"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "accept", "reason": "timeout", "minutes": 27, "acceptedAt": 1.5, "waitSec": 25.5 },
+        { "type": "dup", "minutes": 27 },
+        { "type": "dup", "minutes": 27 }
+      ]
+    },
+    {
+      "name": "拒絕過的同一組再出現 → 當新邀請（拒單不進去重清單）",
+      "steps": [[0, "INVITE_27"], [1.5, "BLANK"], [3, "REJECTED"], [10, "INVITE_27"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "reject", "reason": "rejected", "minutes": 27, "acceptedAt": null, "waitSec": 1.5 },
+        { "type": "seen", "minutes": 27 }
+      ]
+    },
+    {
+      "name": "goneAfterMisses=3：要連 3 次沒看到才算消失",
+      "settings": { "goneAfterMisses": 3 },
+      "steps": [[0, "INVITE_27"], [1.5, "BLANK"], [3, "PICKUP"], [4.5, "PICKUP"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 27, "acceptedAt": 1.5, "waitSec": 3 }
+      ]
+    },
+    {
+      "name": "廣播停止：deciding → 依 ambiguousAs；offered → 未接",
+      "steps": [[0, "INVITE_27"], [1.5, "BLANK"], [3, "BLANK"], [5, "finish"], [10, "INVITE_18"], [12, "finish"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "accept", "reason": "stopped", "minutes": 27, "acceptedAt": 1.5, "waitSec": 3.5 },
+        { "type": "seen", "minutes": 18 },
+        { "type": "decided", "result": "reject", "reason": "stopped", "minutes": 18, "acceptedAt": null, "waitSec": 0 }
+      ]
+    }
+  ]
+}

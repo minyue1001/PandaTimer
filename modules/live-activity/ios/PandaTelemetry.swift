@@ -34,6 +34,7 @@ final class PandaTelemetry {
     "accept", "min", "amt", "km", "kw", "screen", "interval", "triggers", "dups",
     "island", "islandErr", "keep", "auth", "fg", "orders", "others", "susp",
     "note", "code", "sent", "dropped", "beatAge", "reason", "cfg",
+    "result", "wait", "delay", "hit",
   ]
 
   private let endpoint: URL?

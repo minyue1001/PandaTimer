@@ -151,6 +151,21 @@ final class RemoteConfig {
     return p
   }
 
+  /// v0.7 offer.acceptedKeywords / rejectedKeywords：編得過、≤300 字，且**不能命中空字串**（'a|'、'.*' 會讓每個畫面都算命中）
+  static func offerRegex(_ v: Any?, _ fallback: String) -> String {
+    guard let p = v as? String, !p.isEmpty, p.count <= 300,
+          let r = try? NSRegularExpression(pattern: p, options: []),
+          r.firstMatch(in: "", options: [], range: NSRange(location: 0, length: 0)) == nil
+    else { return fallback }
+    return p
+  }
+
+  /// 字串列舉（例如 offer.ambiguousAs："accept"|"reject"）；不在選項內 → fallback
+  static func choice(_ v: Any?, _ options: [String], _ fallback: String) -> String {
+    guard let s = v as? String, options.contains(s) else { return fallback }
+    return s
+  }
+
   /// [[正式名稱, 異體...], ...]：1~40 列、每列 1~6 個 1~12 字的字串；不合法 → nil（用內建）
   static func keywordRows(_ v: Any?) -> [[String]]? {
     guard let rows = v as? [[String]], (1...40).contains(rows.count),
@@ -165,6 +180,39 @@ final class RemoteConfig {
       keywords: keywordRows(t["keywords"]),
       flushSeconds: int(t["flushSeconds"], 5, 600, 30),
       batchSize: int(t["batchSize"], 1, 50, 10))
+  }
+
+  /// v0.7 自動送達（extension：completedKeywords/enabled；App：enabled/minOrderAgeSec）。預設＝src/deliveryDetector.ts
+  struct DeliverySettings {
+    // ⚠️ 待實測調整（實機 telemetry 有 screen=delivering kw=完成訂單,聯絡）
+    static let defaultCompletedKeywords =
+      "完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达"
+    var enabled = true
+    var minOrderAgeSec = 120
+    var completedKeywords = DeliverySettings.defaultCompletedKeywords
+  }
+
+  static func delivery(_ root: [String: Any]) -> DeliverySettings {
+    let d = section(root, "delivery")
+    var out = DeliverySettings()
+    if let n = d["enabled"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() { out.enabled = n.boolValue }
+    out.minOrderAgeSec = int(d["minOrderAgeSec"], 0, 1800, out.minOrderAgeSec)
+    out.completedKeywords = offerRegex(d["completedKeywords"], out.completedKeywords)
+    return out
+  }
+
+  /// v0.7 extension OCR 記憶體保護（MB）：目前 > memSkipMB 跳過該幀；OCR 中量到 > memHighMB → 之後 120 秒只認大字
+  struct OcrSettings {
+    var memSkipMB = 38.0
+    var memHighMB = 44.0
+  }
+
+  static func ocr(_ root: [String: Any]) -> OcrSettings {
+    let o = section(root, "ocr")
+    var out = OcrSettings()
+    out.memSkipMB = number(o["memSkipMB"], 20, 60, out.memSkipMB)
+    out.memHighMB = number(o["memHighMB"], 25, 80, out.memHighMB)
+    return out
   }
 
   /// App：心跳逾時秒數（預設 150）

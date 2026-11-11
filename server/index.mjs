@@ -371,6 +371,8 @@ function handleConfig(req, res) {
 const TELEMETRY_KEYWORDS = [
   '接受訂單', '拒絕', '前往取餐', '抵達餐廳', '已取餐', '前往送餐', '抵達', '送達', '完成訂單',
   '上線中', '休息中', '訂單詳情', '聯絡', '導航', '拍照', '確認取餐', '取消',
+  '已拒絕', '訂單已取消', '逾時', '已過期', '已抵達', '抵達店家', '聯絡店家', '取餐',
+  '訂單已完成', '已送達', '送達完成', '確認送達', '完成送達',
 ];
 const BUILTIN_KEYWORDS = new Set(TELEMETRY_KEYWORDS);
 /** 白名單＝內建 ∪ 目前遠端設定 telemetry.keywords 的正式名稱（設定檔由擁有者維護） */
@@ -387,6 +389,7 @@ const FIELD_RULES = {
   accept: B, min: N, amt: N, km: N, kw: 'kw', screen: S, interval: N, triggers: N, dups: N,
   island: S, islandErr: S, keep: S, auth: S, fg: S, orders: N, others: S, susp: B,
   note: S, code: N, sent: N, dropped: N, beatAge: N, reason: S, cfg: S,
+  result: S, wait: N, delay: N, hit: 'kw',
 };
 const MAX_STR = 80;
 

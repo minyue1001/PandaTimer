@@ -11,8 +11,12 @@ import Vision
 // 「Target does not include NSSupportsLiveActivities plist key」）→ 這裡**不碰 ActivityKit**。
 // 只做 OCR 偵測，結果用 Darwin notification 通知 App（名稱編碼資料，見 PandaSignal），App 保活中自己更新動態島。
 // 另外保留本地通知「偵測到新單：N 分鐘」給使用者確認（不響聲）。
-// v0.6：多單＝邊緣觸發（接單鈕出現一次只觸發一次；出現中換了分鐘數/金額也算新單）＋（分鐘, 金額）90 秒去重；
-//   訊號 com.pandatimer.order.<分>.<序號 mod 4>；遠端狀態回報（PandaTelemetry，只送結構化欄位，OCR 原文不離開 runOCR）。
+// v0.6：多單＋（分鐘, 金額）90 秒去重；訊號 com.pandatimer.order.<分>.<序號 mod 4>；
+//   遠端狀態回報（PandaTelemetry，只送結構化欄位，OCR 原文不離開 runOCR）。
+// v0.7：接單後才開始倒數——邀請畫面出現只送 offer.pending.<分>（App 顯示「等你接單」），邀請消失後看畫面判斷
+//   接了沒（OfferTracker.swift）；接單才送 accept.delay.<秒>＋order 訊號（App 用延遲把接單時間還原成按下接受的時間）。
+//   自動送達：畫面命中 delivery.completedKeywords → 邊緣觸發送 com.pandatimer.delivered（DeliveryEdge，60 秒不重送）。
+//   記憶體保護：OCR 前目前 > ocr.memSkipMB 跳過該幀；OCR 中量到 > ocr.memHighMB → 之後 120 秒 minimumTextHeight 至少 0.03（只認大字）。
 //
 // 省記憶體（v0.4 實測峰值 43MB → v0.5 目標 ≤36MB；jetsam 約 50MB）：
 //  - 不用 CIContext：直接讀 pixel buffer 的亮度平面（420f 的 Y），只取畫面下方 50%，
@@ -51,6 +55,14 @@ enum PandaSignal {
   static let stopped = "com.pandatimer.broadcast.stopped"
   static let heartbeat = "com.pandatimer.broadcast.heartbeat"
   static let orderPrefix = "com.pandatimer.order."
+  /// v0.7：邀請出現（App 顯示「偵測到邀請 N 分，等你接單…」）／判定未接
+  static let offerPendingPrefix = "com.pandatimer.offer.pending."
+  static let offerCleared = "com.pandatimer.offer.cleared"
+  /// v0.7：接單訊號前先送「從按下接受到現在的秒數」（0…60），App 在 2 秒內配對 → acceptedAt＝收到時間 − 秒數
+  static let acceptDelayPrefix = "com.pandatimer.accept.delay."
+  static let maxAcceptDelay = 60
+  /// v0.7 自動送達：看到完成/送達畫面（App 結最早且接單超過 minOrderAgeSec 的進行中單）
+  static let delivered = "com.pandatimer.delivered"
 
   static func post(_ name: String) {
     CFNotificationCenterPostNotification(
@@ -66,6 +78,15 @@ enum PandaSignal {
     post("\(orderPrefix)\(minutes).\(((seq % seqMod) + seqMod) % seqMod)")
     return true
   }
+
+  static func postOfferPending(_ minutes: Int) {
+    guard minutes >= 1, minutes <= 90 else { return }
+    post("\(offerPendingPrefix)\(minutes)")
+  }
+
+  static func postAcceptDelay(_ seconds: Int) {
+    post("\(acceptDelayPrefix)\(min(maxAcceptDelay, max(0, seconds)))")
+  }
 }
 
 final class BroadcastDetector {
@@ -79,10 +100,8 @@ final class BroadcastDetector {
     var forceOcrInterval: CFAbsoluteTime = 10
     var sameFrameMaxBits = 40  // 4096 bits 中差異 ≤40（≈1%）視為同一畫面
     var heartbeatInterval = 60
-    /// 同一組（分鐘數, 金額取整）90 秒內不重複觸發（切 App 回來同一張邀請還在）；不同金額或分鐘數一律視為新單
+    /// 已接的（分鐘數, 金額取整）90 秒內又出現不算新邀請（v0.7 由 OfferTracker 使用）
     var dedupeWindow: TimeInterval = 90
-    /// 連續幾次 OCR 都沒有接單鈕才算「接單鈕消失」（一次 OCR 漏看不會被當成新的一次出現）
-    var goneAfterMisses = 2
     var maxLongEdge = 640
     var bottomFraction = 0.50
     var minimumTextHeight = 0.02
@@ -90,6 +109,11 @@ final class BroadcastDetector {
     var refreshSeconds: TimeInterval = 600
     /// 接單鈕正則、分鐘/金額規則（PickerConfig）、回報白名單關鍵字
     var rules = ScreenRules.standard
+    /// v0.7 接單判定（遠端設定 "offer"；detector.goneAfterMisses 是 v0.6 用的，v0.7 改看 offer.goneAfterMisses）
+    var offer = OfferSettings()
+    /// v0.7 自動送達（遠端設定 "delivery"）、OCR 記憶體保護（"ocr"）
+    var delivery = RemoteConfig.DeliverySettings()
+    var ocrGuard = RemoteConfig.OcrSettings()
     var version = "default"
 
     init() {}
@@ -103,7 +127,6 @@ final class BroadcastDetector {
       sameFrameMaxBits = RemoteConfig.int(d["sameFrameMaxBits"], 0, 1000, sameFrameMaxBits)
       heartbeatInterval = RemoteConfig.int(d["heartbeatSeconds"], 15, 600, heartbeatInterval)
       dedupeWindow = RemoteConfig.number(d["dedupeSeconds"], 0, 3600, dedupeWindow)
-      goneAfterMisses = RemoteConfig.int(d["goneAfterMisses"], 1, 20, goneAfterMisses)
       maxLongEdge = RemoteConfig.int(d["maxLongEdge"], 320, 1600, maxLongEdge)
       bottomFraction = RemoteConfig.number(d["bottomFraction"], 0.2, 1, bottomFraction)
       minimumTextHeight = RemoteConfig.number(d["minimumTextHeight"], 0, 0.2, minimumTextHeight)
@@ -112,6 +135,12 @@ final class BroadcastDetector {
       rules.picker = PickerConfig(json: RemoteConfig.section(root, "picker"))
       rules.acceptPattern = RemoteConfig.regex(d["acceptPattern"], groups: 0, rules.acceptPattern)
       if let rows = RemoteConfig.telemetry(root).keywords { rules.keywords = rows }
+      offer = OfferSettings(root: root)
+      rules.acceptedKeywords = offer.acceptedKeywords
+      rules.rejectedKeywords = offer.rejectedKeywords
+      delivery = RemoteConfig.delivery(root)
+      rules.completedKeywords = delivery.completedKeywords
+      ocrGuard = RemoteConfig.ocr(root)
       version = RemoteConfig.version(root)
     }
   }
@@ -149,20 +178,22 @@ final class BroadcastDetector {
   private var missStreak = 0
   private var lastTriggerMinutes: Int?
   private var lastTriggerAt: Date?
+  /// v0.7：判定「已接」並送出訂單訊號的次數
   private var triggerCount = 0
-  // v0.6 多單：邊緣觸發＋（分鐘數, 金額）去重
-  /// 接單鈕目前「出現中」時，這次出現已觸發（或已判定重複）的鍵；nil＝這次出現還沒觸發
-  private var appearanceKey: OrderKey?
-  private var recentKeys: [(key: OrderKey, at: Date)] = []
+  /// v0.7 邀請狀態機（idle/offered/deciding）＋視窗到期計時器
+  private let tracker = OfferTracker()
+  private var decisionTimer: DispatchWorkItem?
   private var orderSeq = 0
   private var dupCount = 0
+  /// v0.7 自動送達邊緣觸發、記憶體保護
+  private let deliveryEdge = DeliveryEdge()
+  private var deliveredCount = 0
+  private var memSkips = 0
+  private var lastMemSkipLog: Date?
+  private var highMemUntil: Date?
+  private var lastOcrDoneAt: Date?
   private var lastScreenLogged: String?
   private var lastScreenLoggedAt: Date?
-
-  struct OrderKey: Equatable {
-    let minutes: Int
-    let amount: Int  // 金額四捨五入取整（0＝抓不到）
-  }
 
   // MARK: - 生命週期（由 SampleHandler 轉呼叫）
 
@@ -199,6 +230,12 @@ final class BroadcastDetector {
   func finish() {
     heartbeatTimer?.cancel()
     heartbeatTimer = nil
+    // v0.7：還在等判定的邀請先結案（offered → 未接；deciding → 依 ambiguousAs），訂單訊號要在 stopped 之前送
+    workQueue.sync {
+      self.decisionTimer?.cancel()
+      self.decisionTimer = nil
+      self.handleOffer(self.tracker.finish(Date()), info: nil)
+    }
     PandaSignal.post(PandaSignal.stopped)
     // 程序在這個方法 return 後就會被結束 → 等最後一則（靜音）摘要通知送出（最多 2 秒）
     let done = DispatchSemaphore(value: 0)
@@ -259,6 +296,8 @@ final class BroadcastDetector {
     let t = RemoteConfig.telemetry(root)
     telemetry.configure(flushSeconds: t.flushSeconds, batchSize: t.batchSize)
     telemetry.setContext(["cfg": next.version])
+    tracker.settings = next.offer
+    tracker.dedupeSeconds = next.dedupeWindow
     if old.heartbeatInterval != next.heartbeatInterval, let timer = heartbeatTimer {
       timer.schedule(
         deadline: .now() + .seconds(next.heartbeatInterval), repeating: .seconds(next.heartbeatInterval),
@@ -337,6 +376,22 @@ final class BroadcastDetector {
   private func runOCR(_ frame: GrayFrame) {
     // OCR 原文只活在這個函式內：立刻轉成結構化摘要（ScreenInfo），之後只用摘要（隱私鐵律：原文不上傳、不保存）
     let s = currentSettings()
+    // v0.7 記憶體保護：目前已偏高就跳過這一幀（Vision 辨識當下會再往上衝十幾 MB；jetsam 約 50MB）
+    sampleMemory()
+    // 但最多連跳 15 秒（記憶體一直下不來也不能整個停擺；強制那次用「只認大字」模式）
+    let starving = lastOcrDoneAt.map { Date().timeIntervalSince($0) >= 15 } ?? true
+    if currentMB > s.ocrGuard.memSkipMB && !starving {
+      memSkips += 1
+      let now = Date()
+      if lastMemSkipLog.map({ now.timeIntervalSince($0) >= 30 }) ?? true {
+        lastMemSkipLog = now
+        telemetry.log("memSkip", ["memMB": currentMB, "peakMB": peakMB, "skip": memSkips])
+      }
+      return
+    }
+    // OCR 中量到偏高 → 之後 120 秒只認大字（文字很多的畫面 Vision 峰值較高；接單鈕/分鐘數/完成訂單都是大字）
+    let highMem = (highMemUntil.map { Date() < $0 } ?? false) || currentMB > s.ocrGuard.memSkipMB
+    ocr.setMinimumTextHeight(Float(highMem ? max(s.minimumTextHeight, 0.03) : s.minimumTextHeight))
     let info: ScreenInfo.Summary
     do {
       guard let image = frame.cgImage() else {
@@ -350,62 +405,140 @@ final class BroadcastDetector {
       return
     }
     ocrCount += 1
+    lastOcrDoneAt = Date()
     sampleMemory()
+    if ocr.lastInnerMB > s.ocrGuard.memHighMB {
+      if !highMem {
+        telemetry.log("memHigh", ["memMB": ocr.lastInnerMB, "peakMB": peakMB, "screen": info.screen, "kw": info.kw])
+      }
+      highMemUntil = Date().addingTimeInterval(120)
+    }
     lastSawAccept = info.accept
     missStreak = info.accept ? 0 : missStreak + 1
-    let interval = missStreak >= s.idleAfterMisses ? s.idleOcrInterval : s.ocrInterval
+    logScreenIfChanged(info)
+
+    // v0.7：邀請狀態機（不再「看到邀請就送訊號」；接單判定見 OfferTracker.swift）
+    handleOffer(tracker.observe(Date(), OfferObservation(info)), info: info)
+    scheduleDecisionTimer()
+    // v0.7 自動送達（邊緣觸發＋60 秒不重送；App 端挑單/互斥見 DetectorHub.AutoDelivery）
+    if s.delivery.enabled {
+      switch deliveryEdge.observe(Date(), hit: info.delivered) {
+      case .send:
+        deliveredCount += 1
+        PandaSignal.post(PandaSignal.delivered)
+        telemetry.log(
+          "delivered_seen", ["hit": info.deliveredHit, "kw": info.kw, "screen": info.screen, "note": "signal"], urgent: true)
+      case .repeatSuppressed:
+        telemetry.log("delivered_seen", ["hit": info.deliveredHit, "kw": info.kw, "screen": info.screen, "note": "repeat"])
+      case .idle:
+        break
+      }
+    }
+    // 等判定期間維持快速 OCR（要盡快看到接單後/未接畫面）
+    let fast = tracker.deadline != nil
+    let interval = (missStreak >= s.idleAfterMisses && !fast) ? s.idleOcrInterval : s.ocrInterval
     lock.lock()
     currentInterval = interval
     lock.unlock()
-    logScreenIfChanged(info)
+  }
 
-    // v0.6 邊緣觸發：接單鈕「從沒有變成有」才算一次新單出現，同一次出現期間只觸發一次；
-    // 出現期間若分鐘數/金額變了（直接換成另一張邀請）也算新單。連續 goneAfterMisses 次沒看到接單鈕＝這次出現結束。
-    guard info.accept else {
-      if missStreak >= s.goneAfterMisses { appearanceKey = nil }
+  // MARK: - v0.7 邀請 → 接單判定（只在 workQueue）
+
+  /// deciding 的視窗到期：畫面靜止時 ReplayKit 不送幀、OCR 不會跑 → 另排計時器推進狀態機
+  private func scheduleDecisionTimer() {
+    decisionTimer?.cancel()
+    decisionTimer = nil
+    guard let deadline = tracker.deadline else { return }
+    let item = DispatchWorkItem { [weak self] in
+      guard let self = self else { return }
+      self.decisionTimer = nil
+      self.handleOffer(self.tracker.tick(Date()), info: nil)
+      self.scheduleDecisionTimer()
+    }
+    decisionTimer = item
+    workQueue.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow) + 0.2, execute: item)
+  }
+
+  private func handleOffer(_ events: [OfferEvent], info: ScreenInfo.Summary?) {
+    for event in events {
+      switch event {
+      case .seen(let offer):
+        PandaSignal.postOfferPending(offer.minutes)
+        var fields: [String: Any] = ["min": offer.minutes, "note": "pending"]
+        if let a = offer.amount { fields["amt"] = a }
+        if let i = info {
+          fields["kw"] = i.kw
+          fields["screen"] = i.screen
+          if let km = i.km { fields["km"] = km }
+        }
+        telemetry.log("offer_seen", fields)
+      case .resumed(let offer, let away):
+        telemetry.log("offer_resumed", ["min": offer.minutes, "wait": away])
+      case .dup(let minutes, let amount):
+        // 已接的同一組（分鐘數, 金額）dedupeSeconds 內又出現（例：逾時判接單後切回來邀請還在）
+        dupCount += 1
+        telemetry.log("dup", ["min": minutes, "amt": amount ?? 0, "dups": dupCount])
+      case .decided(let decision):
+        decided(decision)
+      }
+    }
+  }
+
+  private func decided(_ d: OfferDecision) {
+    let minutes = d.offer.minutes
+    var fields: [String: Any] = [
+      // note＝result 的備份：部署中的 v0.6 伺服器不認得 result/wait/hit，會丟掉
+      "min": minutes, "result": d.accepted ? "accept" : "reject", "note": d.accepted ? "accept" : "reject",
+      "reason": d.reason, "wait": d.waitSec,
+      "kw": d.kw, "hit": d.hit,
+    ]
+    if let a = d.offer.amount { fields["amt"] = a }
+    telemetry.log("offer_decided", fields, urgent: true)
+    let reasonText: String
+    switch d.reason {
+    case "accepted": reasonText = "看到接單後的畫面"
+    case "rejected": reasonText = "看到未接的畫面"
+    case "timeout": reasonText = "\(currentSettings().offer.decideWindowSec) 秒內看不出結果，依設定當" + (d.accepted ? "接單" : "未接")
+    case "superseded": reasonText = "又來新邀請，前一張依設定當" + (d.accepted ? "接單" : "未接")
+    case "replaced": reasonText = "邀請直接換成另一張"
+    default: reasonText = "偵測停止"
+    }
+    let amountText = d.offer.amount.map { String(format: "%.2f 元・", $0) } ?? ""
+    guard d.accepted, let acceptedAt = d.acceptedAt else {
+      PandaSignal.post(PandaSignal.offerCleared)
+      Task.detached {
+        await Notifier.post("未接單：\(minutes) 分鐘", "\(amountText)\(reasonText)，不開倒數", passive: true)
+      }
       return
     }
-    guard let minutes = info.minutes else { return }  // 有接單鈕但還挑不出分鐘數（畫面還在動畫）→ 等下一次 OCR
-    let key = OrderKey(minutes: minutes, amount: ScreenInfo.amountKey(info.amount))
-    if appearanceKey == key { return }
-    appearanceKey = key
-
-    let now = Date()
-    recentKeys.removeAll { now.timeIntervalSince($0.at) >= s.dedupeWindow }
-    if recentKeys.contains(where: { $0.key == key }) {
-      // 90 秒內同一組（分鐘數, 金額）→ 同一張邀請（切 App 回來還在）
-      dupCount += 1
-      telemetry.log("dup", ["min": minutes, "amt": info.amount ?? 0, "dups": dupCount])
-      return
-    }
-    recentKeys.append((key: key, at: now))
+    let now = d.decidedAt
     lastTriggerMinutes = minutes
     lastTriggerAt = now
     triggerCount += 1
     let seq = orderSeq
     orderSeq += 1
+    let delay = OfferTracker.delaySeconds(decidedAt: now, acceptedAt: acceptedAt)
+    PandaSignal.postAcceptDelay(delay)
     let sent = PandaSignal.postOrder(minutes, seq: seq)
     let text2 = diag()
-    var fields: [String: Any] = [
-      "min": minutes, "seq": seq % PandaSignal.seqMod, "triggers": triggerCount, "kw": info.kw,
-      "screen": info.screen, "accept": true, "memMB": currentMB, "peakMB": peakMB,
+    var orderFields: [String: Any] = [
+      "min": minutes, "seq": seq % PandaSignal.seqMod, "triggers": triggerCount, "kw": d.kw, "accept": true,
+      "memMB": currentMB, "peakMB": peakMB, "delay": delay, "reason": d.reason,
       "note": sent ? "signal" : "outOfRange",
     ]
-    if let a = info.amount { fields["amt"] = a }
-    if let km = info.km { fields["km"] = km }
-    telemetry.log("order", fields, urgent: true)
-    // userInfo：App 被暫停後才收到訊號時，用這裡的偵測時間當接單時間（DetectorNotify.detectedAt，以分鐘數＋序號配對）。
-    // 點這則通知 → 系統打開 App → App 回前景就把卡片重推一次（不會重複記錄）。
-    let detectedMs = (now.timeIntervalSince1970 * 1000).rounded()
-    let amountText = info.amount.map { String(format: "%.2f 元・", $0) } ?? ""
+    if let a = d.offer.amount { orderFields["amt"] = a }
+    telemetry.log("order", orderFields, urgent: true)
+    // userInfo：App 被暫停後才收到訊號時，用這裡的時間（＝按下接受的時間）當接單時間（DetectorNotify.detectedAt，
+    // 以分鐘數＋序號配對）。點這則通知 → 系統打開 App → App 回前景就把卡片重推一次（不會重複記錄）。
+    let detectedMs = (acceptedAt.timeIntervalSince1970 * 1000).rounded()
     let seqValue = seq % PandaSignal.seqMod
     Task.detached {
       let infoDict: [String: Any] = [
         "pandatimer": "detected", "minutes": minutes, "detectedAt": detectedMs, "seq": seqValue,
       ]
       await Notifier.post(
-        "偵測到新單：\(minutes) 分鐘",
-        amountText
+        "已接單：\(minutes) 分鐘",
+        amountText + "\(reasonText)。"
           + (sent ? "已通知 App 開倒數與記錄。動態島沒變→點這則打開 App" : "分鐘數超出 1–90，未通知 App")
           + "\n\(text2)",
         passive: false, userInfo: infoDict)
@@ -474,10 +607,48 @@ final class BroadcastDetector {
       "間隔\(currentIntervalText())s",
     ]
     if triggerCount > 0, let m = lastTriggerMinutes { parts.append("觸發\(triggerCount)(\(m)分)") }
+    if deliveredCount > 0 { parts.append("送達\(deliveredCount)") }
+    if memSkips > 0 { parts.append("記憶體跳\(memSkips)") }
     parts.append("設定 \(currentSettings().version)")
     if ocrErrors + fails > 0 { parts.append("錯\(ocrErrors)/\(fails)") }
     if let f = format { parts.append("格式\(String(format: "%08X", f))") }
     return parts.joined(separator: " · ")
+  }
+}
+
+// MARK: - v0.7 自動送達：送達畫面的邊緣觸發（⚠️ 與 src/deliveryDetector.ts 的 DeliveryEdge 同規則）
+// 「從沒有變成有」才送一次；連 2 次 OCR 沒命中才算這次出現結束；送過後 60 秒內再出現也不送。只在 workQueue 用。
+
+final class DeliveryEdge {
+  enum Result {
+    case idle
+    case send
+    case repeatSuppressed
+  }
+
+  static let goneAfterMisses = 2
+  static let repeatSeconds: TimeInterval = 60
+  private var visible = false
+  private var misses = 0
+  private var lastSentAt: Date?
+
+  func observe(_ now: Date, hit: Bool) -> Result {
+    if hit {
+      misses = 0
+      if visible { return .idle }
+      visible = true
+      if let last = lastSentAt, now.timeIntervalSince(last) < Self.repeatSeconds { return .repeatSuppressed }
+      lastSentAt = now
+      return .send
+    }
+    if visible {
+      misses += 1
+      if misses >= Self.goneAfterMisses {
+        visible = false
+        misses = 0
+      }
+    }
+    return .idle
   }
 }
 
@@ -637,6 +808,9 @@ final class FrameOCR {
     return r
   }()
 
+  /// v0.7：最近一次 OCR 辨識完當下的記憶體（MB）；只在 workQueue 讀寫
+  private(set) var lastInnerMB: Double = 0
+
   /// v0.6 遠端設定 detector.minimumTextHeight；只在 workQueue 呼叫
   func setMinimumTextHeight(_ value: Float) {
     if request.minimumTextHeight != value { request.minimumTextHeight = value }
@@ -657,6 +831,8 @@ final class FrameOCR {
       do {
         let handler = VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
         try handler.perform([request])
+        // v0.7：辨識完、Vision 中間緩衝還沒釋放時量一次（接近這次 OCR 的峰值；給記憶體保護用）
+        lastInnerMB = Memory.footprintMB()?.current ?? 0
         for observation in request.results ?? [] {
           guard let candidate = observation.topCandidates(1).first else { continue }
           let box = observation.boundingBox

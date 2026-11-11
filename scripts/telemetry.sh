@@ -64,7 +64,7 @@ const fs = require('fs');
 const [nextFile, raw] = process.argv.slice(1);
 const data = JSON.parse(fs.readFileSync(0, 'utf8'));
 const fmt = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-const order = ['min', 'amt', 'km', 'seq', 'gap', 'screen', 'accept', 'kw', 'island', 'islandErr', 'orders', 'others',
+const order = ['min', 'amt', 'km', 'seq', 'gap', 'result', 'wait', 'delay', 'hit', 'screen', 'accept', 'kw', 'island', 'islandErr', 'orders', 'others',
   'keep', 'auth', 'fg', 'susp', 'frames', 'ocr', 'skip', 'fails', 'errs', 'interval', 'triggers', 'dups', 'beatAge',
   'note', 'reason', 'code', 'cfg', 'ver', 'rv', 'upd', 'dev'];
 for (const r of data.records || []) {

@@ -260,6 +260,24 @@ test('config：檔案只寫部分欄位 → 其餘用內建預設補齊；改檔
   assert.deepEqual(body.telemetry, DEFAULT_CFG.telemetry);
 });
 
+test('v0.7 config：檔案沒有 offer/stats（例如 v0.6 時代的 config.json）→ 由內建預設補齊新欄位', async () => {
+  fs.writeFileSync(cfgPath(), JSON.stringify({ version: 'v06-file', detector: { dedupeSeconds: 90 } }));
+  const body = await (await fetch(`${base}/api/config`)).json();
+  assert.equal(body.version, 'v06-file');
+  assert.deepEqual(body.offer, DEFAULT_CFG.offer);
+  assert.equal(body.offer.decideWindowSec, 25);
+  assert.equal(body.offer.ambiguousAs, 'accept');
+  assert.deepEqual(body.stats, { graceFactor: 1.05, overrunCap: 1 });
+  // 只覆寫部分 offer 欄位 → 其餘仍是預設
+  fs.writeFileSync(cfgPath(), JSON.stringify({ version: 'v07-part', offer: { decideWindowSec: 40 } }));
+  const part = await (await fetch(`${base}/api/config`)).json();
+  assert.equal(part.offer.decideWindowSec, 40);
+  assert.equal(part.offer.acceptedKeywords, DEFAULT_CFG.offer.acceptedKeywords);
+  fs.rmSync(cfgPath(), { force: true });
+  // 讓伺服器快取回到「檔案不存在」（快取鍵是 mtime|size；下一個測試寫的檔案若同大小同毫秒會被當成沒變）
+  assert.equal((await fetch(`${base}/api/config`)).headers.get('x-config-source'), 'builtin');
+});
+
 test('config：檔案壞掉（不是 JSON 物件）→ 回內建預設、不當機', async () => {
   fs.writeFileSync(cfgPath(), '{ this is not json, longer than before to change size');
   const r = await fetch(`${base}/api/config`);

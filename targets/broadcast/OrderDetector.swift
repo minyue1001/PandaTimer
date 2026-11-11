@@ -26,10 +26,14 @@ enum OrderDetector {
 }
 
 /// v0.6：畫面判讀規則（遠端設定 picker / detector.acceptPattern / telemetry.keywords；預設＝內建常數）
+/// v0.7：加 offer.acceptedKeywords / rejectedKeywords（邀請消失後判斷接了沒，見 OfferTracker.swift）
 struct ScreenRules {
   var picker = PickerConfig.standard
   var acceptPattern = OrderDetector.defaultAcceptPattern
   var keywords = ScreenInfo.keywords
+  var acceptedKeywords = OfferSettings.defaultAcceptedKeywords
+  var rejectedKeywords = OfferSettings.defaultRejectedKeywords
+  var completedKeywords = RemoteConfig.DeliverySettings.defaultCompletedKeywords
 
   static let standard = ScreenRules()
 }
@@ -57,6 +61,21 @@ enum ScreenInfo {
     ["拍照"],
     ["確認取餐", "确认取餐"],
     ["取消"],
+    // v0.7 接單/未接判定用（offer.acceptedKeywords / rejectedKeywords 的預設詞；回報只送命中哪些詞）
+    ["已拒絕", "已拒绝"],
+    ["訂單已取消", "订单已取消"],
+    ["逾時", "逾时"],
+    ["已過期", "已过期"],
+    ["已抵達", "已抵达"],
+    ["抵達店家", "抵达店家"],
+    ["聯絡店家", "联络店家", "联系店家"],
+    ["取餐"],
+    // v0.7 自動送達（delivery.completedKeywords 的預設詞；「完成訂單」已在上面）
+    ["訂單已完成", "订单已完成"],
+    ["已送達", "已送达"],
+    ["送達完成", "送达完成"],
+    ["確認送達", "确认送达"],
+    ["完成送達", "完成送达"],
   ]
 
   private static let kmPattern = "(?<![0-9.])([0-9]{1,2}(?:\\.[0-9]{1,2})?)\\s*(?:公里|km)"
@@ -68,6 +87,14 @@ enum ScreenInfo {
     let km: Double?
     let kw: [String]
     let screen: String
+    /// v0.7：命中 offer.acceptedKeywords / rejectedKeywords（正則，比對去空白後的文字）
+    let offerAccepted: Bool
+    let offerRejected: Bool
+    /// 命中的那段文字裡含哪些白名單詞（正式名稱）；不在白名單的命中只回報布林，不回報文字
+    let offerHit: [String]
+    /// v0.7 自動送達：命中 delivery.completedKeywords（有接單鈕的邀請畫面不算）
+    let delivered: Bool
+    let deliveredHit: [String]
   }
 
   /// 正規化（全形數字/空白）後去掉所有空白
@@ -84,15 +111,25 @@ enum ScreenInfo {
     return rows.filter { forms in !forms.isEmpty && forms.contains { text.contains($0) } }.map { $0[0] }
   }
 
-  static func extractKm(_ raw: String) -> Double? {
-    let text = MinutePicker.normalize(raw)
+  /// OCR 可能把小數點辨成全形句點/中點/逗號（數字之間才換）。同 src/screenInfo.ts 的 KM_DOTS
+  private static let kmDotsPattern = "(?<=[0-9])\\s*[．。·•∙・‧,，]\\s*(?=[0-9])"
+
+  /// 第一個「x.x 公里 / km」，0~99。v0.7 實機「6.7公里」回報成 67（小數點被 OCR 吃掉）→ ① 數字間的全形句點/中點/逗號
+  /// 當小數點；② 兩位數整數且大於預估分鐘數（給了 minutes 時；時速 >60 不合理）→ 當作漏了小數點（67 → 6.7）
+  static func extractKm(_ raw: String, minutes: Int? = nil) -> Double? {
+    var text = MinutePicker.normalize(raw)
+    if let dots = try? NSRegularExpression(pattern: kmDotsPattern, options: []) {
+      text = dots.stringByReplacingMatches(
+        in: text, options: [], range: NSRange(location: 0, length: (text as NSString).length), withTemplate: ".")
+    }
     let ns = text as NSString
     guard let regex = try? NSRegularExpression(pattern: kmPattern, options: [.caseInsensitive]),
           let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)),
-          match.range(at: 1).location != NSNotFound,
-          let value = Double(ns.substring(with: match.range(at: 1))),
-          value >= 0, value < 100
+          match.range(at: 1).location != NSNotFound
     else { return nil }
+    let digits = ns.substring(with: match.range(at: 1))
+    guard var value = Double(digits), value >= 0, value < 100 else { return nil }
+    if !digits.contains("."), value >= 10, let m = minutes, m > 0, value > Double(m) { value /= 10 }
     return value
   }
 
@@ -106,17 +143,44 @@ enum ScreenInfo {
     return hits.isEmpty ? "none" : "other"
   }
 
+  /// 去空白文字裡第一段命中 pattern 的字（編不過 → 用 fallback；空字串命中當沒命中）。同 src/screenInfo.ts 的 firstOfferMatch
+  static func firstOfferMatch(_ compactText: String, _ pattern: String, fallback: String) -> String? {
+    guard !compactText.isEmpty,
+          let regex = (try? NSRegularExpression(pattern: pattern, options: []))
+            ?? (try? NSRegularExpression(pattern: fallback, options: []))
+    else { return nil }
+    let ns = compactText as NSString
+    guard let match = regex.firstMatch(in: compactText, options: [], range: NSRange(location: 0, length: ns.length)),
+          match.range.location != NSNotFound, match.range.length > 0
+    else { return nil }
+    return ns.substring(with: match.range)
+  }
+
   /// OCR 文字 → 結構化摘要。minutes 只在有接單鈕時才挑（同 OrderDetector.detect）
   static func analyze(_ raw: String, rules: ScreenRules = .standard) -> Summary {
     let accept = OrderDetector.hasAcceptButton(raw, pattern: rules.acceptPattern)
     let kw = matchKeywords(raw, rows: rules.keywords)
+    let text = compact(raw)
+    let acc = firstOfferMatch(text, rules.acceptedKeywords, fallback: OfferSettings.defaultAcceptedKeywords)
+    let rej = firstOfferMatch(text, rules.rejectedKeywords, fallback: OfferSettings.defaultRejectedKeywords)
+    // 分隔符不是空白：避免兩段黏在一起湊出假命中
+    let hitText = [acc, rej].compactMap { $0 }.joined(separator: "|")
+    let done: String? = accept
+      ? nil
+      : firstOfferMatch(text, rules.completedKeywords, fallback: RemoteConfig.DeliverySettings.defaultCompletedKeywords)
+    let minutes = accept ? MinutePicker.pick(raw, config: rules.picker) : nil
     return Summary(
       accept: accept,
-      minutes: accept ? MinutePicker.pick(raw, config: rules.picker) : nil,
+      minutes: minutes,
       amount: MinutePicker.pickAmount(raw, config: rules.picker),
-      km: extractKm(raw),
+      km: extractKm(raw, minutes: minutes),
       kw: kw,
-      screen: classify(accept: accept, hits: kw))
+      screen: classify(accept: accept, hits: kw),
+      offerAccepted: acc != nil,
+      offerRejected: rej != nil,
+      offerHit: hitText.isEmpty ? [] : matchKeywords(hitText, rows: rules.keywords),
+      delivered: done != nil,
+      deliveredHit: done.map { matchKeywords($0, rows: rules.keywords) } ?? [])
   }
 
   /// 金額 → 訊號/去重用的整數鍵（四捨五入，0~999；抓不到或超出範圍 → 0）。同 src/ocrPick.ts 的 amountKey

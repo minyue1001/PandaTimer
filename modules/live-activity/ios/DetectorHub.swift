@@ -22,6 +22,14 @@ import UserNotifications
 //   - 新單用 update(_:alertConfiguration:) 強制展開提示＋重繪；心跳 update 不帶 alert。
 //   - 遠端狀態回報（PandaTelemetry，source "app"）。
 //   一鍵備援照舊：① 點「偵測到新單」通知 → App 進前景 → 依鏡像重推卡片；② 偵測卡上的「開始倒數」按鈕。
+// v0.7 接單後才開始倒數：extension 看到邀請只送 com.pandatimer.offer.pending.<分>（App 顯示「等你接單」）、
+//   判定未接送 com.pandatimer.offer.cleared；判定接單先送 com.pandatimer.accept.delay.<0…60>（按下接受到現在幾秒）
+//   再送 order 訊號 → App 在 2 秒內配對，acceptedAt＝收到 order 的時間 − 延遲（配不到就用收到時間；
+//   App 曾被暫停則照舊用通知 userInfo 的 detectedAt，v0.7 起它就是按下接受的時間）。
+//   v0.7 自動送達：extension 看到完成/送達畫面送 com.pandatimer.delivered → AutoDelivery 結「接單超過
+//   delivery.minOrderAgeSec 的進行中單」裡最早那張（實際時間＝收到時間），走與送達按鈕相同的鏡像/事件/卡片路徑。
+//   手動/自動互斥：90 秒內有手動結單 → 不自動結；自動結單後 20 秒內的送達按鈕/捷徑 → 不再結（PandaSharedStore）。
+//   註冊：4 狀態＋360 order＋90 pending＋1 cleared＋61 delay＋1 delivered＝517 個（< 1000）。
 final class DetectorHub {
   static let shared = DetectorHub()
 
@@ -32,6 +40,13 @@ final class DetectorHub {
   static let drainName = "com.pandatimer.drain"
   static let maxMinutes = 90
   static let seqMod = 4
+  static let offerPendingPrefix = "com.pandatimer.offer.pending."
+  static let offerClearedName = "com.pandatimer.offer.cleared"
+  static let deliveredName = "com.pandatimer.delivered"
+  static let acceptDelayPrefix = "com.pandatimer.accept.delay."
+  static let maxAcceptDelay = 60
+  /// 延遲訊號與 order 訊號配對的時間窗（秒）
+  static let delayPairWindow: TimeInterval = 2
 
   enum Signal {
     case order(Int, Int)
@@ -39,6 +54,18 @@ final class DetectorHub {
     case stopped
     case heartbeat
     case drain
+    case offerPending(Int)
+    case offerCleared
+    case acceptDelay(Int)
+    case delivered
+  }
+
+  /// 純數字、無前導 0（"0" 本身可以）、在 lo…hi 之間
+  private static func plainInt(_ text: String, _ lo: Int, _ hi: Int) -> Int? {
+    guard !text.isEmpty, text.count <= 2, text == "0" || !text.hasPrefix("0"),
+          text.allSatisfy({ $0 >= "0" && $0 <= "9" }), let n = Int(text), n >= lo, n <= hi
+    else { return nil }
+    return n
   }
 
   static func parse(_ name: String) -> Signal? {
@@ -47,7 +74,15 @@ final class DetectorHub {
     case stoppedName: return .stopped
     case heartbeatName: return .heartbeat
     case drainName: return .drain
+    case offerClearedName: return .offerCleared
+    case deliveredName: return .delivered
     default: break
+    }
+    if name.hasPrefix(offerPendingPrefix) {
+      return plainInt(String(name.dropFirst(offerPendingPrefix.count)), 1, maxMinutes).map { Signal.offerPending($0) }
+    }
+    if name.hasPrefix(acceptDelayPrefix) {
+      return plainInt(String(name.dropFirst(acceptDelayPrefix.count)), 0, maxAcceptDelay).map { Signal.acceptDelay($0) }
     }
     guard name.hasPrefix(orderPrefix) else { return nil }
     let parts = String(name.dropFirst(orderPrefix.count)).split(separator: ".", omittingEmptySubsequences: false)
@@ -61,12 +96,16 @@ final class DetectorHub {
     return .order(n, s)
   }
 
-  /// 4 個狀態名稱＋90×4 個 order.N.S（共 364 個）
+  /// 4 個狀態名稱＋90×4 個 order.N.S＋v0.7 的 90 個 offer.pending.N、offer.cleared、61 個 accept.delay.D（共 516 個）
   static func allNames() -> [String] {
     var names = [startedName, stoppedName, heartbeatName, drainName]
     for n in 1...maxMinutes {
       for s in 0..<seqMod { names.append("\(orderPrefix)\(n).\(s)") }
     }
+    for n in 1...maxMinutes { names.append("\(offerPendingPrefix)\(n)") }
+    names.append(offerClearedName)
+    names.append(deliveredName)
+    for d in 0...maxAcceptDelay { names.append("\(acceptDelayPrefix)\(d)") }
     return names
   }
 
@@ -95,6 +134,13 @@ final class DetectorHub {
   private var beatAlerted = false
   private var lastSeq: Int?
   private var missedSignals = 0
+  /// v0.7：extension 看到邀請、還沒判定（App 顯示「偵測到邀請 N 分，等你接單…」）
+  private var offerPendingMinutes: Int?
+  private var offerPendingAt: Date?
+  /// v0.7：最近一次判定結果（「已接單 27 分（18:02:11）」／「未接單 27 分（…）」）
+  private var offerNote = ""
+  /// v0.7：最近收到、還沒配對的延遲訊號
+  private var pendingDelay: (seconds: Int, at: Date)?
   /// fg / bg / unknown（OnAppBecomesActive / OnAppEntersBackground 更新）
   private var appState = "unknown"
   private var lastKeepLogged = ""
@@ -223,6 +269,11 @@ final class DetectorHub {
       if let fix = keep.lastFixAt { d["lastFixAt"] = Self.ms(fix) }
       if let ok = tele.lastOk { d["telemetryLastOk"] = Self.ms(ok) }
       if let e = tele.lastError { d["telemetryError"] = e }
+      if let m = offerPendingMinutes, let at = offerPendingAt {
+        d["offerPendingMinutes"] = m
+        d["offerPendingAt"] = Self.ms(at)
+      }
+      if !offerNote.isEmpty { d["offerNote"] = offerNote }
       return d
     }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
@@ -276,6 +327,7 @@ final class DetectorHub {
       lastBeat = now
       beatAlerted = false
       lastSeq = nil  // extension 每次開始序號從 0 算
+      clearOffer()
       if !armed {
         // 使用者從控制中心直接開廣播、App 剛好還活著：試著保活（背景啟動定位/音訊可能被拒，結果寫進狀態）
         armed = true
@@ -297,6 +349,7 @@ final class DetectorHub {
       armed = false
       keepAlive.stop()
       stopWatchdog()
+      clearOffer()
       pushCard(note: "偵測已停止 \(Self.hms(now))", stopping: true)
       telemetry.log("sig", appFields().merging(["note": "stopped"]) { $1 }, urgent: true)
       emit(["type": "stopped"])
@@ -304,7 +357,77 @@ final class DetectorHub {
       emit(["type": "drain"])
     case .order(let minutes, let seq):
       handleOrder(minutes, seq: seq, at: now)
+    case .offerPending(let minutes):
+      offerPendingMinutes = minutes
+      offerPendingAt = now
+      offerNote = ""
+      telemetry.log("sig", appFields().merging(["note": "offerPending", "min": minutes]) { $1 })
+      emit(["type": "offer", "minutes": minutes])
+    case .offerCleared:
+      let minutes = offerPendingMinutes
+      clearOffer()
+      offerNote = "未接單" + (minutes.map { " \($0) 分" } ?? "") + "（\(Self.hms(now))）"
+      telemetry.log("sig", appFields().merging(["note": "offerCleared"]) { $1 })
+      emit(["type": "offerCleared"])
+    case .acceptDelay(let seconds):
+      pendingDelay = (seconds: seconds, at: now)
+    case .delivered:
+      handleDelivered(at: now)
     }
+  }
+
+  /// v0.7 自動送達（規則＝src/deliveryDetector.ts 的 pickDeliveredOrder）
+  private func handleDelivered(at now: Date) {
+    let settings = RemoteConfig.delivery(remote.snapshot())
+    let baseFields = appFields()
+    Task {
+      let outcome = AutoDelivery.finish(settings: settings, at: now)
+      guard case .finished(let order) = outcome else {
+        if case .skipped(let reason) = outcome {
+          self.queue.async {
+            self.telemetry.log("delivered", baseFields.merging(["note": "skip", "reason": reason]) { $1 })
+          }
+        }
+        return
+      }
+      NativeSyncDrain.post()
+      if !order.notifIds.isEmpty {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: order.notifIds)
+      }
+      if let aid = order.activityId {
+        await DetectorCardPlan.afterFinish(activityId: aid, note: "自動送達 \(Self.hm(now))")
+      }
+      let actual = (now.timeIntervalSince1970 * 1000 - order.acceptedAt) / 60_000
+      let actualText = String(format: "%.1f", actual)
+      self.queue.async {
+        var fields = baseFields
+        fields["note"] = "auto"
+        fields["min"] = order.estimateMin
+        fields["wait"] = (actual * 10).rounded() / 10
+        self.telemetry.log("delivered", fields, urgent: true)
+        self.lastOrderHow = "已自動記錄送達：實際 \(actualText) 分／預估 \(order.estimateMin) 分"
+      }
+      await DetectorNotify.post(
+        title: "已自動記錄送達：實際 \(actualText) 分／預估 \(order.estimateMin) 分",
+        body: "看到完成訂單畫面自動結單（\(Self.hms(now))）。記錯了可在 App 最近紀錄查看",
+        passive: true)
+    }
+  }
+
+  private func clearOffer() {
+    offerPendingMinutes = nil
+    offerPendingAt = nil
+  }
+
+  /// 只在 queue 上：取走 near 前後 delayPairWindow 秒內收到的延遲訊號（取走就清掉；過期的也清掉）
+  private func takeDelay(near: Date) -> Int? {
+    guard let p = pendingDelay else { return nil }
+    if abs(p.at.timeIntervalSince(near)) <= Self.delayPairWindow {
+      pendingDelay = nil
+      return p.seconds
+    }
+    if near.timeIntervalSince(p.at) > Self.delayPairWindow { pendingDelay = nil }
+    return nil
   }
 
   /// v0.6：不去重（extension 已做邊緣觸發＋去重），每則訊號＝一張新單。
@@ -318,6 +441,9 @@ final class DetectorHub {
     lastOrderAt = now
     autoCount += 1
     lastOrderHow = "處理中…"
+    clearOffer()
+    offerNote = "已接單 \(minutes) 分（\(Self.hms(now))）"
+    let pairedDelay = takeDelay(near: now)
     let beat = lastBeat ?? now
     let diag = diagText(note: "自動新單 \(minutes) 分")
     let orderId = "\(Int64(Self.ms(now)))-a\(UUID().uuidString.prefix(4).lowercased())"
@@ -327,12 +453,29 @@ final class DetectorHub {
       // App 曾被暫停 → 用 extension 那則「偵測到新單」通知裡的偵測時間（找不到就用收到訊號的時間）
       var acceptedAt = now
       var timeNote = ""
+      var delayUsed: Int?
       if wasSuspended {
         if let t = await DetectorNotify.detectedAt(minutes: minutes, seq: seq, notAfter: now) {
           acceptedAt = t
           timeNote = "（App 曾被暫停，接單時間已改用偵測通知的 \(Self.hms(t))）"
         } else {
           timeNote = "（⚠️ App 曾被暫停，接單時間可能偏晚）"
+        }
+      } else {
+        // v0.7：延遲訊號應該先到；沒到就等最多 2 秒（Darwin 通知偶爾亂序）
+        var delay = pairedDelay
+        var waits = 0
+        while delay == nil && waits < 4 {
+          try? await Task.sleep(nanoseconds: 500_000_000)
+          waits += 1
+          delay = self.queue.sync { self.takeDelay(near: now) }
+        }
+        delayUsed = delay
+        if let d = delay {
+          acceptedAt = now.addingTimeInterval(-Double(d))
+          if d > 0 { timeNote = "（接單時間往前修正 \(d) 秒＝按下接受的時間）" }
+        } else {
+          timeNote = "（沒收到延遲訊號，接單時間用收到時間）"
         }
       }
       let deadline = acceptedAt.addingTimeInterval(Double(minutes) * 60)
@@ -349,6 +492,7 @@ final class DetectorHub {
         &order, minutes: minutes, acceptedAt: acceptedAt, deadline: deadline, beat: beat, diag: diag)
       let check = await Self.verifyCard(activityId: outcome.activityId, expect: outcome.expect)
       let how = outcome.text + timeNote
+      let delayField = delayUsed
       self.queue.async {
         self.lastOrderHow = how
         self.islandCheck = check.text
@@ -358,6 +502,7 @@ final class DetectorHub {
         fields["gap"] = gap
         fields["susp"] = wasSuspended
         fields["orders"] = outcome.count
+        if let d = delayField { fields["delay"] = d }
         if let err = outcome.requestError { fields["reason"] = err }
         self.telemetry.log("order", fields, urgent: true)
         self.emit(["type": "order", "minutes": minutes, "how": how, "check": check.text])
@@ -982,6 +1127,78 @@ final class AudioKeepAlive {
     u32(UInt32(dataSize))
     d.append(Data(count: dataSize))
     return d
+  }
+}
+
+// MARK: - v0.7 自動送達：從進行中鏡像結單（同 PandaSharedStore.finishOrder 的格式與鎖；pod 看不到主 App target 的型別）
+
+enum AutoDelivery {
+  /// 手動結單時間（ms；PandaSharedStore.finishOrder 與 JS 結單〔syncActiveOrders 偵測到單被移除〕寫入）
+  static let lastManualKey = "pandatimer.native.lastManualDoneAt.v1"
+  /// 自動結單時間（ms；PandaSharedStore.finishOrder 看到 20 秒內有自動結單就不再結）
+  static let lastAutoKey = "pandatimer.native.lastAutoDoneAt.v1"
+  static let manualGraceSeconds: Double = 90
+
+  struct Finished {
+    let id: String
+    let acceptedAt: Double
+    let estimateMin: Int
+    let activityId: String?
+    let notifIds: [String]
+  }
+
+  enum Outcome {
+    case finished(Finished)
+    case skipped(String)
+  }
+
+  /// disabled / manualRecent / noActive / tooNew；否則結「接單超過 minOrderAgeSec 秒」裡最早接單的那張，寫 done 事件
+  static func finish(settings: RemoteConfig.DeliverySettings, at date: Date) -> Outcome {
+    guard settings.enabled else { return .skipped("disabled") }
+    let defaults = UserDefaults.standard
+    objc_sync_enter(defaults)
+    defer { objc_sync_exit(defaults) }
+    let nowMs = (date.timeIntervalSince1970 * 1000).rounded()
+    if let manual = (defaults.object(forKey: lastManualKey) as? NSNumber)?.doubleValue,
+       nowMs - manual < manualGraceSeconds * 1000
+    {
+      return .skipped("manualRecent")
+    }
+    var active = NativeSync.readArray(NativeSync.activeKey)
+    if active.isEmpty { return .skipped("noActive") }
+    var index: Int?
+    var best = Double.greatestFiniteMagnitude
+    for (i, item) in active.enumerated() {
+      guard item["id"] is String, let accepted = (item["acceptedAt"] as? NSNumber)?.doubleValue else { continue }
+      if nowMs - accepted < Double(settings.minOrderAgeSec) * 1000 { continue }
+      if accepted < best {
+        best = accepted
+        index = i
+      }
+    }
+    guard let i = index else { return .skipped("tooNew") }
+    let item = active.remove(at: i)
+    NativeSync.writeArray(active, NativeSync.activeKey)
+    let order = Finished(
+      id: item["id"] as? String ?? "", acceptedAt: best,
+      estimateMin: (item["estimateMin"] as? NSNumber)?.intValue ?? 0,
+      activityId: item["activityId"] as? String, notifIds: (item["notifIds"] as? [String]) ?? [])
+    var event: [String: Any] = ["type": "done", "at": nowMs, "orderId": order.id]
+    if let aid = order.activityId { event["activityId"] = aid }
+    var events = NativeSync.readArray(NativeSync.eventsKey)
+    events.append(event)
+    NativeSync.writeArray(events, NativeSync.eventsKey)
+    defaults.set(nowMs, forKey: lastAutoKey)
+    return .finished(order)
+  }
+}
+
+/// 事件佇列有新東西 → Darwin「com.pandatimer.drain」（DetectorHub 收到就叫 JS drain）
+enum NativeSyncDrain {
+  static func post() {
+    CFNotificationCenterPostNotification(
+      CFNotificationCenterGetDarwinNotifyCenter(), CFNotificationName(DetectorHub.drainName as CFString), nil, nil,
+      true)
   }
 }
 

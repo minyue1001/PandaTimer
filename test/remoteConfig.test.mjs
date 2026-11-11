@@ -101,7 +101,7 @@ test('Swift 預設值與 TS／JSON 一致（MinutePicker.swift、SampleHandler.s
   const expect = {
     ocrInterval: d.ocrIntervalSeconds, idleOcrInterval: d.idleOcrIntervalSeconds, idleAfterMisses: d.idleAfterMisses,
     forceOcrInterval: d.forceOcrSeconds, sameFrameMaxBits: d.sameFrameMaxBits, heartbeatInterval: d.heartbeatSeconds,
-    dedupeWindow: d.dedupeSeconds, goneAfterMisses: d.goneAfterMisses, maxLongEdge: d.maxLongEdge,
+    dedupeWindow: d.dedupeSeconds, maxLongEdge: d.maxLongEdge,
     bottomFraction: d.bottomFraction, minimumTextHeight: d.minimumTextHeight, memoryAlertMB: d.memoryAlertMB, refreshSeconds: d.configRefreshSeconds,
   };
   for (const [name, value] of Object.entries(expect)) {
@@ -110,6 +110,16 @@ test('Swift 預設值與 TS／JSON 一致（MinutePicker.swift、SampleHandler.s
     assert.equal(Number(m[1]), value, name);
   }
   assert.ok(read('../targets/broadcast/OrderDetector.swift').includes(`static let defaultAcceptPattern = "${d.acceptPattern}"`));
+  // v0.7 offer（OfferTracker.swift 的 OfferSettings）
+  const ot = read('../targets/broadcast/OfferTracker.swift');
+  const o = DEFAULT_CONFIG.offer;
+  assert.ok(ot.includes(`var goneAfterMisses = ${o.goneAfterMisses}`));
+  assert.ok(ot.includes(`var decideWindowSec = ${o.decideWindowSec}`));
+  assert.ok(ot.includes(`var ambiguousAs = "${o.ambiguousAs}"`));
+  assert.ok(ot.includes(`static let defaultAcceptedKeywords =\n    "${o.acceptedKeywords}"`));
+  assert.ok(ot.includes(`static let defaultRejectedKeywords = "${o.rejectedKeywords}"`));
+  // v0.7 extension 不再用 detector.goneAfterMisses（改 offer.goneAfterMisses）
+  assert.ok(!/d\["goneAfterMisses"\]/.test(ext));
   const rc = read('../modules/live-activity/ios/RemoteConfig.swift');
   assert.equal(read('../targets/broadcast/RemoteConfig.swift'), rc);
   assert.ok(rc.includes('static let cacheKey = "pandatimer.remoteConfig.v1"'));
@@ -137,5 +147,34 @@ test('Swift 的合法範圍與 TS RANGES 一致', () => {
     assert.equal(Number(m[4]), DEFAULT_CONFIG[section][field], `${m[1]} 預設`);
     checked++;
   }
-  assert.ok(checked >= 12 + 7 + 4, `只比對到 ${checked} 個欄位`);
+  const ot = read('../targets/broadcast/OfferTracker.swift');
+  for (const m of ot.matchAll(/RemoteConfig\.int\(o\["(\w+)"\], ([0-9.]+), ([0-9.]+), (\w+)\)/g)) {
+    assert.deepEqual([Number(m[2]), Number(m[3])], RANGES[`offer.${m[1]}`].slice(0, 2), m[1]);
+    checked++;
+  }
+  assert.ok(checked >= 11 + 7 + 4 + 2, `只比對到 ${checked} 個欄位`);
+});
+
+test('v0.7 offer 區塊：缺漏補預設、範圍、正則（不得命中空字串）、ambiguousAs 列舉', () => {
+  // 舊版（v0.6）設定沒有 offer → 全用預設，各列一條 problem
+  const old = validateConfig({ version: 'v06' });
+  assert.deepEqual(old.config.offer, DEFAULT_CONFIG.offer);
+  assert.ok(old.problems.some((p) => p.startsWith('offer.decideWindowSec 缺漏')));
+  const { config, problems } = validateConfig({
+    version: 'v07',
+    offer: { goneAfterMisses: 0, decideWindowSec: 61, acceptedKeywords: '前往取餐|', rejectedKeywords: '([', ambiguousAs: 'maybe' },
+  });
+  assert.deepEqual(config.offer, DEFAULT_CONFIG.offer);
+  for (const k of ['goneAfterMisses', 'decideWindowSec', 'acceptedKeywords', 'rejectedKeywords', 'ambiguousAs']) {
+    assert.ok(problems.some((p) => p.startsWith(`offer.${k}`)), k);
+  }
+  const ok = validateConfig({ version: 'v07b', offer: { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject' } });
+  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject' });
+  assert.equal(DEFAULT_CONFIG.offer.ambiguousAs, 'accept');
+  assert.equal(DEFAULT_CONFIG.offer.decideWindowSec, 25);
+  // Swift：offerRegex 擋空字串命中、choice 列舉
+  const rc = read('../modules/live-activity/ios/RemoteConfig.swift');
+  assert.ok(rc.includes('static func offerRegex(') && rc.includes('r.firstMatch(in: "", options: [], range: NSRange(location: 0, length: 0)) == nil'));
+  assert.ok(rc.includes('static func choice('));
+  assert.ok(read('../targets/broadcast/OfferTracker.swift').includes('RemoteConfig.choice(o["ambiguousAs"], ["accept", "reject"], ambiguousAs)'));
 });

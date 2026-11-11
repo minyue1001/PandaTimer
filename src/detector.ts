@@ -7,6 +7,10 @@
 //   extension 每觸發一次新單序號 +1（mod 4），名稱就不同；App 不再自己去重，每收到一則＝一張新單，
 //   序號跳號＝中間有訊號遺失（寫進 telemetry）。金額不進名稱（90×1000 個名稱太多）→ 金額走 extension 自己的 telemetry
 //   與「偵測到新單」通知的 userInfo。註冊數量：4 個狀態＋90×4＝364 個（< 1000）。
+// v0.7 接單後才開始倒數：com.pandatimer.offer.pending.<分 1-90>（看到邀請、等判定）、com.pandatimer.offer.cleared（判定未接）、
+//   com.pandatimer.accept.delay.<秒 0-60>（緊接在 order 訊號之前送：按下接受到現在幾秒；App 2 秒內配對還原接單時間）。
+//   v0.7 自動送達：com.pandatimer.delivered（extension 看到完成/送達畫面；規則見 src/deliveryDetector.ts）。
+//   註冊數量：364＋90＋1＋61＋1＝517 個（< 1000）。
 import type { Order } from './orders';
 
 export const ORDER_SIGNAL_PREFIX = 'com.pandatimer.order.';
@@ -18,10 +22,33 @@ export const STATE_SIGNALS = {
 } as const;
 export const MAX_SIGNAL_MINUTES = 90;
 export const SIGNAL_SEQ_MOD = 4;
+export const OFFER_PENDING_PREFIX = 'com.pandatimer.offer.pending.';
+export const OFFER_CLEARED = 'com.pandatimer.offer.cleared';
+export const DELIVERED_SIGNAL = 'com.pandatimer.delivered';
+export const ACCEPT_DELAY_PREFIX = 'com.pandatimer.accept.delay.';
+export const MAX_ACCEPT_DELAY = 60;
 
 export type DetectorSignal =
   | { kind: 'order'; minutes: number; seq: number }
-  | { kind: 'started' | 'stopped' | 'heartbeat' | 'drain' };
+  | { kind: 'started' | 'stopped' | 'heartbeat' | 'drain' | 'offerCleared' | 'delivered' }
+  | { kind: 'offerPending'; minutes: number }
+  | { kind: 'acceptDelay'; seconds: number };
+
+/** 純數字、無前導 0（"0" 本身可以）、1~2 位、在 lo…hi 之間（同 DetectorHub.plainInt） */
+function plainInt(text: string, lo: number, hi: number): number | null {
+  if (!/^(0|[1-9][0-9]?)$/.test(text)) return null;
+  const n = Number(text);
+  return n >= lo && n <= hi ? n : null;
+}
+
+export function offerPendingName(minutes: number): string | null {
+  return Number.isInteger(minutes) && minutes >= 1 && minutes <= MAX_SIGNAL_MINUTES ? `${OFFER_PENDING_PREFIX}${minutes}` : null;
+}
+
+export function acceptDelayName(seconds: number): string {
+  const d = Math.min(MAX_ACCEPT_DELAY, Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0)));
+  return `${ACCEPT_DELAY_PREFIX}${d}`;
+}
 
 /** 新單訊號名稱；分鐘數超出 1…90 → null（App 沒註冊那些名稱） */
 export function orderSignalName(minutes: number, seq: number): string | null {
@@ -36,6 +63,16 @@ export function parseSignalName(name: unknown): DetectorSignal | null {
   for (const [kind, full] of Object.entries(STATE_SIGNALS)) {
     if (name === full) return { kind: kind as keyof typeof STATE_SIGNALS };
   }
+  if (name === OFFER_CLEARED) return { kind: 'offerCleared' };
+  if (name === DELIVERED_SIGNAL) return { kind: 'delivered' };
+  if (name.startsWith(OFFER_PENDING_PREFIX)) {
+    const minutes = plainInt(name.slice(OFFER_PENDING_PREFIX.length), 1, MAX_SIGNAL_MINUTES);
+    return minutes == null ? null : { kind: 'offerPending', minutes };
+  }
+  if (name.startsWith(ACCEPT_DELAY_PREFIX)) {
+    const seconds = plainInt(name.slice(ACCEPT_DELAY_PREFIX.length), 0, MAX_ACCEPT_DELAY);
+    return seconds == null ? null : { kind: 'acceptDelay', seconds };
+  }
   if (!name.startsWith(ORDER_SIGNAL_PREFIX)) return null;
   const m = /^([1-9][0-9]?)\.([0-9])$/.exec(name.slice(ORDER_SIGNAL_PREFIX.length));
   if (!m) return null;
@@ -45,13 +82,34 @@ export function parseSignalName(name: unknown): DetectorSignal | null {
   return { kind: 'order', minutes, seq };
 }
 
-/** App 要註冊的全部名稱（4 個狀態＋90×4 個 order.N.S）＝原生 DetectorHub.registerIfNeeded 的清單 */
+/** App 要註冊的全部名稱（4 個狀態＋90×4 個 order.N.S＋v0.7 的 pending/cleared/delay）＝原生 DetectorHub.allNames 的清單 */
 export function allSignalNames(): string[] {
   const names: string[] = Object.values(STATE_SIGNALS);
   for (let n = 1; n <= MAX_SIGNAL_MINUTES; n++) {
     for (let s = 0; s < SIGNAL_SEQ_MOD; s++) names.push(`${ORDER_SIGNAL_PREFIX}${n}.${s}`);
   }
+  for (let n = 1; n <= MAX_SIGNAL_MINUTES; n++) names.push(`${OFFER_PENDING_PREFIX}${n}`);
+  names.push(OFFER_CLEARED);
+  names.push(DELIVERED_SIGNAL);
+  for (let d = 0; d <= MAX_ACCEPT_DELAY; d++) names.push(`${ACCEPT_DELAY_PREFIX}${d}`);
   return names;
+}
+
+/**
+ * v0.7：App 端 acceptedAt 還原（＝DetectorHub.handleOrder 的規則）。
+ * App 曾被暫停 → 用通知 userInfo 的 detectedAt（找不到就用收到時間）；
+ * 否則延遲訊號在收到 order 的前後 2 秒內 → 收到時間 − 延遲；配不到 → 收到時間。時間單位：毫秒。
+ */
+export function restoreAcceptedAt(opts: {
+  receivedAt: number;
+  suspended: boolean;
+  notifiedAt?: number | null;
+  delay?: { seconds: number; at: number } | null;
+}): number {
+  if (opts.suspended) return opts.notifiedAt ?? opts.receivedAt;
+  const d = opts.delay;
+  if (d && Math.abs(d.at - opts.receivedAt) <= 2000) return opts.receivedAt - d.seconds * 1000;
+  return opts.receivedAt;
 }
 
 /** 上一個序號 → 這次序號之間漏掉幾則（mod 4；第一則或不知道上一個 → 0） */
@@ -84,6 +142,11 @@ export type DetectorStatus = {
   telemetryError?: string;
   /** v0.6 遠端設定版本（GET /api/config 的 version；沒抓過 → "default"） */
   configVersion: string;
+  /** v0.7：extension 看到邀請、還沒判定接了沒 */
+  offerPendingMinutes: number | null;
+  offerPendingAt: number | null;
+  /** v0.7：最近一次判定（「已接單 27 分（18:02:11）」／「未接單 27 分（…）」） */
+  offerNote: string;
 };
 
 const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
@@ -116,7 +179,28 @@ export function parseDetectorStatus(raw: unknown): DetectorStatus | null {
     telemetryPending: num(o.telemetryPending) ?? 0,
     telemetryError: typeof o.telemetryError === 'string' ? o.telemetryError : undefined,
     configVersion: typeof o.configVersion === 'string' ? o.configVersion : 'default',
+    offerPendingMinutes: num(o.offerPendingMinutes),
+    offerPendingAt: num(o.offerPendingAt),
+    offerNote: typeof o.offerNote === 'string' ? o.offerNote : '',
   };
+}
+
+/** pending 超過這麼久還沒有結果（訊號遺失）→ 不再顯示「等你接單」 */
+export const OFFER_PENDING_STALE_SEC = 180;
+
+/**
+ * v0.7 偵測區的接單狀態行：「偵測到邀請 27 分，等你接單…（12 秒）」；沒有在等 → 最近一次判定；都沒有 → null
+ */
+export function offerLine(status: DetectorStatus | null, now: number): string | null {
+  if (!status) return null;
+  if (status.offerPendingAt != null) {
+    const age = Math.max(0, Math.round((now - status.offerPendingAt) / 1000));
+    if (age <= OFFER_PENDING_STALE_SEC) {
+      const m = status.offerPendingMinutes != null ? ` ${status.offerPendingMinutes} 分` : '';
+      return `偵測到邀請${m}，等你接單…（${age} 秒）`;
+    }
+  }
+  return status.offerNote ? `最近：${status.offerNote}` : null;
 }
 
 /** 今日（依接單時間）自動偵測開的單數，不含已取消 */

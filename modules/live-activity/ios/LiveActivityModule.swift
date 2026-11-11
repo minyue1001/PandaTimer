@@ -242,6 +242,16 @@ public class LiveActivityModule: Module {
         if let aid = item["activityId"] as? String, doneActivityIds.contains(aid) { return true }
         return false
       }
+      // v0.7 自動送達互斥：鏡像裡原本有、JS 這次拿掉（App 內按送達/取消）、又不是原生剛結的 → 記為手動結單時間
+      // （DetectorHub.AutoDelivery 90 秒內不自動結，避免先手動、後看到完成畫面又結掉下一單）
+      let newIds = Set(list.compactMap { $0["id"] as? String })
+      let removedByJS = NativeSync.readArray(NativeSync.activeKey).contains { item in
+        guard let id = item["id"] as? String else { return false }
+        return !newIds.contains(id) && !doneOrderIds.contains(id)
+      }
+      if removedByJS {
+        defaults.set((Date().timeIntervalSince1970 * 1000).rounded(), forKey: "pandatimer.native.lastManualDoneAt.v1")
+      }
       if let out = try? JSONSerialization.data(withJSONObject: list, options: []),
          let text = String(data: out, encoding: .utf8) {
         defaults.set(text, forKey: NativeSync.activeKey)
