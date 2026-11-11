@@ -45,3 +45,10 @@ test('金額回推分鐘數', () => {
   ];
   for (const [text, want] of cases) assert.equal(pickMinutes(text), want, JSON.stringify(text));
 });
+
+test('pandarider 新版接單頁（金額＋公里＋分鐘同時出現）', () => {
+  const text = '狀態\n上線中\n每單收入\n110.26 $ 6.7公里\n27 分鐘\n鬍鬚張魯肉飯 (台北美食文化館)\n台北市XX區XX路XX巷XX號X樓\n送餐資訊\n品項數量與消費者/店家備註(5)\n需要收取現金\n接受訂單';
+  assert.equal(pickMinutes(text), 27);
+  // 金額回推也應一致：110.26 / 4.08355 = 27
+  assert.equal(pickMinutes('每單收入\n110.26 $ 6.7公里\n接受訂單'), 27);
+});
