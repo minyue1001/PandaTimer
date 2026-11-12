@@ -11,6 +11,9 @@
 //   com.pandatimer.accept.delay.<秒 0-60>（緊接在 order 訊號之前送：按下接受到現在幾秒；App 2 秒內配對還原接單時間）。
 //   v0.7 自動送達：com.pandatimer.delivered（extension 看到完成/送達畫面；規則見 src/deliveryDetector.ts）。
 //   註冊數量：364＋90＋1＋61＋1＝517 個（< 1000）。
+// v0.8：com.pandatimer.offer.stacked（夾單；緊接在 accept.delay 之前送，App 2 秒內配對 → 訂單 stacked:true）、
+//   com.pandatimer.delivered.delay.<秒 0-60>（緊接在 delivered 之前送；實際送達＝收到 − 秒數）。
+//   註冊數量：517＋1＋61＝579 個（< 1000）。
 import type { Order } from './orders';
 
 export const ORDER_SIGNAL_PREFIX = 'com.pandatimer.order.';
@@ -27,12 +30,18 @@ export const OFFER_CLEARED = 'com.pandatimer.offer.cleared';
 export const DELIVERED_SIGNAL = 'com.pandatimer.delivered';
 export const ACCEPT_DELAY_PREFIX = 'com.pandatimer.accept.delay.';
 export const MAX_ACCEPT_DELAY = 60;
+export const OFFER_STACKED = 'com.pandatimer.offer.stacked';
+export const DELIVERED_DELAY_PREFIX = 'com.pandatimer.delivered.delay.';
+export const MAX_DELIVERED_DELAY = 60;
+/** Darwin 通知註冊上限（系統沒有明文，保守取 1000） */
+export const MAX_SIGNAL_NAMES = 1000;
 
 export type DetectorSignal =
   | { kind: 'order'; minutes: number; seq: number }
-  | { kind: 'started' | 'stopped' | 'heartbeat' | 'drain' | 'offerCleared' | 'delivered' }
+  | { kind: 'started' | 'stopped' | 'heartbeat' | 'drain' | 'offerCleared' | 'delivered' | 'offerStacked' }
   | { kind: 'offerPending'; minutes: number }
-  | { kind: 'acceptDelay'; seconds: number };
+  | { kind: 'acceptDelay'; seconds: number }
+  | { kind: 'deliveredDelay'; seconds: number };
 
 /** 純數字、無前導 0（"0" 本身可以）、1~2 位、在 lo…hi 之間（同 DetectorHub.plainInt） */
 function plainInt(text: string, lo: number, hi: number): number | null {
@@ -50,6 +59,11 @@ export function acceptDelayName(seconds: number): string {
   return `${ACCEPT_DELAY_PREFIX}${d}`;
 }
 
+export function deliveredDelayName(seconds: number): string {
+  const d = Math.min(MAX_DELIVERED_DELAY, Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0)));
+  return `${DELIVERED_DELAY_PREFIX}${d}`;
+}
+
 /** 新單訊號名稱；分鐘數超出 1…90 → null（App 沒註冊那些名稱） */
 export function orderSignalName(minutes: number, seq: number): string | null {
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_SIGNAL_MINUTES) return null;
@@ -65,6 +79,11 @@ export function parseSignalName(name: unknown): DetectorSignal | null {
   }
   if (name === OFFER_CLEARED) return { kind: 'offerCleared' };
   if (name === DELIVERED_SIGNAL) return { kind: 'delivered' };
+  if (name === OFFER_STACKED) return { kind: 'offerStacked' };
+  if (name.startsWith(DELIVERED_DELAY_PREFIX)) {
+    const seconds = plainInt(name.slice(DELIVERED_DELAY_PREFIX.length), 0, MAX_DELIVERED_DELAY);
+    return seconds == null ? null : { kind: 'deliveredDelay', seconds };
+  }
   if (name.startsWith(OFFER_PENDING_PREFIX)) {
     const minutes = plainInt(name.slice(OFFER_PENDING_PREFIX.length), 1, MAX_SIGNAL_MINUTES);
     return minutes == null ? null : { kind: 'offerPending', minutes };
@@ -92,7 +111,38 @@ export function allSignalNames(): string[] {
   names.push(OFFER_CLEARED);
   names.push(DELIVERED_SIGNAL);
   for (let d = 0; d <= MAX_ACCEPT_DELAY; d++) names.push(`${ACCEPT_DELAY_PREFIX}${d}`);
+  names.push(OFFER_STACKED);
+  for (let d = 0; d <= MAX_DELIVERED_DELAY; d++) names.push(`${DELIVERED_DELAY_PREFIX}${d}`);
   return names;
+}
+
+/**
+ * v0.8 App 端配對（＝DetectorHub 的 takeStacked / takeDeliveredDelay）：前置訊號在主訊號前後 2 秒內才算數。時間：毫秒。
+ * 回傳 delivered 的實際送達時間（配不到延遲 → 收到時間）。
+ */
+export function restoreDeliveredAt(receivedAt: number, delay?: { seconds: number; at: number } | null): number {
+  if (delay && Math.abs(delay.at - receivedAt) <= 2000) return receivedAt - delay.seconds * 1000;
+  return receivedAt;
+}
+
+export function pairedStacked(receivedAt: number, stackedAt: number | null | undefined): boolean {
+  return stackedAt != null && Math.abs(stackedAt - receivedAt) <= 2000;
+}
+
+/**
+ * v0.8 廣播停止補救（＝DetectorHub.handle(.stopped) 的規則）：App 仍在「偵測中」（使用者沒按停止偵測）收到 stopped
+ * → 發「偵測停止了，點我重新開始」通知；60 秒內不重複。時間：毫秒。
+ */
+export const STOP_NOTICE_REPEAT_SEC = 60;
+export function shouldNotifyStopped(armed: boolean, lastNoticeAt: number | null, now: number): boolean {
+  if (!armed) return false;
+  return lastNoticeAt == null || now - lastNoticeAt >= STOP_NOTICE_REPEAT_SEC * 1000;
+}
+
+/** 通知 userInfo 的 pandatimer 值：點了要自動叫出廣播視窗 */
+export const REDETECT_TAG = 'redetect';
+export function isRedetectData(data: unknown): boolean {
+  return !!data && typeof data === 'object' && (data as Record<string, unknown>).pandatimer === REDETECT_TAG;
 }
 
 /**
@@ -147,6 +197,8 @@ export type DetectorStatus = {
   offerPendingAt: number | null;
   /** v0.7：最近一次判定（「已接單 27 分（18:02:11）」／「未接單 27 分（…）」） */
   offerNote: string;
+  /** v0.8：偵測中卻收到廣播停止（使用者沒按停止偵測）的時間；重新開始後清掉 */
+  stoppedUnexpectedAt: number | null;
 };
 
 const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
@@ -182,6 +234,7 @@ export function parseDetectorStatus(raw: unknown): DetectorStatus | null {
     offerPendingMinutes: num(o.offerPendingMinutes),
     offerPendingAt: num(o.offerPendingAt),
     offerNote: typeof o.offerNote === 'string' ? o.offerNote : '',
+    stoppedUnexpectedAt: num(o.stoppedUnexpectedAt),
   };
 }
 

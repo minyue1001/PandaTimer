@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-12.3",
+  "version": "2026-11-13.1",
   "picker": {
     "minutePattern": "(?<![0-9.])([0-9]{1,3})(?![0-9.])\\s*(?:分鐘|分钟|分|min)",
     "minMinutes": 1,
@@ -30,7 +30,7 @@
     "dedupeSeconds": 90,
     "goneAfterMisses": 2,
     "ocrIntervalSeconds": 1.5,
-    "idleOcrIntervalSeconds": 3,
+    "idleOcrIntervalSeconds": 1.5,
     "idleAfterMisses": 3,
     "forceOcrSeconds": 10,
     "bottomFraction": 0.5,
@@ -39,7 +39,20 @@
     "sameFrameMaxBits": 40,
     "heartbeatSeconds": 60,
     "memoryAlertMB": 40,
-    "configRefreshSeconds": 600
+    "configRefreshSeconds": 600,
+    "fastOcrIntervalSeconds": 0.6,
+    "changeMinBits": 120,
+    "changeMinGapSeconds": 0.6,
+    "probeIntervalSeconds": 0.2,
+    "greenTrigger": {
+      "enabled": true,
+      "minRatio": 0.002,
+      "yMin": 60,
+      "cbMax": 110,
+      "crMax": 110,
+      "holdSec": 10,
+      "regionFraction": 0.55
+    }
   },
   "telemetry": {
     "keywords": [
@@ -195,6 +208,63 @@
       [
         "共2單",
         "共 2 單"
+      ],
+      [
+        "夾單",
+        "夹单"
+      ],
+      [
+        "訂單完成",
+        "订单完成"
+      ],
+      [
+        "確認已送達",
+        "确认已送达"
+      ],
+      [
+        "確認已取餐",
+        "确认已取餐"
+      ],
+      [
+        "是否已取餐"
+      ],
+      [
+        "是否已送達",
+        "是否已送达"
+      ],
+      [
+        "pickedup",
+        "Pickedup",
+        "PICKEDUP"
+      ],
+      [
+        "即將抵達",
+        "即将抵达"
+      ],
+      [
+        "上傳照片",
+        "上传照片"
+      ],
+      [
+        "無法聯繫",
+        "无法联系",
+        "無法聯絡"
+      ],
+      [
+        "筆訂單",
+        "笔订单"
+      ],
+      [
+        "即將準備完成",
+        "即将准备完成"
+      ],
+      [
+        "取餐體驗",
+        "取餐体验"
+      ],
+      [
+        "每單收入",
+        "每单收入"
       ]
     ],
     "flushSeconds": 30,
@@ -206,9 +276,10 @@
   "offer": {
     "goneAfterMisses": 2,
     "decideWindowSec": 25,
-    "acceptedKeywords": "前往取餐|抵達(?:店家|餐廳)|抵达(?:店家|餐厅)|確認取餐|确认取餐|已抵達|已抵达|取餐|導航|导航|訂單詳情|订单详情|聯絡店家|联络店家|联系店家",
+    "acceptedKeywords": "前往取餐|抵達(?:店家|餐廳)|抵达(?:店家|餐厅)|確認取餐|确认取餐|已抵達|已抵达|取餐|導航|导航|訂單詳情|订单详情|聯絡店家|联络店家|联系店家|即將準備完成|即将准备完成|準備完成|准备完成|筆訂單|笔订单|取餐體驗|取餐体验",
     "rejectedKeywords": "已拒絕|已拒绝|訂單已取消|订单已取消|逾時|逾时|已過期|已过期|上線中|上线中",
-    "ambiguousAs": "accept"
+    "ambiguousAs": "accept",
+    "stackedKeywords": "夾單|夹单"
   },
   "stats": {
     "graceFactor": 1.05,
@@ -222,10 +293,14 @@
   "delivery": {
     "enabled": true,
     "minOrderAgeSec": 120,
-    "completedKeywords": "完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达"
+    "completedKeywords": "訂單完成|订单完成|完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达",
+    "finalKeywords": "訂單完成|订单完成|訂單已完成|订单已完成",
+    "pendingSec": 30
   },
   "ocr": {
-    "memSkipMB": 38,
-    "memHighMB": 44
+    "memSkipMB": 36,
+    "memHighMB": 44,
+    "rebuildEvery": 30,
+    "englishToo": false
   }
 }

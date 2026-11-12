@@ -59,9 +59,10 @@ test('parseSignalName：狀態訊號與垃圾', () => {
   assert.equal(parseSignalName(5), null);
 });
 
-test('allSignalNames：v0.7 共 517 個（< 1000）、每個都解析得回來、無重複', () => {
+test('allSignalNames：v0.8 共 579 個（< 1000）、每個都解析得回來、無重複', () => {
   const names = allSignalNames();
-  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1);
+  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1 + 1 + 61);
+  assert.equal(names.length, 579);
   assert.ok(names.length < 1000);
   assert.equal(new Set(names).size, names.length);
   for (const n of names) assert.notEqual(parseSignalName(n), null, n);
@@ -93,7 +94,7 @@ test('parseDetectorStatus：容錯', () => {
   assert.equal(parseDetectorStatus('not json'), null);
   assert.equal(parseDetectorStatus('[]'), null);
   const s = parseDetectorStatus(JSON.stringify({ armed: true, keepAlive: '音訊中', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2 }));
-  assert.deepEqual(s, { armed: true, keepAlive: '音訊中', keepAliveMode: 'none', locationAuth: 'unknown', keepAliveError: undefined, lastFixAt: null, islandCheck: '', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2, telemetryLastOk: null, telemetryPending: 0, telemetryError: undefined, configVersion: 'default', offerPendingMinutes: null, offerPendingAt: null, offerNote: '' });
+  assert.deepEqual(s, { armed: true, keepAlive: '音訊中', keepAliveMode: 'none', locationAuth: 'unknown', keepAliveError: undefined, lastFixAt: null, islandCheck: '', lastBeatAt: 1000, lastOrderMinutes: 27, lastOrderAt: 2000, lastOrderHow: 'x', autoCountSinceLaunch: 2, telemetryLastOk: null, telemetryPending: 0, telemetryError: undefined, configVersion: 'default', offerPendingMinutes: null, offerPendingAt: null, offerNote: '', stoppedUnexpectedAt: null });
   const v5 = parseDetectorStatus(JSON.stringify({ armed: true, keepAlive: '定位中', keepAliveMode: 'location', locationAuth: 'whenInUse', lastFixAt: 5000, islandCheck: '動態島：已更新✓（背景）' }));
   assert.equal(v5.keepAliveMode, 'location');
   assert.equal(v5.locationAuth, 'whenInUse');
@@ -162,7 +163,7 @@ test('v0.6：app.json 背景模式／定位說明／runtimeVersion 與 OtaBox �
   assert.deepEqual([...plist.UIBackgroundModes].sort(), ['audio', 'location']);
   assert.ok(plist.NSLocationWhenInUseUsageDescription.length > 5);
   assert.ok(plist.NSLocationAlwaysAndWhenInUseUsageDescription.length > 5);
-  assert.equal(app.runtimeVersion, '0.7');
+  assert.equal(app.runtimeVersion, '0.8');
   // v0.6 遠端回報：寫入金鑰在 extra（進 App 可接受），網址 https；讀取金鑰絕不進 repo
   assert.match(app.extra.telemetryKey, /^[A-Za-z0-9_-]{32,}$/);
   assert.match(app.extra.telemetryUrl, /^https:\/\/.+\/api\/telemetry$/);
@@ -234,4 +235,62 @@ test('v0.7：Swift 兩邊（extension 送、App 註冊/解析）的新訊號名�
   assert.ok(!ocr.includes('postOrder('), 'runOCR 不得直接送 order 訊號');
   assert.ok(hub.includes('for n in 1...maxMinutes { names.append("\\(offerPendingPrefix)\\(n)") }'));
   assert.ok(hub.includes('for d in 0...maxAcceptDelay { names.append("\\(acceptDelayPrefix)\\(d)") }'));
+});
+
+test('v0.8 offer.stacked / delivered.delay：編碼與解析、配對（前後 2 秒）', async () => {
+  const d = await import('../src/detector.ts');
+  assert.deepEqual(d.parseSignalName('com.pandatimer.offer.stacked'), { kind: 'offerStacked' });
+  assert.deepEqual(d.parseSignalName('com.pandatimer.delivered.delay.0'), { kind: 'deliveredDelay', seconds: 0 });
+  assert.deepEqual(d.parseSignalName('com.pandatimer.delivered.delay.60'), { kind: 'deliveredDelay', seconds: 60 });
+  for (const bad of ['com.pandatimer.delivered.delay.61', 'com.pandatimer.delivered.delay.07', 'com.pandatimer.delivered.delay.', 'com.pandatimer.delivered.x']) {
+    assert.equal(d.parseSignalName(bad), null, bad);
+  }
+  assert.deepEqual(d.parseSignalName('com.pandatimer.delivered'), { kind: 'delivered' });
+  assert.equal(d.deliveredDelayName(99), 'com.pandatimer.delivered.delay.60');
+  assert.equal(d.deliveredDelayName(-3), 'com.pandatimer.delivered.delay.0');
+  assert.equal(d.restoreDeliveredAt(100_000, { seconds: 30, at: 99_500 }), 70_000);
+  assert.equal(d.restoreDeliveredAt(100_000, { seconds: 30, at: 97_000 }), 100_000);
+  assert.equal(d.restoreDeliveredAt(100_000, null), 100_000);
+  assert.equal(d.pairedStacked(100_000, 99_000), true);
+  assert.equal(d.pairedStacked(100_000, 97_500), false);
+  assert.equal(d.pairedStacked(100_000, null), false);
+  assert.ok(d.allSignalNames().length <= d.MAX_SIGNAL_NAMES);
+});
+
+test('v0.8 廣播停止補救：偵測中才通知、60 秒內不重複；redetect 通知資料', async () => {
+  const d = await import('../src/detector.ts');
+  assert.equal(d.shouldNotifyStopped(false, null, 0), false);
+  assert.equal(d.shouldNotifyStopped(true, null, 0), true);
+  assert.equal(d.shouldNotifyStopped(true, 0, 59_999), false);
+  assert.equal(d.shouldNotifyStopped(true, 0, 60_000), true);
+  assert.equal(d.isRedetectData({ pandatimer: 'redetect' }), true);
+  assert.equal(d.isRedetectData({ pandatimer: 'detected' }), false);
+  assert.equal(d.isRedetectData(null), false);
+  assert.equal(d.parseDetectorStatus(JSON.stringify({ armed: false, stoppedUnexpectedAt: 1234 })).stoppedUnexpectedAt, 1234);
+});
+
+test('v0.8 Swift：新訊號名稱一致、送 order 前先送夾單與延遲、App 鎖屏回報與停止通知', async () => {
+  const fs = await import('node:fs');
+  const read = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const hub = read('../modules/live-activity/ios/DetectorHub.swift');
+  const ext = read('../targets/broadcast/SampleHandler.swift');
+  for (const s of ['com.pandatimer.offer.stacked', 'com.pandatimer.delivered.delay.']) {
+    assert.ok(hub.includes(`"${s}"`), `DetectorHub 缺 ${s}`);
+    assert.ok(ext.includes(`"${s}"`), `SampleHandler 缺 ${s}`);
+  }
+  const body = ext.slice(ext.indexOf('private func decided('), ext.indexOf('/// 畫面分類或接單鈕狀態有變才記一筆'));
+  const iStacked = body.indexOf('PandaSignal.post(PandaSignal.offerStacked)');
+  assert.ok(iStacked > 0 && iStacked < body.indexOf('PandaSignal.postAcceptDelay(') && body.indexOf('PandaSignal.postAcceptDelay(') < body.indexOf('PandaSignal.postOrder('));
+  assert.ok(hub.includes('names.append(offerStackedName)'));
+  assert.ok(hub.includes('for d in 0...maxDeliveredDelay { names.append("\\(deliveredDelayPrefix)\\(d)") }'));
+  assert.ok(hub.includes('static let maxDeliveredDelay = 60'));
+  for (const s of ['UIApplication.protectedDataWillBecomeUnavailableNotification', 'UIApplication.protectedDataDidBecomeAvailableNotification',
+    'self.telemetry.log("lock"', 'self.telemetry.log("unlock"', 'static let stopNoticeRepeatSeconds: TimeInterval = 60',
+    'static let redetectTag = "redetect"', 'let unexpected = armed', 'if isStacked { order["stacked"] = true }']) {
+    assert.ok(hub.includes(s), s);
+  }
+  for (const s of ['override func broadcastPaused() {\n    detector.paused()', 'override func broadcastResumed() {\n    detector.resumed()',
+    'self.telemetry.log("pause"', 'self.telemetry.log("resume"']) {
+    assert.ok(ext.includes(s), s);
+  }
 });

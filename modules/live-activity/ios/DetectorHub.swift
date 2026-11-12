@@ -30,6 +30,12 @@ import UserNotifications
 //   delivery.minOrderAgeSec 的進行中單」裡最早那張（實際時間＝收到時間），走與送達按鈕相同的鏡像/事件/卡片路徑。
 //   手動/自動互斥：90 秒內有手動結單 → 不自動結；自動結單後 20 秒內的送達按鈕/捷徑 → 不再結（PandaSharedStore）。
 //   註冊：4 狀態＋360 order＋90 pending＋1 cleared＋61 delay＋1 delivered＝517 個（< 1000）。
+// v0.8：
+//   - com.pandatimer.offer.stacked（夾單；在 accept.delay 之前送）→ 2 秒內配對到的 order 記 stacked:true。
+//   - com.pandatimer.delivered.delay.<0…60>（在 delivered 之前送）→ 實際送達＝收到 − 秒數；AutoDelivery 改結「截止最早」的單。
+//   - 鎖屏/解鎖（protectedData 通知）回報 lock/unlock；偵測中（使用者沒按停止偵測）卻收到 stopped →
+//     通知「偵測停止了，點我重新開始」（userInfo pandatimer=redetect，JS 點了自動叫出廣播視窗；60 秒內不重複）＋偵測卡顯示。
+//   註冊：517＋1＋61＝579 個（< 1000）。
 final class DetectorHub {
   static let shared = DetectorHub()
 
@@ -47,6 +53,13 @@ final class DetectorHub {
   static let maxAcceptDelay = 60
   /// 延遲訊號與 order 訊號配對的時間窗（秒）
   static let delayPairWindow: TimeInterval = 2
+  static let offerStackedName = "com.pandatimer.offer.stacked"
+  static let deliveredDelayPrefix = "com.pandatimer.delivered.delay."
+  static let maxDeliveredDelay = 60
+  /// 「偵測停止了」通知最短間隔（秒）＝src/detector.ts STOP_NOTICE_REPEAT_SEC
+  static let stopNoticeRepeatSeconds: TimeInterval = 60
+  /// 通知 userInfo 的 pandatimer 值：點了 JS 自動叫出廣播視窗（＝src/detector.ts REDETECT_TAG）
+  static let redetectTag = "redetect"
 
   enum Signal {
     case order(Int, Int)
@@ -58,6 +71,8 @@ final class DetectorHub {
     case offerCleared
     case acceptDelay(Int)
     case delivered
+    case offerStacked
+    case deliveredDelay(Int)
   }
 
   /// 純數字、無前導 0（"0" 本身可以）、在 lo…hi 之間
@@ -76,7 +91,13 @@ final class DetectorHub {
     case drainName: return .drain
     case offerClearedName: return .offerCleared
     case deliveredName: return .delivered
+    case offerStackedName: return .offerStacked
     default: break
+    }
+    if name.hasPrefix(deliveredDelayPrefix) {
+      return plainInt(String(name.dropFirst(deliveredDelayPrefix.count)), 0, maxDeliveredDelay).map {
+        Signal.deliveredDelay($0)
+      }
     }
     if name.hasPrefix(offerPendingPrefix) {
       return plainInt(String(name.dropFirst(offerPendingPrefix.count)), 1, maxMinutes).map { Signal.offerPending($0) }
@@ -106,6 +127,8 @@ final class DetectorHub {
     names.append(offerClearedName)
     names.append(deliveredName)
     for d in 0...maxAcceptDelay { names.append("\(acceptDelayPrefix)\(d)") }
+    names.append(offerStackedName)
+    for d in 0...maxDeliveredDelay { names.append("\(deliveredDelayPrefix)\(d)") }
     return names
   }
 
@@ -141,6 +164,16 @@ final class DetectorHub {
   private var offerNote = ""
   /// v0.7：最近收到、還沒配對的延遲訊號
   private var pendingDelay: (seconds: Int, at: Date)?
+  /// v0.8：最近收到、還沒配對的夾單訊號／送達延遲訊號
+  private var pendingStackedAt: Date?
+  private var pendingDeliveredDelay: (seconds: Int, at: Date)?
+  /// v0.8：偵測中卻收到 stopped 的時間（重新開始/停止偵測後清掉）、上次發「偵測停止了」通知的時間
+  private var stoppedUnexpectedAt: Date?
+  private var lastStopNoticeAt: Date?
+  /// v0.8：鎖屏狀態（protectedData 通知；裝置沒設密碼時收不到 → nil）
+  private var lockedAt: Date?
+  private var unlockedAt: Date?
+  private var lockObservers: [NSObjectProtocol] = []
   /// fg / bg / unknown（OnAppBecomesActive / OnAppEntersBackground 更新）
   private var appState = "unknown"
   private var lastKeepLogged = ""
@@ -154,7 +187,38 @@ final class DetectorHub {
     queue.async {
       self.emitter = emit
       self.applyConfig()
+      self.observeLockIfNeeded()
     }
+  }
+
+  /// v0.8：鎖屏/解鎖（需裝置有密碼；App 要活著——偵測中有定位保活）→ telemetry lock/unlock，對照 broadcast 停止原因
+  private func observeLockIfNeeded() {
+    guard lockObservers.isEmpty else { return }
+    let center = NotificationCenter.default
+    lockObservers.append(
+      center.addObserver(
+        forName: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil, queue: nil
+      ) { [weak self] _ in
+        self?.queue.async {
+          guard let self = self else { return }
+          self.lockedAt = Date()
+          self.telemetry.log("lock", self.appFields(), urgent: self.armed)
+        }
+      })
+    lockObservers.append(
+      center.addObserver(
+        forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: nil
+      ) { [weak self] _ in
+        self?.queue.async {
+          guard let self = self else { return }
+          let now = Date()
+          var fields = self.appFields()
+          if let at = self.lockedAt { fields["lockAge"] = Int(now.timeIntervalSince(at)) }
+          self.lockedAt = nil
+          self.unlockedAt = now
+          self.telemetry.log("unlock", fields)
+        }
+      })
   }
 
   // MARK: - 遠端設定（只在 queue 上）
@@ -214,6 +278,7 @@ final class DetectorHub {
       self.armedAt = Date()
       self.beatAlerted = false
       self.lastSeq = nil
+      self.stoppedUnexpectedAt = nil
       self.keepAlive.start()
       self.startWatchdog()
       self.refreshConfig(force: true)
@@ -225,6 +290,7 @@ final class DetectorHub {
   func disarm() async {
     queue.sync {
       self.armed = false
+      self.stoppedUnexpectedAt = nil
       self.keepAlive.stop()
       self.stopWatchdog()
       self.telemetry.log("disarm", self.appFields())
@@ -274,6 +340,7 @@ final class DetectorHub {
         d["offerPendingAt"] = Self.ms(at)
       }
       if !offerNote.isEmpty { d["offerNote"] = offerNote }
+      if let at = stoppedUnexpectedAt { d["stoppedUnexpectedAt"] = Self.ms(at) }
       return d
     }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
@@ -327,6 +394,7 @@ final class DetectorHub {
       lastBeat = now
       beatAlerted = false
       lastSeq = nil  // extension 每次開始序號從 0 算
+      stoppedUnexpectedAt = nil
       clearOffer()
       if !armed {
         // 使用者從控制中心直接開廣播、App 剛好還活著：試著保活（背景啟動定位/音訊可能被拒，結果寫進狀態）
@@ -345,14 +413,34 @@ final class DetectorHub {
       telemetry.log("beat", appFields())
       emit(["type": "heartbeat"])
     case .stopped:
+      // v0.8：使用者沒按「停止偵測」（仍 armed）＝非預期停止 → 通知可一鍵重新開始
+      let unexpected = armed
       lastBeat = now
       armed = false
       keepAlive.stop()
       stopWatchdog()
       clearOffer()
-      pushCard(note: "偵測已停止 \(Self.hms(now))", stopping: true)
-      telemetry.log("sig", appFields().merging(["note": "stopped"]) { $1 }, urgent: true)
-      emit(["type": "stopped"])
+      var fields = appFields().merging(["note": "stopped"]) { $1 }
+      fields["locked"] = lockedAt != nil
+      if let at = lockedAt { fields["lockAge"] = Int(now.timeIntervalSince(at)) }
+      fields["reason"] = unexpected ? "unexpected" : "userStopped"
+      telemetry.log("sig", fields, urgent: true)
+      if unexpected {
+        stoppedUnexpectedAt = now
+        pushCard(note: "⏹ 偵測已停止（點通知重新開始）\(Self.hms(now))", stopping: true)
+        if lastStopNoticeAt.map({ now.timeIntervalSince($0) >= Self.stopNoticeRepeatSeconds }) ?? true {
+          lastStopNoticeAt = now
+          Task {
+            await DetectorNotify.post(
+              title: "🐼 偵測停止了，點我重新開始",
+              body: "螢幕廣播在 \(Self.hms(now)) 停止了。點這則通知打開 App，再按一次「開始直播」就恢復偵測。",
+              passive: false, userInfo: ["pandatimer": Self.redetectTag])
+          }
+        }
+      } else {
+        pushCard(note: "偵測已停止 \(Self.hms(now))", stopping: true)
+      }
+      emit(["type": "stopped", "unexpected": unexpected])
     case .drain:
       emit(["type": "drain"])
     case .order(let minutes, let seq):
@@ -371,17 +459,54 @@ final class DetectorHub {
       emit(["type": "offerCleared"])
     case .acceptDelay(let seconds):
       pendingDelay = (seconds: seconds, at: now)
+    case .offerStacked:
+      pendingStackedAt = now
+    case .deliveredDelay(let seconds):
+      pendingDeliveredDelay = (seconds: seconds, at: now)
     case .delivered:
       handleDelivered(at: now)
     }
   }
 
-  /// v0.7 自動送達（規則＝src/deliveryDetector.ts 的 pickDeliveredOrder）
-  private func handleDelivered(at now: Date) {
+  /// v0.8 只在 queue 上：near 前後 2 秒內收到的夾單訊號（取走就清掉；過期的也清掉）
+  private func takeStacked(near: Date) -> Bool {
+    guard let at = pendingStackedAt else { return false }
+    if abs(at.timeIntervalSince(near)) <= Self.delayPairWindow {
+      pendingStackedAt = nil
+      return true
+    }
+    if near.timeIntervalSince(at) > Self.delayPairWindow { pendingStackedAt = nil }
+    return false
+  }
+
+  /// v0.8 只在 queue 上：near 前後 2 秒內收到的送達延遲訊號
+  private func takeDeliveredDelay(near: Date) -> Int? {
+    guard let p = pendingDeliveredDelay else { return nil }
+    if abs(p.at.timeIntervalSince(near)) <= Self.delayPairWindow {
+      pendingDeliveredDelay = nil
+      return p.seconds
+    }
+    if near.timeIntervalSince(p.at) > Self.delayPairWindow { pendingDeliveredDelay = nil }
+    return nil
+  }
+
+  /// v0.7 自動送達（規則＝src/deliveryDetector.ts 的 pickDeliveredOrder）；v0.8 實際時間＝收到 − 延遲訊號
+  private func handleDelivered(at received: Date) {
     let settings = RemoteConfig.delivery(remote.snapshot())
     let baseFields = appFields()
+    let paired = takeDeliveredDelay(near: received)
     Task {
-      let outcome = AutoDelivery.finish(settings: settings, at: now)
+      // 延遲訊號應該先到；沒到就再等最多 1 秒（Darwin 通知偶爾亂序）
+      var delay = paired
+      var waits = 0
+      while delay == nil && waits < 2 {
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        waits += 1
+        delay = self.queue.sync { self.takeDeliveredDelay(near: received) }
+      }
+      let usedDelay = delay
+      let now = received.addingTimeInterval(-Double(usedDelay ?? 0))
+      let outcome = AutoDelivery.finish(settings: settings, at: now, receivedAt: received)
       guard case .finished(let order) = outcome else {
         if case .skipped(let reason) = outcome {
           self.queue.async {
@@ -404,12 +529,13 @@ final class DetectorHub {
         fields["note"] = "auto"
         fields["min"] = order.estimateMin
         fields["wait"] = (actual * 10).rounded() / 10
+        if let d = usedDelay { fields["delay"] = d }
         self.telemetry.log("delivered", fields, urgent: true)
         self.lastOrderHow = "已自動記錄送達：實際 \(actualText) 分／預估 \(order.estimateMin) 分"
       }
       await DetectorNotify.post(
         title: "已自動記錄送達：實際 \(actualText) 分／預估 \(order.estimateMin) 分",
-        body: "看到完成訂單畫面自動結單（\(Self.hms(now))）。記錯了可在 App 最近紀錄查看",
+        body: "看到送達/訂單完成畫面自動結單（送達時間 \(Self.hms(now))，結截止最早那單）。記錯了可在 App 最近紀錄查看",
         passive: true)
     }
   }
@@ -444,6 +570,7 @@ final class DetectorHub {
     clearOffer()
     offerNote = "已接單 \(minutes) 分（\(Self.hms(now))）"
     let pairedDelay = takeDelay(near: now)
+    let pairedStacked = takeStacked(near: now)
     let beat = lastBeat ?? now
     let diag = diagText(note: "自動新單 \(minutes) 分")
     let orderId = "\(Int64(Self.ms(now)))-a\(UUID().uuidString.prefix(4).lowercased())"
@@ -454,10 +581,12 @@ final class DetectorHub {
       var acceptedAt = now
       var timeNote = ""
       var delayUsed: Int?
+      var stacked = pairedStacked
       if wasSuspended {
         if let t = await DetectorNotify.detectedAt(minutes: minutes, seq: seq, notAfter: now) {
-          acceptedAt = t
-          timeNote = "（App 曾被暫停，接單時間已改用偵測通知的 \(Self.hms(t))）"
+          acceptedAt = t.date
+          stacked = stacked || t.stacked
+          timeNote = "（App 曾被暫停，接單時間已改用偵測通知的 \(Self.hms(t.date))）"
         } else {
           timeNote = "（⚠️ App 曾被暫停，接單時間可能偏晚）"
         }
@@ -470,6 +599,7 @@ final class DetectorHub {
           waits += 1
           delay = self.queue.sync { self.takeDelay(near: now) }
         }
+        if !stacked { stacked = self.queue.sync { self.takeStacked(near: now) } }
         delayUsed = delay
         if let d = delay {
           acceptedAt = now.addingTimeInterval(-Double(d))
@@ -488,6 +618,8 @@ final class DetectorHub {
         "notifIds": notifIds,
         "source": "auto",
       ]
+      let isStacked = stacked
+      if isStacked { order["stacked"] = true }
       let outcome = await Self.placeOrder(
         &order, minutes: minutes, acceptedAt: acceptedAt, deadline: deadline, beat: beat, diag: diag)
       let check = await Self.verifyCard(activityId: outcome.activityId, expect: outcome.expect)
@@ -503,13 +635,15 @@ final class DetectorHub {
         fields["susp"] = wasSuspended
         fields["orders"] = outcome.count
         if let d = delayField { fields["delay"] = d }
+        if isStacked { fields["stacked"] = true }
         if let err = outcome.requestError { fields["reason"] = err }
         self.telemetry.log("order", fields, urgent: true)
         self.emit(["type": "order", "minutes": minutes, "how": how, "check": check.text])
       }
       let gapNote = gap > 0 ? "\n⚠️ 中間有 \(gap) 則新單訊號遺失（App 可能被暫停）" : ""
       await DetectorNotify.post(
-        title: "App 已記錄自動新單：\(minutes) 分" + (outcome.count > 1 ? "（進行中 \(outcome.count) 單）" : ""),
+        title: "App 已記錄自動新單：\(minutes) 分" + (isStacked ? "（夾單）" : "")
+          + (outcome.count > 1 ? "（進行中 \(outcome.count) 單）" : ""),
         body: "\(check.text)\n\(how)\(gapNote)\n動態島沒變的話：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」",
         passive: true)
     }
@@ -739,7 +873,9 @@ final class DetectorHub {
       telemetry.log("beatTimeout", fields, urgent: true)
       let body = "\(note)。偵測可能已被系統關掉，請重新開始偵測。"
       Task {
-        await DetectorNotify.post(title: "🐼 偵測沒有回應", body: body, passive: false)
+        await DetectorNotify.post(
+          title: "🐼 偵測沒有回應", body: body + "點這則通知可直接重新開始。", passive: false,
+          userInfo: ["pandatimer": Self.redetectTag])
       }
     }
   }
@@ -1152,13 +1288,15 @@ enum AutoDelivery {
     case skipped(String)
   }
 
-  /// disabled / manualRecent / noActive / tooNew；否則結「接單超過 minOrderAgeSec 秒」裡最早接單的那張，寫 done 事件
-  static func finish(settings: RemoteConfig.DeliverySettings, at date: Date) -> Outcome {
+  /// disabled / manualRecent / noActive / tooNew；否則結「接單超過 minOrderAgeSec 秒」裡**截止最早**的那張（v0.8；
+  /// 同截止取較早接單），寫 done 事件（at＝實際送達時間 date；互斥時間用 receivedAt）
+  static func finish(settings: RemoteConfig.DeliverySettings, at date: Date, receivedAt: Date) -> Outcome {
     guard settings.enabled else { return .skipped("disabled") }
     let defaults = UserDefaults.standard
     objc_sync_enter(defaults)
     defer { objc_sync_exit(defaults) }
-    let nowMs = (date.timeIntervalSince1970 * 1000).rounded()
+    let nowMs = (receivedAt.timeIntervalSince1970 * 1000).rounded()
+    let atMs = (date.timeIntervalSince1970 * 1000).rounded()
     if let manual = (defaults.object(forKey: lastManualKey) as? NSNumber)?.doubleValue,
        nowMs - manual < manualGraceSeconds * 1000
     {
@@ -1168,10 +1306,14 @@ enum AutoDelivery {
     if active.isEmpty { return .skipped("noActive") }
     var index: Int?
     var best = Double.greatestFiniteMagnitude
+    var bestDeadline = Double.greatestFiniteMagnitude
     for (i, item) in active.enumerated() {
       guard item["id"] is String, let accepted = (item["acceptedAt"] as? NSNumber)?.doubleValue else { continue }
       if nowMs - accepted < Double(settings.minOrderAgeSec) * 1000 { continue }
-      if accepted < best {
+      let estimate = (item["estimateMin"] as? NSNumber)?.doubleValue ?? 0
+      let deadline = (item["deadline"] as? NSNumber)?.doubleValue ?? (accepted + estimate * 60_000)
+      if deadline < bestDeadline || (deadline == bestDeadline && accepted < best) {
+        bestDeadline = deadline
         best = accepted
         index = i
       }
@@ -1183,7 +1325,7 @@ enum AutoDelivery {
       id: item["id"] as? String ?? "", acceptedAt: best,
       estimateMin: (item["estimateMin"] as? NSNumber)?.intValue ?? 0,
       activityId: item["activityId"] as? String, notifIds: (item["notifIds"] as? [String]) ?? [])
-    var event: [String: Any] = ["type": "done", "at": nowMs, "orderId": order.id]
+    var event: [String: Any] = ["type": "done", "at": max(atMs, best), "orderId": order.id]
     if let aid = order.activityId { event["activityId"] = aid }
     var events = NativeSync.readArray(NativeSync.eventsKey)
     events.append(event)
@@ -1205,21 +1347,23 @@ enum NativeSyncDrain {
 // MARK: - 通知（不用 timeSensitive/critical：需要 entitlement）
 
 enum DetectorNotify {
-  static func post(title: String, body: String, passive: Bool) async {
+  static func post(title: String, body: String, passive: Bool, userInfo: [String: Any]? = nil) async {
     let content = UNMutableNotificationContent()
     content.title = title
     content.body = body
     content.sound = nil
     content.interruptionLevel = passive ? .passive : .active
+    if let info = userInfo { content.userInfo = info }
     let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
     try? await UNUserNotificationCenter.current().add(request)
   }
 
   /// extension 發的「偵測到新單」通知（userInfo pandatimer=detected）裡的偵測時間：
-  /// 同分鐘數（v0.6 起再比對序號）、在 notAfter 之前 10 分鐘內的最新一則。找不到回 nil。
-  static func detectedAt(minutes: Int, seq: Int, notAfter: Date) async -> Date? {
+  /// 同分鐘數（v0.6 起再比對序號）、在 notAfter 之前 10 分鐘內的最新一則。找不到回 nil。v0.8 一併回傳 stacked
+  static func detectedAt(minutes: Int, seq: Int, notAfter: Date) async -> (date: Date, stacked: Bool)? {
     let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
     var best: Date?
+    var bestStacked = false
     for notification in delivered {
       let info = notification.request.content.userInfo
       guard (info["pandatimer"] as? String) == "detected",
@@ -1229,9 +1373,12 @@ enum DetectorNotify {
       else { continue }
       let t = Date(timeIntervalSince1970: ms / 1000)
       guard t <= notAfter.addingTimeInterval(5), notAfter.timeIntervalSince(t) < 600 else { continue }
-      if best.map({ t > $0 }) ?? true { best = t }
+      if best.map({ t > $0 }) ?? true {
+        best = t
+        bestStacked = (info["stacked"] as? NSNumber)?.boolValue ?? false
+      }
     }
-    return best
+    return best.map { (date: $0, stacked: bestStacked) }
   }
 }
 

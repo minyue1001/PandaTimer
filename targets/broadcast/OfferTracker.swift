@@ -16,19 +16,23 @@ import Foundation
 //   接單的（分鐘, 金額）dedupeSeconds 內又出現 → dup（不算新邀請）。
 //   v0.7 實機修正：「同一張」＝分鐘相同且（金額相同或任一方沒抓到金額）；offered 期間後來才抓到金額 → 補齊，不算新單。
 //   廣播停止 → offered 當未接、deciding 依 ambiguousAs (stopped)。
+//   v0.8 夾單：同一張邀請任一次 OCR 看到「夾單」（offer.stackedKeywords）→ offer.stacked=true（之後不會變回 false）。
 
 /// 遠端設定 "offer" 區塊（預設＝src/offerTracker.ts 的 DEFAULT_OFFER＝server/config.default.json；範圍同 RANGES）
 struct OfferSettings {
   // ⚠️ 待實測調整：pandarider 接單後畫面還沒看過，先猜；調整改 server/config.json 的 offer.*，不用重裝
   static let defaultAcceptedKeywords =
-    "前往取餐|抵達(?:店家|餐廳)|抵达(?:店家|餐厅)|確認取餐|确认取餐|已抵達|已抵达|取餐|導航|导航|訂單詳情|订单详情|聯絡店家|联络店家|联系店家"
+    "前往取餐|抵達(?:店家|餐廳)|抵达(?:店家|餐厅)|確認取餐|确认取餐|已抵達|已抵达|取餐|導航|导航|訂單詳情|订单详情|聯絡店家|联络店家|联系店家|即將準備完成|即将准备完成|準備完成|准备完成|筆訂單|笔订单|取餐體驗|取餐体验"
   static let defaultRejectedKeywords = "已拒絕|已拒绝|訂單已取消|订单已取消|逾時|逾时|已過期|已过期|上線中|上线中"
+  /// v0.8 夾單邀請（上方小字「夾單訂單依系統顯示金額為主」）
+  static let defaultStackedKeywords = "夾單|夹单"
 
   var goneAfterMisses = 2
   var decideWindowSec = 25
   var acceptedKeywords = OfferSettings.defaultAcceptedKeywords
   var rejectedKeywords = OfferSettings.defaultRejectedKeywords
   var ambiguousAs = "accept"
+  var stackedKeywords = OfferSettings.defaultStackedKeywords
 
   init() {}
 
@@ -39,6 +43,7 @@ struct OfferSettings {
     acceptedKeywords = RemoteConfig.offerRegex(o["acceptedKeywords"], acceptedKeywords)
     rejectedKeywords = RemoteConfig.offerRegex(o["rejectedKeywords"], rejectedKeywords)
     ambiguousAs = RemoteConfig.choice(o["ambiguousAs"], ["accept", "reject"], ambiguousAs)
+    stackedKeywords = RemoteConfig.offerRegex(o["stackedKeywords"], stackedKeywords)
   }
 }
 
@@ -51,6 +56,8 @@ struct OfferObservation {
   let offerRejected: Bool
   let offerHit: [String]
   let kw: [String]
+  /// v0.8 這次 OCR 看到夾單字樣
+  let stacked: Bool
 
   init(_ s: ScreenInfo.Summary) {
     accept = s.accept
@@ -60,6 +67,7 @@ struct OfferObservation {
     offerRejected = s.offerRejected
     offerHit = s.offerHit
     kw = s.kw
+    stacked = s.stacked
   }
 }
 
@@ -70,6 +78,8 @@ struct Offer {
   var key: String
   let firstSeen: Date
   var lastSeen: Date
+  /// v0.8 夾單
+  var stacked = false
 }
 
 struct OfferDecision {
@@ -133,6 +143,12 @@ final class OfferTracker {
     (x * 10).rounded() / 10
   }
 
+  /// v0.8：offered/deciding 中（extension 用來維持快速 OCR）
+  var isActive: Bool {
+    if case .idle = state { return false }
+    return true
+  }
+
   /// deciding 時：視窗到期的時間（呼叫端排計時器；畫面靜止時 ReplayKit 不送幀，不能只靠 OCR 推進）
   var deadline: Date? {
     if case .deciding(_, let goneAt, _) = state {
@@ -152,6 +168,7 @@ final class OfferTracker {
         if case .offered(let offer, _, _) = state {
           var seen = offer
           seen.lastSeen = now
+          if o.stacked { seen.stacked = true }
           state = .offered(seen, misses: 0, firstMissAt: nil)
         }
         return tick(now)
@@ -161,6 +178,7 @@ final class OfferTracker {
         if Self.same(offer.minutes, offer.amount, minutes, o.amount) {
           var seen = Self.filled(offer, o.amount)
           seen.lastSeen = now
+          if o.stacked { seen.stacked = true }
           state = .offered(seen, misses: 0, firstMissAt: nil)
           return out
         }
@@ -169,6 +187,7 @@ final class OfferTracker {
         if Self.same(offer.minutes, offer.amount, minutes, o.amount) {
           var seen = Self.filled(offer, o.amount)
           seen.lastSeen = now
+          if o.stacked { seen.stacked = true }
           state = .offered(seen, misses: 0, firstMissAt: nil)
           out.append(.resumed(seen, awaySec: Self.round1(now.timeIntervalSince(goneAt))))
           return out
@@ -188,7 +207,8 @@ final class OfferTracker {
       }
       ignored = nil
       let offer = Offer(
-        minutes: minutes, amount: o.amount, key: Self.key(minutes, o.amount), firstSeen: now, lastSeen: now)
+        minutes: minutes, amount: o.amount, key: Self.key(minutes, o.amount), firstSeen: now, lastSeen: now,
+        stacked: o.stacked)
       state = .offered(offer, misses: 0, firstMissAt: nil)
       out.append(.seen(offer))
       return out

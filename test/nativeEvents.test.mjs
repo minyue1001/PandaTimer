@@ -110,3 +110,15 @@ test('v0.6 多單：自動單共用偵測卡 activityId；動態島送達（只�
   assert.equal(after2.find((o) => o.id === 'a1').status, 'delivered');
   assert.equal(after2.find((o) => o.id === 'j1').status, 'active');
 });
+
+test('v0.8：原生 start 事件的 stacked 帶進訂單；非 true 一律忽略', () => {
+  const ev = parseNativeEvents([
+    { type: 'start', id: 's1', acceptedAt: 1000, estimateMin: 12, deadline: 1000 + 12 * MIN, source: 'auto', stacked: true },
+    { type: 'start', id: 's2', acceptedAt: 2000, estimateMin: 12, deadline: 2000 + 12 * MIN, stacked: 'yes' },
+  ]);
+  assert.equal(ev[0].stacked, true);
+  assert.equal(ev[1].stacked, undefined);
+  const list = applyNativeEvents([], ev);
+  assert.equal(list.find((o) => o.id === 's1').stacked, true);
+  assert.equal('stacked' in list.find((o) => o.id === 's2'), false);
+});

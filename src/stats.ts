@@ -110,10 +110,11 @@ export function periodOf(ms: number): Period {
   return { index, start, end, label: `${taipeiMD(start)}–${taipeiMD(end - DAY_MS)}`, id: taipeiDate(start) };
 }
 
-/** 已送達、有實際分鐘、接單時間在 [since, until) 的單（取消/進行中不計） */
-export function samplesBetween(orders: readonly Order[], since: number, until: number): Sample[] {
+/** 已送達、有實際分鐘、接單時間在 [since, until) 的單（取消/進行中不計）；v0.8 excludeStacked＝不含夾單 */
+export function samplesBetween(orders: readonly Order[], since: number, until: number, excludeStacked = false): Sample[] {
   return orders
     .filter((o) => o.status === 'delivered' && o.actualMin != null && o.acceptedAt >= since && o.acceptedAt < until)
+    .filter((o) => !(excludeStacked && o.stacked))
     .map((o) => ({ est: o.estimateMin, act: o.actualMin as number }));
 }
 
@@ -177,12 +178,22 @@ export function periodAndToday(
   const day = taipeiDayStart(now);
   const own = summarize(samplesBetween(orders, period.start, period.end), p);
   const b = baseline && baseline.periodId === period.id ? baseline : null;
+  const ownNoStacked = summarize(samplesBetween(orders, period.start, period.end, true), p);
+  const today = summarize(samplesBetween(orders, day, day + DAY_MS), p);
+  const todayNoStacked = summarize(samplesBetween(orders, day, day + DAY_MS, true), p);
   return {
     period,
     /** App 自己的紀錄（不含補登） */
     own,
     current: mergeBaseline(own, b),
-    today: summarize(samplesBetween(orders, day, day + DAY_MS), p),
+    today,
+    /** v0.8 不含夾單（補登不分夾單 → 這組不併補登，只看 App 紀錄）；stackedCount＝本期/今日已送達的夾單數 */
+    noStacked: {
+      period: ownNoStacked,
+      today: todayNoStacked,
+      stackedCount: own.count - ownNoStacked.count,
+      stackedToday: today.count - todayNoStacked.count,
+    },
   };
 }
 

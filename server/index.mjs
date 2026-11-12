@@ -373,6 +373,8 @@ const TELEMETRY_KEYWORDS = [
   '上線中', '休息中', '訂單詳情', '聯絡', '導航', '拍照', '確認取餐', '取消',
   '已拒絕', '訂單已取消', '逾時', '已過期', '已抵達', '抵達店家', '聯絡店家', '取餐',
   '訂單已完成', '已送達', '送達完成', '確認送達', '完成送達',
+  '夾單', '訂單完成', '確認已送達', '確認已取餐', '是否已取餐', '是否已送達', 'pickedup', '即將抵達', '上傳照片', '無法聯繫',
+  '筆訂單', '即將準備完成', '取餐體驗', '每單收入',
 ];
 const BUILTIN_KEYWORDS = new Set(TELEMETRY_KEYWORDS);
 /** 白名單＝內建 ∪ 目前遠端設定 telemetry.keywords 的正式名稱（設定檔由擁有者維護） */
@@ -390,6 +392,8 @@ const FIELD_RULES = {
   island: S, islandErr: S, keep: S, auth: S, fg: S, orders: N, others: S, susp: B,
   note: S, code: N, sent: N, dropped: N, beatAge: N, reason: S, cfg: S,
   result: S, wait: N, delay: N, hit: 'kw',
+  // v0.8：OCR 前後記憶體差最大值、綠色金額比例、OCR 觸發原因、夾單、鎖屏（距上次鎖屏秒數／目前是否鎖屏）
+  dMB: N, green: N, trig: S, stacked: B, lockAge: N, locked: B,
 };
 const MAX_STR = 80;
 

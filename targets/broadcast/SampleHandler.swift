@@ -17,6 +17,16 @@ import Vision
 //   接了沒（OfferTracker.swift）；接單才送 accept.delay.<秒>＋order 訊號（App 用延遲把接單時間還原成按下接受的時間）。
 //   自動送達：畫面命中 delivery.completedKeywords → 邊緣觸發送 com.pandatimer.delivered（DeliveryEdge，60 秒不重送）。
 //   記憶體保護：OCR 前目前 > ocr.memSkipMB 跳過該幀；OCR 中量到 > ocr.memHighMB → 之後 120 秒 minimumTextHeight 至少 0.03（只認大字）。
+// v0.8（首日實測：邀請只在畫面上 1~3 秒、閒置 3 秒一次 OCR 常漏；記憶體峰值 70MB；broadcast 常停）：
+//   - 每 probeIntervalSeconds（0.2）對原始幀點取樣（FrameProbe：64×64 亮度雜湊＋下方 96×160 色彩取樣，不建圖）→
+//     OcrPlanner 決定要不要 OCR：亮綠色金額（GreenEdge）或「畫面變了且靜止」立刻 OCR（最小間隔 0.6 秒），
+//     疑似邀請狀態 0.6 秒、閒置 1.5 秒（規則＝src/frameTrigger.ts，以 TS 測試為準）。
+//   - OCR 同時最多一個（busy）；每 ocr.rebuildEvery 次重建 VNRecognizeTextRequest；只用 zh-Hant（ocr.englishToo 可加回英文）；
+//     每次 OCR 前後的記憶體差最大值寫進 beat 的 dMB。
+//   - 夾單：邀請有「夾單」→ 接單時先送 com.pandatimer.offer.stacked 再送 accept.delay＋order。
+//   - 送達：「訂單完成」優先；只看到「確認已送達」對話框先待定 delivery.pendingSec 秒（DeliveryEdge＝src/deliveryDetector.ts），
+//     送出前先送 com.pandatimer.delivered.delay.<秒>；廣播停止時待定的照對話框時間送出。
+//   - broadcastPaused/Resumed 回報 pause/resume；stop 帶最後畫面（screen/kw）方便對照停止原因。
 //
 // 省記憶體（v0.4 實測峰值 43MB → v0.5 目標 ≤36MB；jetsam 約 50MB）：
 //  - 不用 CIContext：直接讀 pixel buffer 的亮度平面（420f 的 Y），只取畫面下方 50%，
@@ -33,9 +43,13 @@ class SampleHandler: RPBroadcastSampleHandler {
     detector.start()
   }
 
-  override func broadcastPaused() {}
+  override func broadcastPaused() {
+    detector.paused()
+  }
 
-  override func broadcastResumed() {}
+  override func broadcastResumed() {
+    detector.resumed()
+  }
 
   override func broadcastFinished() {
     detector.finish()
@@ -61,8 +75,12 @@ enum PandaSignal {
   /// v0.7：接單訊號前先送「從按下接受到現在的秒數」（0…60），App 在 2 秒內配對 → acceptedAt＝收到時間 − 秒數
   static let acceptDelayPrefix = "com.pandatimer.accept.delay."
   static let maxAcceptDelay = 60
-  /// v0.7 自動送達：看到完成/送達畫面（App 結最早且接單超過 minOrderAgeSec 的進行中單）
+  /// v0.7 自動送達：看到完成/送達畫面（v0.8 App 結截止最早且接單超過 minOrderAgeSec 的進行中單）
   static let delivered = "com.pandatimer.delivered"
+  /// v0.8：delivered 前先送「實際送達在幾秒前」（0…60；只看到確認對話框、等「訂單完成」逾時時 > 0）
+  static let deliveredDelayPrefix = "com.pandatimer.delivered.delay."
+  /// v0.8：夾單（在 accept.delay 之前送；App 2 秒內配對 → 訂單 stacked）
+  static let offerStacked = "com.pandatimer.offer.stacked"
 
   static func post(_ name: String) {
     CFNotificationCenterPostNotification(
@@ -87,6 +105,10 @@ enum PandaSignal {
   static func postAcceptDelay(_ seconds: Int) {
     post("\(acceptDelayPrefix)\(min(maxAcceptDelay, max(0, seconds)))")
   }
+
+  static func postDeliveredDelay(_ seconds: Int) {
+    post("\(deliveredDelayPrefix)\(min(60, max(0, seconds)))")
+  }
 }
 
 final class BroadcastDetector {
@@ -95,7 +117,7 @@ final class BroadcastDetector {
   struct DetectorSettings {
     var ocrInterval: CFAbsoluteTime = 1.5
     /// 連續 idleAfterMisses 次 OCR 都沒有接單鈕 → 改用 idleOcrInterval
-    var idleOcrInterval: CFAbsoluteTime = 3
+    var idleOcrInterval: CFAbsoluteTime = 1.5
     var idleAfterMisses = 3
     var forceOcrInterval: CFAbsoluteTime = 10
     var sameFrameMaxBits = 40  // 4096 bits 中差異 ≤40（≈1%）視為同一畫面
@@ -107,6 +129,13 @@ final class BroadcastDetector {
     var minimumTextHeight = 0.02
     var memoryAlertMB: Double = 40
     var refreshSeconds: TimeInterval = 600
+    /// v0.8 偵測更快（src/frameTrigger.ts）：疑似邀請時的 OCR 間隔、畫面變化觸發門檻（4096 bits 中）、
+    /// 變化/綠色觸發與上次 OCR 的最小間隔、每幀取樣的最小間隔、亮綠色金額觸發
+    var fastOcrInterval: CFAbsoluteTime = 0.6
+    var changeMinBits = 120
+    var changeMinGap: CFAbsoluteTime = 0.6
+    var probeInterval: CFAbsoluteTime = 0.2
+    var green = RemoteConfig.GreenTriggerSettings()
     /// 接單鈕正則、分鐘/金額規則（PickerConfig）、回報白名單關鍵字
     var rules = ScreenRules.standard
     /// v0.7 接單判定（遠端設定 "offer"；detector.goneAfterMisses 是 v0.6 用的，v0.7 改看 offer.goneAfterMisses）
@@ -132,14 +161,21 @@ final class BroadcastDetector {
       minimumTextHeight = RemoteConfig.number(d["minimumTextHeight"], 0, 0.2, minimumTextHeight)
       memoryAlertMB = RemoteConfig.number(d["memoryAlertMB"], 10, 100, memoryAlertMB)
       refreshSeconds = RemoteConfig.refreshSeconds(root)
+      fastOcrInterval = RemoteConfig.number(d["fastOcrIntervalSeconds"], 0.3, 10, fastOcrInterval)
+      changeMinBits = RemoteConfig.int(d["changeMinBits"], 1, 4096, changeMinBits)
+      changeMinGap = RemoteConfig.number(d["changeMinGapSeconds"], 0.2, 10, changeMinGap)
+      probeInterval = RemoteConfig.number(d["probeIntervalSeconds"], 0.05, 2, probeInterval)
+      green = RemoteConfig.greenTrigger(root)
       rules.picker = PickerConfig(json: RemoteConfig.section(root, "picker"))
       rules.acceptPattern = RemoteConfig.regex(d["acceptPattern"], groups: 0, rules.acceptPattern)
       if let rows = RemoteConfig.telemetry(root).keywords { rules.keywords = rows }
       offer = OfferSettings(root: root)
       rules.acceptedKeywords = offer.acceptedKeywords
       rules.rejectedKeywords = offer.rejectedKeywords
+      rules.stackedKeywords = offer.stackedKeywords
       delivery = RemoteConfig.delivery(root)
       rules.completedKeywords = delivery.completedKeywords
+      rules.finalKeywords = delivery.finalKeywords
       ocrGuard = RemoteConfig.ocr(root)
       version = RemoteConfig.version(root)
     }
@@ -158,10 +194,24 @@ final class BroadcastDetector {
 
   // lock 保護（ReplayKit 回呼執行緒 ↔ workQueue）
   private var framesReceived = 0
+  /// OCR 進行中（保證同時最多一個 OCR；進行中的幀連取樣都不做）
   private var busy = false
-  private var lastCheckStart: CFAbsoluteTime = 0
-  private var lastOcrAt: CFAbsoluteTime = 0
-  private var lastHash: [UInt64]?
+  private var lastProbeAt: CFAbsoluteTime = 0
+  private var lastOcrAt: CFAbsoluteTime?
+  /// v0.8：上次 OCR 時／上一個取樣的 64×64 雜湊
+  private var lastOcrHash: [UInt64]?
+  private var lastProbeHash: [UInt64]?
+  private let greenEdge = GreenEdge()
+  private var greenPending = false
+  private var fastUntil: CFAbsoluteTime = 0
+  /// workQueue 寫入的鏡像（取樣時判斷「疑似邀請」用）
+  private var offerActiveFlag = false
+  private var lastSawAcceptFlag = false
+  private var lastPlanSame = false
+  /// 本次心跳區間：綠色比例最大值、各觸發原因次數
+  private var greenMax: Double = 0
+  private var greenTriggers = 0
+  private var trigCounts: [String: Int] = [:]
   private var skipped = 0
   private var imageFailures = 0
   private var badFormat: OSType?
@@ -194,6 +244,10 @@ final class BroadcastDetector {
   private var lastOcrDoneAt: Date?
   private var lastScreenLogged: String?
   private var lastScreenLoggedAt: Date?
+  /// v0.8：本次心跳區間 OCR 前後記憶體差的最大值（MB）、最近一次畫面摘要（stop 時回報）
+  private var ocrDeltaMax: Double = 0
+  private var lastInfo: ScreenInfo.Summary?
+  private var lastWhy = ""
 
   // MARK: - 生命週期（由 SampleHandler 轉呼叫）
 
@@ -235,6 +289,10 @@ final class BroadcastDetector {
       self.decisionTimer?.cancel()
       self.decisionTimer = nil
       self.handleOffer(self.tracker.finish(Date()), info: nil)
+      // v0.8：只看到送達確認對話框、還在等「訂單完成」→ 照對話框時間送出（首日停止常緊接在送達對話框之後）
+      if self.currentSettings().delivery.enabled {
+        self.handleDelivery(self.deliveryEdge.finish(Date()), info: nil)
+      }
     }
     PandaSignal.post(PandaSignal.stopped)
     // 程序在這個方法 return 後就會被結束 → 等最後一則（靜音）摘要通知送出（最多 2 秒）
@@ -244,7 +302,14 @@ final class BroadcastDetector {
       self.sampleMemory()
       let text = self.diag()
       RunRecord.save(diag: "偵測已停止 \(Clock.hms(Date())) · \(text)", finished: true)
-      self.telemetry.log("stop", self.statsFields())
+      // v0.8：帶最後一次 OCR 的畫面摘要與距今秒數，對照停止原因（例如送達對話框→拍照）
+      var fields = self.statsFields()
+      if let i = self.lastInfo {
+        fields["screen"] = i.screen
+        fields["kw"] = i.kw
+      }
+      if let at = self.lastOcrDoneAt { fields["wait"] = OfferTracker.round1(Date().timeIntervalSince(at)) }
+      self.telemetry.log("stop", fields)
       self.telemetry.flush { sent.signal() }
       Task.detached {
         await Notifier.post("偵測已停止", text, passive: true)
@@ -256,6 +321,15 @@ final class BroadcastDetector {
     _ = sent.wait(timeout: .now() + 0.5)
   }
 
+  /// v0.8：ReplayKit 暫停/恢復（例如系統畫面、來電）—回報以對照停止原因
+  func paused() {
+    workQueue.async { self.telemetry.log("pause", self.statsFields(), urgent: true) }
+  }
+
+  func resumed() {
+    workQueue.async { self.telemetry.log("resume", self.statsFields(), urgent: true) }
+  }
+
   /// 每 60 秒（遠端可調）：心跳給 App；記錄本輪診斷（被系統殺掉時下次開始會回報）；峰值超過門檻發靜音通知；
   /// 每 refreshSeconds 重抓一次遠端設定
   private func heartbeat() {
@@ -264,6 +338,12 @@ final class BroadcastDetector {
     let text = diag()
     RunRecord.save(diag: text, finished: false)
     telemetry.log("beat", statsFields())
+    // dMB / green / trig 是「這個心跳區間」的值
+    ocrDeltaMax = 0
+    lock.lock()
+    greenMax = 0
+    trigCounts = [:]
+    lock.unlock()
     let s = currentSettings()
     if peakMB > s.memoryAlertMB && peakMB >= alertedPeakMB + 3 {
       alertedPeakMB = peakMB
@@ -298,6 +378,8 @@ final class BroadcastDetector {
     telemetry.setContext(["cfg": next.version])
     tracker.settings = next.offer
     tracker.dedupeSeconds = next.dedupeWindow
+    deliveryEdge.pendingSec = TimeInterval(next.delivery.pendingSec)
+    ocr.configure(englishToo: next.ocrGuard.englishToo, rebuildEvery: next.ocrGuard.rebuildEvery)
     if old.heartbeatInterval != next.heartbeatInterval, let timer = heartbeatTimer {
       timer.schedule(
         deadline: .now() + .seconds(next.heartbeatInterval), repeating: .seconds(next.heartbeatInterval),
@@ -322,22 +404,68 @@ final class BroadcastDetector {
 
   // MARK: - 每幀
 
+  /// v0.8：每 probeIntervalSeconds 取樣一次（點取樣，不建圖）→ OcrPlanner 決定要不要 OCR（規則＝src/frameTrigger.ts）。
+  /// OCR 進行中（busy）連取樣都不做 → 同時最多一個 OCR。
   func process(_ sampleBuffer: CMSampleBuffer) {
     let now = CFAbsoluteTimeGetCurrent()
     lock.lock()
     framesReceived += 1
     let s = settings
-    let shouldCheck = !busy && now - lastCheckStart >= currentInterval
-    if shouldCheck {
+    let due = !busy && now - lastProbeAt >= s.probeInterval
+    if due {
       busy = true
-      lastCheckStart = now
+      lastProbeAt = now
     }
     lock.unlock()
-    guard shouldCheck else { return }  // 節流＋忙就丟幀
+    guard due else { return }  // 節流＋OCR 進行中就丟幀
+
+    var probe: FrameProbe?
+    var format: OSType?
+    autoreleasepool {
+      (probe, format) = FrameProbe.make(sampleBuffer, hashFraction: s.bottomFraction, green: s.green)
+    }
+    guard let p = probe else {
+      lock.lock()
+      imageFailures += 1
+      if let f = format { badFormat = f }
+      busy = false
+      lock.unlock()
+      return
+    }
+
+    lock.lock()
+    let ratio = p.greenTotal > 0 ? Double(p.greenCount) / Double(p.greenTotal) : 0
+    if ratio > greenMax { greenMax = ratio }
+    let greenHit = s.green.enabled && p.greenTotal > 0 && ratio >= s.green.minRatio
+    if greenEdge.observe(hit: greenHit) {
+      greenPending = true
+      greenTriggers += 1
+      fastUntil = now + s.green.holdSec
+    }
+    let diffOcr = lastOcrHash.map { GrayFrame.distance($0, p.hash) }
+    let diffPrev = lastProbeHash.map { GrayFrame.distance($0, p.hash) }
+    lastProbeHash = p.hash
+    let fast = OcrPlanner.isFast(
+      now: now, fastUntil: fastUntil, offerActive: offerActiveFlag, lastSawAccept: lastSawAcceptFlag)
+    let plan = OcrPlanner.plan(
+      now: now, lastOcrAt: lastOcrAt, interval: fast ? s.fastOcrInterval : currentInterval, fast: fast,
+      diffFromOcr: diffOcr, diffFromPrev: diffPrev, greenPending: greenPending, s: s)
+    guard let why = plan.why else {
+      if plan.same && !lastPlanSame { skipped += 1 }  // 同畫面跳過：每段只算一次
+      lastPlanSame = plan.same
+      busy = false
+      lock.unlock()
+      return
+    }
+    lastPlanSame = false
+    greenPending = false
+    lastOcrHash = p.hash
+    lastOcrAt = now
+    trigCounts[why, default: 0] += 1
+    lock.unlock()
 
     // 在回呼內就把畫面縮成小灰階圖，不把 ReplayKit 的 pixel buffer 帶到別的執行緒
     var made: GrayFrame?
-    var format: OSType?
     autoreleasepool {
       (made, format) = GrayFrame.make(
         sampleBuffer, bottomFraction: s.bottomFraction, maxLongEdge: s.maxLongEdge)
@@ -351,21 +479,9 @@ final class BroadcastDetector {
       return
     }
 
-    lock.lock()
-    let same = lastHash.map { GrayFrame.distance($0, frame.hash) <= s.sameFrameMaxBits } ?? false
-    if same && now - lastOcrAt < s.forceOcrInterval {
-      skipped += 1
-      busy = false
-      lock.unlock()
-      return
-    }
-    lastHash = frame.hash
-    lastOcrAt = now
-    lock.unlock()
-
     workQueue.async {
       autoreleasepool {
-        self.runOCR(frame)
+        self.runOCR(frame, why: why)
       }
       self.lock.lock()
       self.busy = false
@@ -373,7 +489,7 @@ final class BroadcastDetector {
     }
   }
 
-  private func runOCR(_ frame: GrayFrame) {
+  private func runOCR(_ frame: GrayFrame, why: String) {
     // OCR 原文只活在這個函式內：立刻轉成結構化摘要（ScreenInfo），之後只用摘要（隱私鐵律：原文不上傳、不保存）
     let s = currentSettings()
     // v0.7 記憶體保護：目前已偏高就跳過這一幀（Vision 辨識當下會再往上衝十幾 MB；jetsam 約 50MB）
@@ -385,10 +501,11 @@ final class BroadcastDetector {
       let now = Date()
       if lastMemSkipLog.map({ now.timeIntervalSince($0) >= 30 }) ?? true {
         lastMemSkipLog = now
-        telemetry.log("memSkip", ["memMB": currentMB, "peakMB": peakMB, "skip": memSkips])
+        telemetry.log("memSkip", ["memMB": currentMB, "peakMB": peakMB, "skip": memSkips, "trig": why])
       }
       return
     }
+    let beforeMB = currentMB
     // OCR 中量到偏高 → 之後 120 秒只認大字（文字很多的畫面 Vision 峰值較高；接單鈕/分鐘數/完成訂單都是大字）
     let highMem = (highMemUntil.map { Date() < $0 } ?? false) || currentMB > s.ocrGuard.memSkipMB
     ocr.setMinimumTextHeight(Float(highMem ? max(s.minimumTextHeight, 0.03) : s.minimumTextHeight))
@@ -406,53 +523,87 @@ final class BroadcastDetector {
     }
     ocrCount += 1
     lastOcrDoneAt = Date()
+    lastWhy = why
+    // v0.8：這次 OCR 讓記憶體多了多少（辨識完、Vision 中間緩衝還沒釋放時量的 lastInnerMB − OCR 前）
+    ocrDeltaMax = max(ocrDeltaMax, ocr.lastInnerMB - beforeMB)
     sampleMemory()
     if ocr.lastInnerMB > s.ocrGuard.memHighMB {
       if !highMem {
-        telemetry.log("memHigh", ["memMB": ocr.lastInnerMB, "peakMB": peakMB, "screen": info.screen, "kw": info.kw])
+        telemetry.log(
+          "memHigh",
+          ["memMB": ocr.lastInnerMB, "peakMB": peakMB, "dMB": ocr.lastInnerMB - beforeMB, "screen": info.screen,
+           "kw": info.kw, "trig": why])
       }
       highMemUntil = Date().addingTimeInterval(120)
+      ocr.rebuild()  // 連 request 留著的上一批觀測結果一起放掉
     }
     lastSawAccept = info.accept
+    lastInfo = info
     missStreak = info.accept ? 0 : missStreak + 1
-    logScreenIfChanged(info)
+    logScreenIfChanged(info, why: why)
 
     // v0.7：邀請狀態機（不再「看到邀請就送訊號」；接單判定見 OfferTracker.swift）
     handleOffer(tracker.observe(Date(), OfferObservation(info)), info: info)
-    scheduleDecisionTimer()
-    // v0.7 自動送達（邊緣觸發＋60 秒不重送；App 端挑單/互斥見 DetectorHub.AutoDelivery）
+    // v0.7 自動送達（邊緣觸發＋60 秒不重送；v0.8 訂單完成優先、對話框待定；App 端挑單/互斥見 DetectorHub.AutoDelivery）
     if s.delivery.enabled {
-      switch deliveryEdge.observe(Date(), hit: info.delivered) {
-      case .send:
-        deliveredCount += 1
-        PandaSignal.post(PandaSignal.delivered)
-        telemetry.log(
-          "delivered_seen", ["hit": info.deliveredHit, "kw": info.kw, "screen": info.screen, "note": "signal"], urgent: true)
-      case .repeatSuppressed:
-        telemetry.log("delivered_seen", ["hit": info.deliveredHit, "kw": info.kw, "screen": info.screen, "note": "repeat"])
-      case .idle:
-        break
-      }
+      handleDelivery(deliveryEdge.observe(Date(), hit: info.delivered, final: info.deliveredFinal), info: info)
     }
-    // 等判定期間維持快速 OCR（要盡快看到接單後/未接畫面）
-    let fast = tracker.deadline != nil
-    let interval = (missStreak >= s.idleAfterMisses && !fast) ? s.idleOcrInterval : s.ocrInterval
+    scheduleDecisionTimer()
+    // v0.8：疑似邀請（接單鈕/判定中/綠色 hold）的快速間隔在取樣時決定；這裡只決定一般/閒置間隔
+    let interval = missStreak >= s.idleAfterMisses ? s.idleOcrInterval : s.ocrInterval
     lock.lock()
     currentInterval = interval
+    lastSawAcceptFlag = info.accept
+    offerActiveFlag = tracker.isActive
     lock.unlock()
+  }
+
+  /// v0.8 送達動作（只在 workQueue）：send＝先送延遲再送 delivered；pending＝只看到確認對話框；repeat＝60 秒內送過
+  private func handleDelivery(_ action: DeliveryEdge.Action, info: ScreenInfo.Summary?) {
+    var fields: [String: Any] = [:]
+    if let i = info {
+      fields["hit"] = i.deliveredHit
+      fields["kw"] = i.kw
+      fields["screen"] = i.screen
+    }
+    switch action {
+    case .send(let delay, let why):
+      deliveredCount += 1
+      PandaSignal.postDeliveredDelay(delay)
+      PandaSignal.post(PandaSignal.delivered)
+      fields["note"] = "signal"
+      fields["reason"] = why
+      fields["delay"] = delay
+      telemetry.log("delivered_seen", fields, urgent: true)
+    case .pending:
+      fields["note"] = "pending"
+      telemetry.log("delivered_seen", fields)
+    case .repeatSuppressed:
+      fields["note"] = "repeat"
+      telemetry.log("delivered_seen", fields)
+    case .idle:
+      break
+    }
   }
 
   // MARK: - v0.7 邀請 → 接單判定（只在 workQueue）
 
-  /// deciding 的視窗到期：畫面靜止時 ReplayKit 不送幀、OCR 不會跑 → 另排計時器推進狀態機
+  /// deciding 的視窗到期／v0.8 送達待定到期：畫面靜止時 ReplayKit 不送幀、OCR 不會跑 → 另排計時器推進狀態機
   private func scheduleDecisionTimer() {
     decisionTimer?.cancel()
     decisionTimer = nil
-    guard let deadline = tracker.deadline else { return }
+    let deadlines = [tracker.deadline, deliveryEdge.deadline].compactMap { $0 }
+    guard let deadline = deadlines.min() else { return }
     let item = DispatchWorkItem { [weak self] in
       guard let self = self else { return }
       self.decisionTimer = nil
       self.handleOffer(self.tracker.tick(Date()), info: nil)
+      if self.currentSettings().delivery.enabled {
+        self.handleDelivery(self.deliveryEdge.tick(Date()), info: nil)
+      }
+      self.lock.lock()
+      self.offerActiveFlag = self.tracker.isActive
+      self.lock.unlock()
       self.scheduleDecisionTimer()
     }
     decisionTimer = item
@@ -464,7 +615,7 @@ final class BroadcastDetector {
       switch event {
       case .seen(let offer):
         PandaSignal.postOfferPending(offer.minutes)
-        var fields: [String: Any] = ["min": offer.minutes, "note": "pending"]
+        var fields: [String: Any] = ["min": offer.minutes, "note": "pending", "trig": lastWhy, "stacked": offer.stacked]
         if let a = offer.amount { fields["amt"] = a }
         if let i = info {
           fields["kw"] = i.kw
@@ -490,7 +641,7 @@ final class BroadcastDetector {
       // note＝result 的備份：部署中的 v0.6 伺服器不認得 result/wait/hit，會丟掉
       "min": minutes, "result": d.accepted ? "accept" : "reject", "note": d.accepted ? "accept" : "reject",
       "reason": d.reason, "wait": d.waitSec,
-      "kw": d.kw, "hit": d.hit,
+      "kw": d.kw, "hit": d.hit, "stacked": d.offer.stacked,
     ]
     if let a = d.offer.amount { fields["amt"] = a }
     telemetry.log("offer_decided", fields, urgent: true)
@@ -518,13 +669,15 @@ final class BroadcastDetector {
     let seq = orderSeq
     orderSeq += 1
     let delay = OfferTracker.delaySeconds(decidedAt: now, acceptedAt: acceptedAt)
+    let stacked = d.offer.stacked
+    if stacked { PandaSignal.post(PandaSignal.offerStacked) }  // v0.8：先夾單、再延遲、最後 order
     PandaSignal.postAcceptDelay(delay)
     let sent = PandaSignal.postOrder(minutes, seq: seq)
     let text2 = diag()
     var orderFields: [String: Any] = [
       "min": minutes, "seq": seq % PandaSignal.seqMod, "triggers": triggerCount, "kw": d.kw, "accept": true,
       "memMB": currentMB, "peakMB": peakMB, "delay": delay, "reason": d.reason,
-      "note": sent ? "signal" : "outOfRange",
+      "note": sent ? "signal" : "outOfRange", "stacked": stacked,
     ]
     if let a = d.offer.amount { orderFields["amt"] = a }
     telemetry.log("order", orderFields, urgent: true)
@@ -534,10 +687,10 @@ final class BroadcastDetector {
     let seqValue = seq % PandaSignal.seqMod
     Task.detached {
       let infoDict: [String: Any] = [
-        "pandatimer": "detected", "minutes": minutes, "detectedAt": detectedMs, "seq": seqValue,
+        "pandatimer": "detected", "minutes": minutes, "detectedAt": detectedMs, "seq": seqValue, "stacked": stacked,
       ]
       await Notifier.post(
-        "已接單：\(minutes) 分鐘",
+        "已接單：\(minutes) 分鐘" + (stacked ? "（夾單）" : ""),
         amountText + "\(reasonText)。"
           + (sent ? "已通知 App 開倒數與記錄。動態島沒變→點這則打開 App" : "分鐘數超出 1–90，未通知 App")
           + "\n\(text2)",
@@ -546,7 +699,7 @@ final class BroadcastDetector {
   }
 
   /// 畫面分類或接單鈕狀態有變才記一筆（最多每 5 秒一筆，接單鈕狀態改變不受限）
-  private func logScreenIfChanged(_ info: ScreenInfo.Summary) {
+  private func logScreenIfChanged(_ info: ScreenInfo.Summary, why: String) {
     let tag = "\(info.screen)|\(info.accept)"
     let now = Date()
     guard tag != lastScreenLogged else { return }
@@ -554,7 +707,8 @@ final class BroadcastDetector {
     if !acceptChanged, let at = lastScreenLoggedAt, now.timeIntervalSince(at) < 5 { return }
     lastScreenLogged = tag
     lastScreenLoggedAt = now
-    var fields: [String: Any] = ["screen": info.screen, "accept": info.accept, "kw": info.kw]
+    var fields: [String: Any] = ["screen": info.screen, "accept": info.accept, "kw": info.kw, "trig": why]
+    if info.stacked { fields["stacked"] = true }
     if let m = info.minutes { fields["min"] = m }
     if let a = info.amount { fields["amt"] = a }
     if let km = info.km { fields["km"] = km }
@@ -568,11 +722,16 @@ final class BroadcastDetector {
     let fails = imageFailures
     let skips = skipped
     let interval = currentInterval
+    let green = greenMax
+    let trig = trigCounts.sorted { $0.key < $1.key }.map { "\($0.key)\($0.value)" }.joined(separator: " ")
     lock.unlock()
     return [
       "frames": frames, "ocr": ocrCount, "skip": skips, "fails": fails, "errs": ocrErrors,
       "memMB": currentMB, "peakMB": peakMB, "accept": lastSawAccept, "interval": interval,
       "triggers": triggerCount, "dups": dupCount,
+      // v0.8：OCR 前後記憶體差最大值、綠色比例最大值（本心跳區間）、各觸發原因的 OCR 次數（例 "change3 green1 interval40"）
+      "dMB": (ocrDeltaMax * 10).rounded() / 10, "green": (green * 10000).rounded() / 10000,
+      "trig": trig.isEmpty ? "-" : trig,
     ]
   }
 
@@ -616,30 +775,48 @@ final class BroadcastDetector {
   }
 }
 
-// MARK: - v0.7 自動送達：送達畫面的邊緣觸發（⚠️ 與 src/deliveryDetector.ts 的 DeliveryEdge 同規則）
-// 「從沒有變成有」才送一次；連 2 次 OCR 沒命中才算這次出現結束；送過後 60 秒內再出現也不送。只在 workQueue 用。
+// MARK: - v0.7 自動送達：送達畫面的邊緣觸發（⚠️ 與 src/deliveryDetector.ts 的 DeliveryEdge 同規則，以 TS 測試為準）
+// 「從沒有變成有」才動作；連 2 次 OCR 沒命中才算這次出現結束；送過後 60 秒內再出現也不送。只在 workQueue 用。
+// v0.8：命中 finalKeywords（訂單完成）→ 立刻送（delay 0）；只命中其他 completedKeywords（送達確認對話框）→ 待定，
+//   pendingSec 內出現「訂單完成」改送那個時間、到期以對話框時間送（delay＝到期 − 對話框出現）；廣播停止時待定的照樣送出。
 
 final class DeliveryEdge {
-  enum Result {
+  enum Action {
     case idle
-    case send
+    case send(delay: Int, why: String)
+    case pending
     case repeatSuppressed
   }
 
   static let goneAfterMisses = 2
   static let repeatSeconds: TimeInterval = 60
+  var pendingSec: TimeInterval = 30
   private var visible = false
   private var misses = 0
   private var lastSentAt: Date?
+  private var pendingAt: Date?
 
-  func observe(_ now: Date, hit: Bool) -> Result {
+  /// 待定到期時間（呼叫端排計時器）
+  var deadline: Date? { pendingAt.map { $0.addingTimeInterval(pendingSec) } }
+
+  func observe(_ now: Date, hit: Bool, final isFinal: Bool) -> Action {
     if hit {
       misses = 0
-      if visible { return .idle }
+      if isFinal && pendingAt != nil {
+        pendingAt = nil
+        visible = true
+        lastSentAt = now
+        return .send(delay: 0, why: "finalAfterPending")
+      }
+      if visible { return tick(now) }
       visible = true
       if let last = lastSentAt, now.timeIntervalSince(last) < Self.repeatSeconds { return .repeatSuppressed }
-      lastSentAt = now
-      return .send
+      if isFinal || pendingSec <= 0 {
+        lastSentAt = now
+        return .send(delay: 0, why: isFinal ? "final" : "immediate")
+      }
+      pendingAt = now
+      return .pending
     }
     if visible {
       misses += 1
@@ -648,7 +825,215 @@ final class DeliveryEdge {
         misses = 0
       }
     }
-    return .idle
+    return tick(now)
+  }
+
+  func tick(_ now: Date) -> Action {
+    guard let at = pendingAt, now.timeIntervalSince(at) >= pendingSec else { return .idle }
+    return flush(now, why: "timeout")
+  }
+
+  func finish(_ now: Date) -> Action {
+    pendingAt == nil ? .idle : flush(now, why: "stopped")
+  }
+
+  private func flush(_ now: Date, why: String) -> Action {
+    let at = pendingAt ?? now
+    pendingAt = nil
+    lastSentAt = now
+    let d = now.timeIntervalSince(at).rounded()
+    return .send(delay: d.isFinite ? min(60, max(0, Int(d))) : 0, why: why)
+  }
+}
+
+// MARK: - v0.8 每幀取樣（⚠️ 與 src/frameTrigger.ts 同規則）：64×64 亮度雜湊＋下方 96×160 亮綠色取樣，不建任何圖。
+// YUV（420f/420v）多讀 CbCr 平面同位置的 2 bytes；BGRA 讀同一批點換算成 YCbCr。額外記憶體：雜湊樣本 4096 個 Int（32KB，用完即丟）。
+
+struct FrameProbe {
+  static let hashGrid = 64
+  static let greenW = 96
+  static let greenH = 160
+
+  let hash: [UInt64]
+  let greenCount: Int
+  let greenTotal: Int
+
+  /// BT.601 全幅 RGB → YCbCr（同 TS rgbToYCbCr）
+  static func ycbcr(r: Int, g: Int, b: Int) -> (Int, Int, Int) {
+    func c(_ v: Double) -> Int { min(255, max(0, Int(v.rounded()))) }
+    let rd = Double(r)
+    let gd = Double(g)
+    let bd = Double(b)
+    let y = c((299 * rd + 587 * gd + 114 * bd) / 1000)
+    let cb = c(128 + (-169 * rd - 331 * gd + 500 * bd) / 1000)
+    let cr = c(128 + (500 * rd - 419 * gd - 81 * bd) / 1000)
+    return (y, cb, cr)
+  }
+
+  static func isGreen(y: Int, cb: Int, cr: Int, _ s: RemoteConfig.GreenTriggerSettings) -> Bool {
+    y >= s.yMin && cb <= s.cbMax && cr <= s.crMax
+  }
+
+  static func make(_ sampleBuffer: CMSampleBuffer, hashFraction: Double, green: RemoteConfig.GreenTriggerSettings)
+    -> (FrameProbe?, OSType?)
+  {
+    guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return (nil, nil) }
+    var orientation = CGImagePropertyOrientation.up
+    if let raw = CMGetAttachment(
+      sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber,
+      let o = CGImagePropertyOrientation(rawValue: raw.uint32Value)
+    {
+      orientation = o
+    }
+    let format = CVPixelBufferGetPixelFormatType(pb)
+    let isBGRA = format == kCVPixelFormatType_32BGRA
+    let isYUV =
+      format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+      || format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    guard isBGRA || isYUV else { return (nil, format) }
+
+    CVPixelBufferLockBaseAddress(pb, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+    let base: UnsafeMutableRawPointer?
+    var chroma: UnsafeMutableRawPointer?
+    var chromaStride = 0
+    let width: Int
+    let height: Int
+    let stride: Int
+    if isYUV {
+      base = CVPixelBufferGetBaseAddressOfPlane(pb, 0)
+      width = CVPixelBufferGetWidthOfPlane(pb, 0)
+      height = CVPixelBufferGetHeightOfPlane(pb, 0)
+      stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+      chroma = CVPixelBufferGetBaseAddressOfPlane(pb, 1)
+      chromaStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+    } else {
+      base = CVPixelBufferGetBaseAddress(pb)
+      width = CVPixelBufferGetWidth(pb)
+      height = CVPixelBufferGetHeight(pb)
+      stride = CVPixelBufferGetBytesPerRow(pb)
+    }
+    guard let raw = base, width > 0, height > 0, !isYUV || chroma != nil else { return (nil, nil) }
+    let src = raw.assumingMemoryBound(to: UInt8.self)
+    let csrc = chroma?.assumingMemoryBound(to: UInt8.self)
+    let up = orientation == .up
+
+    // 亮度雜湊（裁切同 GrayFrame：直立只看下方 hashFraction）
+    let n = hashGrid
+    let hy0 = up ? Int(Double(height) * (1 - hashFraction)) : 0
+    let hH = max(1, height - hy0)
+    var samples = [Int](repeating: 0, count: n * n)
+    var total = 0
+    for j in 0..<n {
+      let sy = min(height - 1, hy0 + (j * hH + hH / 2) / n)
+      let row = src + sy * stride
+      for i in 0..<n {
+        let sx = min(width - 1, (i * width + width / 2) / n)
+        let v: Int
+        if isYUV {
+          v = Int(row[sx])
+        } else {
+          let p = row + sx * 4
+          v = (Int(p[0]) + 2 * Int(p[1]) + Int(p[2])) >> 2
+        }
+        samples[j * n + i] = v
+        total += v
+      }
+    }
+    let mean = total / (n * n)
+    var bits = [UInt64](repeating: 0, count: n * n / 64)
+    for i in 0..<(n * n) where samples[i] > mean {
+      bits[i >> 6] |= UInt64(1) << UInt64(i & 63)
+    }
+
+    // 亮綠色取樣（下方 regionFraction）
+    var greenCount = 0
+    var greenTotal = 0
+    if green.enabled {
+      let gy0 = up ? Int(Double(height) * (1 - green.regionFraction)) : 0
+      let gH = max(1, height - gy0)
+      for j in 0..<greenH {
+        let sy = min(height - 1, gy0 + (j * gH + gH / 2) / greenH)
+        let row = src + sy * stride
+        for i in 0..<greenW {
+          let sx = min(width - 1, (i * width + width / 2) / greenW)
+          var y = 0
+          var cb = 128
+          var cr = 128
+          if let c = csrc {
+            y = Int(row[sx])
+            let cp = c + (sy >> 1) * chromaStride + (sx >> 1) * 2
+            cb = Int(cp[0])
+            cr = Int(cp[1])
+          } else {
+            let p = row + sx * 4
+            (y, cb, cr) = ycbcr(r: Int(p[2]), g: Int(p[1]), b: Int(p[0]))
+          }
+          greenTotal += 1
+          if isGreen(y: y, cb: cb, cr: cr, green) { greenCount += 1 }
+        }
+      }
+    }
+    return (FrameProbe(hash: bits, greenCount: greenCount, greenTotal: greenTotal), nil)
+  }
+}
+
+/// 綠色邊緣觸發（同 TS GreenEdge）：從沒有變成有 → true；連 2 次取樣沒有才算消失。呼叫端持 lock
+final class GreenEdge {
+  static let goneAfter = 2
+  private var on = false
+  private var misses = 0
+
+  func observe(hit: Bool) -> Bool {
+    if hit {
+      misses = 0
+      if on { return false }
+      on = true
+      return true
+    }
+    if on {
+      misses += 1
+      if misses >= Self.goneAfter {
+        on = false
+        misses = 0
+      }
+    }
+    return false
+  }
+}
+
+/// 要不要現在 OCR（同 TS planOcr / isFast；時間：秒）
+enum OcrPlanner {
+  /// 疑似邀請狀態下，同畫面最多跳過這麼久（秒）
+  static let fastForceSeconds: CFAbsoluteTime = 2
+
+  struct Plan {
+    /// nil＝不 OCR；否則 first / green / change / interval / force
+    let why: String?
+    /// 不 OCR 的原因是「同畫面」（否則是還沒到間隔）
+    let same: Bool
+  }
+
+  static func isFast(now: CFAbsoluteTime, fastUntil: CFAbsoluteTime, offerActive: Bool, lastSawAccept: Bool) -> Bool {
+    offerActive || lastSawAccept || now < fastUntil
+  }
+
+  static func plan(
+    now: CFAbsoluteTime, lastOcrAt: CFAbsoluteTime?, interval: CFAbsoluteTime, fast: Bool,
+    diffFromOcr: Int?, diffFromPrev: Int?, greenPending: Bool, s: BroadcastDetector.DetectorSettings
+  ) -> Plan {
+    guard let last = lastOcrAt else { return Plan(why: "first", same: false) }
+    let since = now - last
+    if since >= s.changeMinGap {
+      if greenPending { return Plan(why: "green", same: false) }
+      let settled = diffFromPrev.map { $0 <= s.sameFrameMaxBits } ?? false
+      if let d = diffFromOcr, d > s.changeMinBits, settled { return Plan(why: "change", same: false) }
+    }
+    if since < interval { return Plan(why: nil, same: false) }
+    let same = diffFromOcr.map { $0 <= s.sameFrameMaxBits } ?? false
+    if !same { return Plan(why: "interval", same: false) }
+    let force = fast ? min(s.forceOcrInterval, fastForceSeconds) : s.forceOcrInterval
+    return since >= force ? Plan(why: "force", same: false) : Plan(why: nil, same: true)
   }
 }
 
@@ -660,7 +1045,6 @@ struct GrayFrame {
   /// 灰階位元組（Data：cgImage() 直接包成 CGDataProvider，不再複製）
   let pixels: Data
   let orientation: CGImagePropertyOrientation
-  let hash: [UInt64]  // 64×64 平均雜湊，4096 bits
 
   /// 失敗時回傳 (nil, 不支援的像素格式或 nil)
   static func make(_ sampleBuffer: CMSampleBuffer, bottomFraction: Double, maxLongEdge: Int)
@@ -749,33 +1133,11 @@ struct GrayFrame {
         }
       }
     }
-    let frame = GrayFrame(
-      width: outW, height: outH, pixels: Data(pixels), orientation: orientation,
-      hash: averageHash(pixels, width: outW, height: outH))
+    let frame = GrayFrame(width: outW, height: outH, pixels: Data(pixels), orientation: orientation)
     return (frame, nil)
   }
 
-  static func averageHash(_ pixels: [UInt8], width: Int, height: Int) -> [UInt64] {
-    let n = 64
-    var samples = [Int](repeating: 0, count: n * n)
-    var total = 0
-    for y in 0..<n {
-      let sy = min(height - 1, y * height / n)
-      for x in 0..<n {
-        let sx = min(width - 1, x * width / n)
-        let v = Int(pixels[sy * width + sx])
-        samples[y * n + x] = v
-        total += v
-      }
-    }
-    let mean = total / (n * n)
-    var bits = [UInt64](repeating: 0, count: n * n / 64)
-    for i in 0..<(n * n) where samples[i] > mean {
-      bits[i >> 6] |= UInt64(1) << UInt64(i & 63)
-    }
-    return bits
-  }
-
+  /// 雜湊距離（v0.8 雜湊改由 FrameProbe 每次取樣產生）
   static func distance(_ a: [UInt64], _ b: [UInt64]) -> Int {
     guard a.count == b.count else { return Int.max }
     var d = 0
@@ -792,28 +1154,62 @@ struct GrayFrame {
   }
 }
 
-// MARK: - OCR（request 只建一次重用；行合併邏輯同 native/intents/PandaIntents.swift 的 ScreenshotOCR）
+// MARK: - OCR（行合併邏輯同 native/intents/PandaIntents.swift 的 ScreenshotOCR）
+// v0.8：request 重用，但每 ocr.rebuildEvery 次（或量到 memHigh）重建——重用的 request 會一直抱著上一批觀測結果，
+//   重建也讓 Vision 放掉跟這個 request 綁的中間狀態；語言只用 zh-Hant（ocr.englishToo=true 才加 en-US，少載一個語言模型；
+//   數字、$、公里、分鐘在 zh-Hant 模型可辨——實機待驗，不行就遠端把 englishToo 打開）。
 
 final class FrameOCR {
-  private let request: VNRecognizeTextRequest = {
+  private var request: VNRecognizeTextRequest
+  private var languages = ["zh-Hant"]
+  private var minimumTextHeight: Float = 0.02
+  private var uses = 0
+  private var rebuildEvery = 30
+  /// 重建次數（診斷用）
+  private(set) var rebuilds = 0
+
+  init() {
+    request = Self.makeRequest(languages: ["zh-Hant"], minimumTextHeight: 0.02)
+  }
+
+  private static func makeRequest(languages: [String], minimumTextHeight: Float) -> VNRecognizeTextRequest {
     let r = VNRecognizeTextRequest()
     r.recognitionLevel = .accurate  // .fast 不支援中文
-    r.recognitionLanguages = ["zh-Hant", "en-US"]
+    r.recognitionLanguages = languages
     r.usesLanguageCorrection = false
     // 固定 revision（iOS 16+ 的 rev3 支援中文）：不讓系統依 SDK 預設挑，也避免載入其他版本的模型
     r.revision = VNRecognizeTextRequestRevision3
     // 相對圖高；直立裁切後圖高＝長邊 640 → 約 13px 以下的字略過（≈ 原畫面 9pt 以下）。
     // 27 分鐘（大字）、110.26 $、接受訂單（按鈕字）都在 15pt 以上 → 縮圖後約 20px 以上，不受影響。
-    r.minimumTextHeight = 0.02
+    r.minimumTextHeight = minimumTextHeight
     return r
-  }()
+  }
 
   /// v0.7：最近一次 OCR 辨識完當下的記憶體（MB）；只在 workQueue 讀寫
   private(set) var lastInnerMB: Double = 0
 
   /// v0.6 遠端設定 detector.minimumTextHeight；只在 workQueue 呼叫
   func setMinimumTextHeight(_ value: Float) {
-    if request.minimumTextHeight != value { request.minimumTextHeight = value }
+    guard minimumTextHeight != value else { return }
+    minimumTextHeight = value
+    request.minimumTextHeight = value
+  }
+
+  /// v0.8 遠端設定 ocr.englishToo / rebuildEvery；只在 workQueue 呼叫
+  func configure(englishToo: Bool, rebuildEvery: Int) {
+    self.rebuildEvery = max(1, rebuildEvery)
+    let langs = englishToo ? ["zh-Hant", "en-US"] : ["zh-Hant"]
+    if langs != languages {
+      languages = langs
+      rebuild()
+    }
+  }
+
+  /// 丟掉舊 request（連同它抱著的上一批結果）換新的；只在 workQueue 呼叫
+  func rebuild() {
+    request = Self.makeRequest(languages: languages, minimumTextHeight: minimumTextHeight)
+    uses = 0
+    rebuilds += 1
   }
 
   /// 只在 workQueue 呼叫（request 不是執行緒安全的）
@@ -825,6 +1221,8 @@ final class FrameOCR {
       let height: CGFloat
     }
     // handler 與 observations 只活在這個 autoreleasepool 內：取出字串/位置後立刻釋放（Vision 的中間緩衝跟著走）
+    if uses >= rebuildEvery { rebuild() }
+    uses += 1
     var pieces: [Piece] = []
     var failure: Error?
     autoreleasepool {

@@ -117,3 +117,40 @@ test('v0.7 實機修正：同一張邀請先沒抓到金額、後來抓到 → �
   assert.equal(sameOffer(27, 0, 27, 98.4), true);
   assert.equal(sameOffer(27, 110.26, 18, 110.26), false);
 });
+
+test('v0.8 首日實測畫面：暗色主題邀請 → 接單後畫面判定接單；夾單邀請標 stacked（任一次看到就算）', () => {
+  const s = (text) => summarizeScreen(text);
+  const invite = '每單收入\n85.76 $\n(5.8 公里) ⓘ\n21 分鐘\n店名\n地址\n送餐資訊\n接受訂單';
+  const stackedInvite = '夾單訂單依系統顯示金額為主\n+49.01 $\n(2.1 公里)\n12 分鐘\n店名A\n店名B\n接受訂單';
+  const after = '店名\n預計7分鐘後抵達店家・1筆訂單\n再 8 分鐘即將準備完成\n#7318\n取餐體驗如何呢?記得邀請店家給好評!';
+  const si = s(invite);
+  assert.deepEqual([si.accept, si.minutes, si.amount, si.km, si.stacked], [true, 21, 85.76, 5.8, false]);
+  const ss = s(stackedInvite);
+  assert.deepEqual([ss.accept, ss.minutes, ss.amount, ss.stacked], [true, 12, 49.01, true]);
+  assert.ok(ss.kw.includes('夾單'));
+  const sa = s(after);
+  assert.deepEqual([sa.offerAccepted, sa.offerRejected], [true, false]);
+  for (const k of ['抵達店家', '筆訂單', '即將準備完成', '取餐體驗']) assert.ok(sa.kw.includes(k), k);
+  // 一般邀請 → 接單後畫面：accepted、不是夾單
+  let t = new OfferTracker(DEFAULT_OFFER, 90);
+  const ev = [...t.observe(0, si), ...t.observe(0.6, s('')), ...t.observe(1.2, s('')), ...t.observe(1.8, sa)];
+  const d = ev.find((e) => e.type === 'decided');
+  assert.deepEqual([d.result, d.reason, d.offer.stacked, d.acceptedAt], ['accept', 'accepted', false, 0.6]);
+  // 夾單字樣只在第二次 OCR 出現 → 仍標 stacked；active 在判定前為 true、判定後 false
+  t = new OfferTracker(DEFAULT_OFFER, 90);
+  const noBanner = s('+49.01 $\n12 分鐘\n接受訂單');
+  assert.equal(noBanner.stacked, false);
+  t.observe(0, noBanner);
+  assert.equal(t.active, true);
+  t.observe(0.6, ss);
+  t.observe(1.2, s(''));
+  t.observe(1.8, s(''));
+  const d2 = t.observe(2.4, sa).find((e) => e.type === 'decided');
+  assert.equal(d2.offer.stacked, true);
+  assert.equal(t.active, false);
+  // Swift 同步
+  const sw = read('../targets/broadcast/OfferTracker.swift');
+  assert.equal([...sw.matchAll(/if o\.stacked \{ seen\.stacked = true \}/g)].length, 3);
+  assert.ok(sw.includes('stacked: o.stacked)'));
+  assert.ok(read('../targets/broadcast/OrderDetector.swift').includes('stacked: stacked)'));
+});

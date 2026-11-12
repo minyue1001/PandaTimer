@@ -9,10 +9,14 @@ import { DEFAULT_OFFER, type OfferSettings } from './offerTracker.ts';
 import { DEFAULT_STATS, type StatsParams } from './stats.ts';
 import { DEFAULT_PAY, type PayParams } from './earnings.ts';
 import { DEFAULT_DELIVERY, type DeliverySettings } from './deliveryDetector.ts';
+import { DEFAULT_GREEN, type GreenTriggerSettings } from './frameTrigger.ts';
 
-/** v0.7 extension OCR 記憶體保護 */
-export type OcrSettings = { memSkipMB: number; memHighMB: number };
-export const DEFAULT_OCR: Readonly<OcrSettings> = Object.freeze({ memSkipMB: 38, memHighMB: 44 });
+/** v0.7 extension OCR 記憶體保護；v0.8 每 rebuildEvery 次 OCR 重建 VNRecognizeTextRequest、englishToo=false 只用 zh-Hant */
+export type OcrSettings = { memSkipMB: number; memHighMB: number; rebuildEvery: number; englishToo: boolean };
+export const DEFAULT_OCR: Readonly<OcrSettings> = Object.freeze({ memSkipMB: 36, memHighMB: 44, rebuildEvery: 30, englishToo: false });
+
+/** v0.8 telemetry.keywords 最多幾列（v0.7 是 40；超過時 v0.7 App 會整份改用內建白名單） */
+export const MAX_KEYWORD_ROWS = 60;
 
 export type DetectorSettings = {
   acceptPattern: string;
@@ -29,6 +33,12 @@ export type DetectorSettings = {
   heartbeatSeconds: number;
   memoryAlertMB: number;
   configRefreshSeconds: number;
+  /** v0.8 偵測更快（src/frameTrigger.ts） */
+  fastOcrIntervalSeconds: number;
+  changeMinBits: number;
+  changeMinGapSeconds: number;
+  probeIntervalSeconds: number;
+  greenTrigger: GreenTriggerSettings;
 };
 
 export type TelemetrySettings = { keywords: string[][]; flushSeconds: number; batchSize: number };
@@ -57,7 +67,7 @@ export const DEFAULT_DETECTOR: Readonly<DetectorSettings> = Object.freeze({
   dedupeSeconds: 90,
   goneAfterMisses: 2,
   ocrIntervalSeconds: 1.5,
-  idleOcrIntervalSeconds: 3,
+  idleOcrIntervalSeconds: 1.5,
   idleAfterMisses: 3,
   forceOcrSeconds: 10,
   bottomFraction: 0.5,
@@ -67,12 +77,17 @@ export const DEFAULT_DETECTOR: Readonly<DetectorSettings> = Object.freeze({
   heartbeatSeconds: 60,
   memoryAlertMB: 40,
   configRefreshSeconds: 600,
+  fastOcrIntervalSeconds: 0.6,
+  changeMinBits: 120,
+  changeMinGapSeconds: 0.6,
+  probeIntervalSeconds: 0.2,
+  greenTrigger: { ...DEFAULT_GREEN },
 });
 
 export const DEFAULT_CONFIG: Readonly<RemoteConfig> = Object.freeze({
   version: 'default',
   picker: { ...DEFAULT_PICKER, keywords: [...DEFAULT_PICKER.keywords] },
-  detector: { ...DEFAULT_DETECTOR },
+  detector: { ...DEFAULT_DETECTOR, greenTrigger: { ...DEFAULT_GREEN } },
   telemetry: { keywords: UI_KEYWORDS.map((r) => [...r]), flushSeconds: 30, batchSize: 10 },
   app: { beatTimeoutSeconds: 150 },
   offer: { ...DEFAULT_OFFER },
@@ -104,6 +119,16 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'detector.heartbeatSeconds': [15, 600, true],
   'detector.memoryAlertMB': [10, 100, false],
   'detector.configRefreshSeconds': [60, 86400, true],
+  'detector.fastOcrIntervalSeconds': [0.3, 10, false],
+  'detector.changeMinBits': [1, 4096, true],
+  'detector.changeMinGapSeconds': [0.2, 10, false],
+  'detector.probeIntervalSeconds': [0.05, 2, false],
+  'detector.greenTrigger.minRatio': [0.0001, 0.5, false],
+  'detector.greenTrigger.yMin': [0, 255, true],
+  'detector.greenTrigger.cbMax': [0, 255, true],
+  'detector.greenTrigger.crMax': [0, 255, true],
+  'detector.greenTrigger.holdSec': [1, 120, false],
+  'detector.greenTrigger.regionFraction': [0.2, 1, false],
   'telemetry.flushSeconds': [5, 600, true],
   'telemetry.batchSize': [1, 50, true],
   'app.beatTimeoutSeconds': [60, 1800, true],
@@ -114,9 +139,14 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'pay.ratePerMinute': [0.1, 100, false],
   'pay.minFare': [0, 1000, false],
   'delivery.minOrderAgeSec': [0, 1800, true],
+  'delivery.pendingSec': [0, 60, true], // 延遲訊號只編 0~60 秒
   'ocr.memSkipMB': [20, 60, false],
   'ocr.memHighMB': [25, 80, false],
+  'ocr.rebuildEvery': [1, 1000, true],
 };
+
+/** 布林欄位 */
+const BOOL_FIELDS = new Set(['delivery.enabled', 'pay.assumeStarredLate', 'ocr.englishToo', 'detector.greenTrigger.enabled']);
 
 /** 正則欄位：要編得過，且（需要的）至少 1 個捕捉群組 */
 const REGEX_FIELDS: Record<string, { flags: string; groups: number }> = {
@@ -126,7 +156,9 @@ const REGEX_FIELDS: Record<string, { flags: string; groups: number }> = {
   'detector.acceptPattern': { flags: '', groups: 0 },
   'offer.acceptedKeywords': { flags: '', groups: 0 },
   'offer.rejectedKeywords': { flags: '', groups: 0 },
+  'offer.stackedKeywords': { flags: '', groups: 0 },
   'delivery.completedKeywords': { flags: '', groups: 0 },
+  'delivery.finalKeywords': { flags: '', groups: 0 },
 };
 
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
@@ -153,45 +185,7 @@ export function validateConfig(raw: unknown): { config: RemoteConfig; problems: 
     const s = src[section];
     if (s !== undefined && !isObj(s)) problems.push(`${section} 不是物件`);
     const sec = isObj(s) ? s : {};
-    const target = out[section] as Record<string, unknown>;
-    for (const key of Object.keys(target)) {
-      const path = `${section}.${key}`;
-      if (!(key in sec)) {
-        problems.push(`${path} 缺漏 → 用預設`);
-        continue;
-      }
-      const v = sec[key];
-      const range = RANGES[path];
-      const regex = REGEX_FIELDS[path];
-      if (range) {
-        const [min, max, int] = range;
-        if (typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max && (!int || Number.isInteger(v))) target[key] = v;
-        else problems.push(`${path}=${JSON.stringify(v)} 不在 ${min}~${max}${int ? '（整數）' : ''} → 用預設`);
-      } else if (regex) {
-        const g = typeof v === 'string' && v.length > 0 && v.length <= 300 ? captureGroups(v, regex.flags) : null;
-        // 能命中空字串的（例如 'a|' 或 '.*'）一律不收：每個畫面都會「命中」
-        if (g != null && g >= regex.groups && !((path.startsWith('offer.') || path.startsWith('delivery.')) && new RegExp(v as string, regex.flags).test(''))) target[key] = v;
-        else problems.push(`${path} 正則編不過或捕捉群組不足 → 用預設`);
-      } else if (path === 'delivery.enabled') {
-        if (typeof v === 'boolean') target[key] = v;
-        else problems.push(`${path} 要是 true/false → 用預設`);
-      } else if (path === 'pay.assumeStarredLate') {
-        if (typeof v === 'boolean') target[key] = v;
-        else problems.push(`${path} 要是 true/false → 用預設`);
-      } else if (path === 'offer.ambiguousAs') {
-        if (v === 'accept' || v === 'reject') target[key] = v;
-        else problems.push(`${path} 要是 "accept" 或 "reject" → 用預設`);
-      } else if (path === 'picker.keywords') {
-        if (Array.isArray(v) && v.length >= 1 && v.length <= 40 && v.every((x) => typeof x === 'string' && x.length >= 1 && x.length <= 10)) target[key] = [...v];
-        else problems.push(`${path} 要是 1~40 個 1~10 字的字串 → 用預設`);
-      } else if (path === 'telemetry.keywords') {
-        const ok = Array.isArray(v) && v.length >= 1 && v.length <= 40 &&
-          v.every((row) => Array.isArray(row) && row.length >= 1 && row.length <= 6 &&
-            row.every((x) => typeof x === 'string' && x.length >= 1 && x.length <= 12));
-        if (ok) target[key] = (v as string[][]).map((r) => [...r]);
-        else problems.push(`${path} 要是 [[正式名稱, 異體...], ...]（每字 ≤12）→ 用預設`);
-      }
-    }
+    checkFields(section, sec, out[section] as Record<string, unknown>, problems);
   }
   // 交叉檢查
   if (out.picker.minMinutes > out.picker.maxMinutes) {
@@ -205,4 +199,48 @@ export function validateConfig(raw: unknown): { config: RemoteConfig; problems: 
     out.picker.maxAmount = DEFAULT_PICKER.maxAmount;
   }
   return { config: out, problems };
+}
+
+/** 一個區塊（或巢狀物件，例如 detector.greenTrigger）的欄位逐一驗證；target 先放預設，合法才覆寫 */
+function checkFields(prefix: string, sec: Record<string, unknown>, target: Record<string, unknown>, problems: string[]): void {
+  for (const key of Object.keys(target)) {
+      const path = `${prefix}.${key}`;
+      if (!(key in sec)) {
+        problems.push(`${path} 缺漏 → 用預設`);
+        continue;
+      }
+      const v = sec[key];
+      if (isObj(target[key])) {
+        if (isObj(v)) checkFields(path, v, target[key] as Record<string, unknown>, problems);
+        else problems.push(`${path} 不是物件 → 用預設`);
+        continue;
+      }
+      const range = RANGES[path];
+      const regex = REGEX_FIELDS[path];
+      if (range) {
+        const [min, max, int] = range;
+        if (typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max && (!int || Number.isInteger(v))) target[key] = v;
+        else problems.push(`${path}=${JSON.stringify(v)} 不在 ${min}~${max}${int ? '（整數）' : ''} → 用預設`);
+      } else if (regex) {
+        const g = typeof v === 'string' && v.length > 0 && v.length <= 300 ? captureGroups(v, regex.flags) : null;
+        // 能命中空字串的（例如 'a|' 或 '.*'）一律不收：每個畫面都會「命中」
+        if (g != null && g >= regex.groups && !((path.startsWith('offer.') || path.startsWith('delivery.')) && new RegExp(v as string, regex.flags).test(''))) target[key] = v;
+        else problems.push(`${path} 正則編不過或捕捉群組不足 → 用預設`);
+      } else if (BOOL_FIELDS.has(path)) {
+        if (typeof v === 'boolean') target[key] = v;
+        else problems.push(`${path} 要是 true/false → 用預設`);
+      } else if (path === 'offer.ambiguousAs') {
+        if (v === 'accept' || v === 'reject') target[key] = v;
+        else problems.push(`${path} 要是 "accept" 或 "reject" → 用預設`);
+      } else if (path === 'picker.keywords') {
+        if (Array.isArray(v) && v.length >= 1 && v.length <= 40 && v.every((x) => typeof x === 'string' && x.length >= 1 && x.length <= 10)) target[key] = [...v];
+        else problems.push(`${path} 要是 1~40 個 1~10 字的字串 → 用預設`);
+      } else if (path === 'telemetry.keywords') {
+        const ok = Array.isArray(v) && v.length >= 1 && v.length <= MAX_KEYWORD_ROWS &&
+          v.every((row) => Array.isArray(row) && row.length >= 1 && row.length <= 6 &&
+            row.every((x) => typeof x === 'string' && x.length >= 1 && x.length <= 12));
+        if (ok) target[key] = (v as string[][]).map((r) => [...r]);
+        else problems.push(`${path} 要是 1~${MAX_KEYWORD_ROWS} 列 [[正式名稱, 異體...], ...]（每字 ≤12）→ 用預設`);
+      }
+  }
 }

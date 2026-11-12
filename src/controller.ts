@@ -4,6 +4,7 @@ import { activeMirror, applyNativeEvents, orphanActivityIds, parseNativeEvents }
 import { cancelReminders, scheduleReminders } from './notify';
 import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, parseDeepLink, type Order } from './orders';
 import { addTombstones, applyPrune, dropTombstonedEvents, planPrune, type PruneCriteria, type PrunePlan } from './prune';
+import { planImport, type ImportPlan, type ImportRow } from './importLink';
 import { getOrders, loadTombstones, mutate, saveTombstones, subscribe } from './store';
 
 export type Feedback = (msg: string) => void;
@@ -102,6 +103,23 @@ export async function cancelOrder(id: string): Promise<void> {
     return { orders: list.map((o) => (o.id === id ? updated : o)), result: updated };
   });
   await cleanup(canceled);
+}
+
+/** v0.8 匯入預覽（確認視窗用；重複判定以目前紀錄為準） */
+export async function previewImport(rows: readonly ImportRow[]): Promise<ImportPlan> {
+  return planImport(await getOrders(), rows);
+}
+
+/**
+ * v0.8 匯入補記單：在 mutate 內以最新紀錄重算重複（確認視窗開著時可能剛好入帳新單），只寫已送達單。
+ * 不開動態島、不排通知（鏡像只含進行中單，所以原生也不受影響）。
+ */
+export async function importOrders(rows: readonly ImportRow[]): Promise<ImportPlan> {
+  const plan = await mutate<ImportPlan>((list) => {
+    const p = planImport(list, rows);
+    return { orders: [...p.add, ...list], result: p };
+  });
+  return plan ?? planImport([], []);
 }
 
 /** 預覽：這個條件會刪哪些單（確認視窗用） */
@@ -224,17 +242,30 @@ export function initNativeBridge(feedback?: Feedback): () => void {
 
 let lastHandled: { url: string; at: number } | null = null;
 
+/** v0.8 pandatimer://import?d=…（UI 端跳確認視窗，見 App.tsx） */
+export type ImportLinkHandler = (url: string) => void;
+const isImportUrl = (url: string) => /^pandatimer:\/*import\b/i.test(url.trim());
+
 export async function handleUrl(
   url: string | null | undefined,
   getDefaultEstimate: () => number,
   feedback?: Feedback,
+  onImport?: ImportLinkHandler,
 ): Promise<void> {
-  const link = parseDeepLink(url);
-  if (!link || !url) return;
+  if (!url) return;
+  const importing = isImportUrl(url);
+  const link = importing ? null : parseDeepLink(url);
+  if (!link && !importing) return;
   // 同一個 URL 在 3 秒內只處理一次（冷啟動 initialURL 與 url 事件可能重複）
   const now = Date.now();
   if (lastHandled && lastHandled.url === url && now - lastHandled.at < 3000) return;
   lastHandled = { url, at: now };
+  if (importing) {
+    if (onImport) onImport(url);
+    else feedback?.('這個版本還不能匯入訂單');
+    return;
+  }
+  if (!link) return;
 
   if (link.action === 'start') {
     const min = link.min ?? getDefaultEstimate() ?? DEFAULT_ESTIMATE;
@@ -251,10 +282,14 @@ export async function handleUrl(
 }
 
 /** 掛上 deep link：冷啟動的 initial URL ＋ 執行中收到的 url 事件 */
-export function listenDeepLinks(getDefaultEstimate: () => number, feedback?: Feedback): () => void {
+export function listenDeepLinks(
+  getDefaultEstimate: () => number,
+  feedback?: Feedback,
+  onImport?: ImportLinkHandler,
+): () => void {
   const sub = Linking.addEventListener('url', ({ url }) => {
-    void handleUrl(url, getDefaultEstimate, feedback);
+    void handleUrl(url, getDefaultEstimate, feedback, onImport);
   });
-  void Linking.getInitialURL().then((url) => handleUrl(url, getDefaultEstimate, feedback));
+  void Linking.getInitialURL().then((url) => handleUrl(url, getDefaultEstimate, feedback, onImport));
   return () => sub.remove();
 }

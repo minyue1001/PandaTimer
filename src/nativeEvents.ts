@@ -18,6 +18,8 @@ export type NativeStartEvent = {
   activityId?: string;
   notifIds?: string[];
   source?: 'auto';
+  /** v0.8 夾單（DetectorHub 配對 com.pandatimer.offer.stacked） */
+  stacked?: boolean;
 };
 export type NativeDoneEvent = { type: 'done'; at: number; orderId?: string; activityId?: string };
 export type NativeEvent = NativeStartEvent | NativeDoneEvent;
@@ -42,6 +44,7 @@ export function parseNativeEvents(raw: unknown): NativeEvent[] {
         activityId: isStr(r.activityId) ? r.activityId : undefined,
         notifIds: Array.isArray(r.notifIds) ? r.notifIds.filter(isStr) : [],
         ...(r.source === 'auto' ? { source: 'auto' as const } : {}),
+        ...(r.stacked === true ? { stacked: true } : {}),
       });
     } else if (r.type === 'done' && isNum(r.at)) {
       out.push({
@@ -87,6 +90,7 @@ export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order
           activityId: ev.activityId,
           notifIds: ev.notifIds ?? [],
           ...(ev.source ? { source: ev.source } : {}),
+          ...(ev.stacked ? { stacked: true } : {}),
         },
         ...list,
       ];

@@ -216,3 +216,21 @@ test('三期真實報酬單：準時/超時率接近官方（43/19、45/19、40/
   console.log('三期（準時%/超時%）', JSON.stringify(got));
   assert.deepEqual(got, { 20260928: [43, 19], 20261012: [45, 19], 20261026: [40, 21] });
 });
+
+test('v0.8 不含夾單的準時率/超時率（本期與今日；不併補登）', async () => {
+  const { periodAndToday } = await import('../src/stats.ts');
+  const now = Date.UTC(2026, 10, 12, 6, 0); // 台北 14:00
+  const mk = (id, minAgo, est, act, stacked) => ({
+    id, acceptedAt: now - minAgo * 60_000, estimateMin: est, deadline: now - minAgo * 60_000 + est * 60_000,
+    status: 'delivered', actualMin: act, deliveredAt: now - minAgo * 60_000 + act * 60_000, ...(stacked ? { stacked: true } : {}),
+  });
+  const orders = [mk('a', 120, 20, 18), mk('b', 100, 12, 30, true), mk('c', 60, 15, 20)];
+  const r = periodAndToday(orders, now);
+  assert.equal(r.own.count, 3);
+  assert.equal(r.noStacked.stackedCount, 1);
+  assert.equal(r.noStacked.stackedToday, 1);
+  assert.equal(r.noStacked.period.count, 2);
+  assert.equal(r.noStacked.period.onTimeRate, 0.5); // a 準時、c 超時（20 > 15.75）
+  assert.equal(r.noStacked.today.count, 2);
+  assert.ok(r.noStacked.period.overrunRate < r.own.overrunRate);
+});

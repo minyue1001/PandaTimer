@@ -35,6 +35,7 @@ final class PandaTelemetry {
     "island", "islandErr", "keep", "auth", "fg", "orders", "others", "susp",
     "note", "code", "sent", "dropped", "beatAge", "reason", "cfg",
     "result", "wait", "delay", "hit",
+    "dMB", "green", "trig", "stacked", "lockAge", "locked",
   ]
 
   private let endpoint: URL?

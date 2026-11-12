@@ -15,8 +15,9 @@
 //   v0.7 實機修正：「同一張」＝分鐘相同且（金額相同或任一方沒抓到金額）；offered 期間後來才抓到金額 → 補齊，不算新單
 //   （v0.6 實機：第一次 OCR 金額沒抓到、25 秒後抓到 110.26 → 被當成兩單）。
 //   廣播停止 → offered 當未接、deciding 依 ambiguousAs (stopped)。
+//   v0.8 夾單：同一張邀請任一次 OCR 看到「夾單」（offer.stackedKeywords）→ offer.stacked=true（之後不會變回 false）。
 import { amountKey } from './ocrPick.ts';
-import { DEFAULT_ACCEPTED_KEYWORDS, DEFAULT_REJECTED_KEYWORDS } from './screenInfo.ts';
+import { DEFAULT_ACCEPTED_KEYWORDS, DEFAULT_REJECTED_KEYWORDS, DEFAULT_STACKED_KEYWORDS } from './screenInfo.ts';
 
 export type Ambiguous = 'accept' | 'reject';
 
@@ -26,6 +27,8 @@ export type OfferSettings = {
   acceptedKeywords: string;
   rejectedKeywords: string;
   ambiguousAs: Ambiguous;
+  /** v0.8 邀請畫面上的夾單字樣（正則，去空白文字比對） */
+  stackedKeywords: string;
 };
 
 export const DEFAULT_OFFER: Readonly<OfferSettings> = Object.freeze({
@@ -34,6 +37,7 @@ export const DEFAULT_OFFER: Readonly<OfferSettings> = Object.freeze({
   acceptedKeywords: DEFAULT_ACCEPTED_KEYWORDS,
   rejectedKeywords: DEFAULT_REJECTED_KEYWORDS,
   ambiguousAs: 'accept',
+  stackedKeywords: DEFAULT_STACKED_KEYWORDS,
 });
 
 /** 狀態機只吃這些（ScreenSummary 的子集合）；OCR 原文不進來 */
@@ -45,6 +49,8 @@ export type OfferObservation = {
   offerRejected: boolean;
   offerHit: string[];
   kw: string[];
+  /** v0.8：這次 OCR 看到夾單字樣（舊樣本沒有這欄 → 當 false） */
+  stacked?: boolean;
 };
 
 export type Offer = {
@@ -54,6 +60,8 @@ export type Offer = {
   key: string;
   firstSeen: number;
   lastSeen: number;
+  /** v0.8 夾單 */
+  stacked: boolean;
 };
 
 export type DecisionReason = 'accepted' | 'rejected' | 'timeout' | 'superseded' | 'replaced' | 'stopped';
@@ -115,6 +123,11 @@ export class OfferTracker {
     return this.state.kind;
   }
 
+  /** v0.8：offered/deciding 中（extension 用來維持快速 OCR） */
+  get active(): boolean {
+    return this.state.kind !== 'idle';
+  }
+
   /** deciding 時：視窗到期的時間（給呼叫端排計時器；畫面靜止時 ReplayKit 不送幀，不能只靠 OCR 推進） */
   get deadline(): number | null {
     return this.state.kind === 'deciding' ? this.state.goneAt + this.settings.decideWindowSec : null;
@@ -133,6 +146,7 @@ export class OfferTracker {
           st.offer.lastSeen = now;
           st.misses = 0;
           st.firstMissAt = null;
+          if (o.stacked) st.offer.stacked = true;
         }
         return out.concat(this.tick(now));
       }
@@ -144,12 +158,13 @@ export class OfferTracker {
           st.misses = 0;
           st.firstMissAt = null;
           this.fillAmount(st.offer, o.amount);
+          if (o.stacked) st.offer.stacked = true;
           return out;
         }
         out.push(this.decide(now, 'reject', 'replaced', null, o.kw, []));
       } else if (st.kind === 'deciding') {
         if (same(st.offer)) {
-          const offer = { ...st.offer, lastSeen: now };
+          const offer = { ...st.offer, lastSeen: now, stacked: st.offer.stacked || !!o.stacked };
           this.fillAmount(offer, o.amount);
           this.state = { kind: 'offered', offer, misses: 0, firstMissAt: null };
           out.push({ type: 'resumed', offer, awaySec: round1(now - st.goneAt) });
@@ -167,7 +182,9 @@ export class OfferTracker {
         return out;
       }
       this.ignored = null;
-      const offer: Offer = { minutes, amount: o.amount, key: offerKeyOf(minutes, o.amount), firstSeen: now, lastSeen: now };
+      const offer: Offer = {
+        minutes, amount: o.amount, key: offerKeyOf(minutes, o.amount), firstSeen: now, lastSeen: now, stacked: !!o.stacked,
+      };
       this.state = { kind: 'offered', offer, misses: 0, firstMissAt: null };
       out.push({ type: 'seen', offer });
       return out;

@@ -47,6 +47,21 @@ export const UI_KEYWORDS: readonly (readonly string[])[] = [
   ['送達完成', '送达完成'],
   ['確認送達', '确认送达'],
   ['完成送達', '完成送达'],
+  // v0.8 首日實測畫面（夾單邀請、接單後、取餐/送達確認、送達後彈窗）
+  ['夾單', '夹单'],
+  ['訂單完成', '订单完成'],
+  ['確認已送達', '确认已送达'],
+  ['確認已取餐', '确认已取餐'],
+  ['是否已取餐'],
+  ['是否已送達', '是否已送达'],
+  ['pickedup', 'Pickedup', 'PICKEDUP'],
+  ['即將抵達', '即将抵达'],
+  ['上傳照片', '上传照片'],
+  ['無法聯繫', '无法联系', '無法聯絡'],
+  ['筆訂單', '笔订单'],
+  ['即將準備完成', '即将准备完成'],
+  ['取餐體驗', '取餐体验'],
+  ['每單收入', '每单收入'],
 ];
 
 export const KEYWORD_NAMES: readonly string[] = UI_KEYWORDS.map((k) => k[0]);
@@ -103,20 +118,28 @@ export type ScreenSummary = {
   offerRejected: boolean;
   /** 命中的那段文字裡含哪些白名單詞（正式名稱）；不在白名單的命中只回報 offerAccepted/Rejected，不回報文字 */
   offerHit: string[];
-  /** v0.7 自動送達：命中 delivery.completedKeywords（有接單鈕的邀請畫面不算） */
+  /** v0.7 自動送達：命中 delivery.completedKeywords 或 finalKeywords（有接單鈕的邀請畫面不算） */
   delivered: boolean;
   deliveredHit: string[];
+  /** v0.8：命中 delivery.finalKeywords（「訂單完成」彈窗＝最可信的送達時間；只看到「確認已送達」對話框時先待定） */
+  deliveredFinal: boolean;
+  /** v0.8：邀請畫面上有「夾單」（offer.stackedKeywords） */
+  stacked: boolean;
 };
 
-// v0.7 接單後/未接畫面的預設關鍵字（⚠️ 待實測調整：pandarider 接單後畫面還沒看過，先猜；
+// v0.7 接單後/未接畫面的預設關鍵字（v0.8 加入首日實測接單後畫面：「預計7分鐘後抵達店家・1筆訂單」「再 8 分鐘即將準備完成」「取餐體驗如何呢?」；
 //   調整改 server/config.json 的 offer.acceptedKeywords / rejectedKeywords，不用重裝）。
 //   與 targets/broadcast/OfferTracker.swift 的 OfferSettings 預設一致（test 比對）。
 export const DEFAULT_ACCEPTED_KEYWORDS =
-  '前往取餐|抵達(?:店家|餐廳)|抵达(?:店家|餐厅)|確認取餐|确认取餐|已抵達|已抵达|取餐|導航|导航|訂單詳情|订单详情|聯絡店家|联络店家|联系店家';
+  '前往取餐|抵達(?:店家|餐廳)|抵达(?:店家|餐厅)|確認取餐|确认取餐|已抵達|已抵达|取餐|導航|导航|訂單詳情|订单详情|聯絡店家|联络店家|联系店家|即將準備完成|即将准备完成|準備完成|准备完成|筆訂單|笔订单|取餐體驗|取餐体验';
 export const DEFAULT_REJECTED_KEYWORDS = '已拒絕|已拒绝|訂單已取消|订单已取消|逾時|逾时|已過期|已过期|上線中|上线中';
-// v0.7 自動送達畫面（⚠️ 待實測調整；實機 telemetry 有 screen=delivering kw=完成訂單,聯絡）
+// v0.7 自動送達畫面；v0.8 首日實測：送達確認對話框「…是否已送達?／確認已送達」、送達後彈窗「訂單完成」
 export const DEFAULT_COMPLETED_KEYWORDS =
-  '完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达';
+  '訂單完成|订单完成|完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达';
+/** v0.8 優先：看到就以該時間結單（其他 completedKeywords 命中先待定 delivery.pendingSec 秒等它出現） */
+export const DEFAULT_FINAL_KEYWORDS = '訂單完成|订单完成|訂單已完成|订单已完成';
+/** v0.8 夾單邀請（上方小字「夾單訂單依系統顯示金額為主」） */
+export const DEFAULT_STACKED_KEYWORDS = '夾單|夹单';
 
 export type ScreenRules = {
   picker: PickerConfig;
@@ -125,6 +148,8 @@ export type ScreenRules = {
   acceptedKeywords?: string;
   rejectedKeywords?: string;
   completedKeywords?: string;
+  finalKeywords?: string;
+  stackedKeywords?: string;
 };
 export const DEFAULT_SCREEN_RULES: ScreenRules = {
   picker: DEFAULT_PICKER,
@@ -133,6 +158,8 @@ export const DEFAULT_SCREEN_RULES: ScreenRules = {
   acceptedKeywords: DEFAULT_ACCEPTED_KEYWORDS,
   rejectedKeywords: DEFAULT_REJECTED_KEYWORDS,
   completedKeywords: DEFAULT_COMPLETED_KEYWORDS,
+  finalKeywords: DEFAULT_FINAL_KEYWORDS,
+  stackedKeywords: DEFAULT_STACKED_KEYWORDS,
 };
 
 const offerRx = new Map<string, RegExp | null>();
@@ -165,7 +192,9 @@ export function summarizeScreen(raw: string | null | undefined, rules: ScreenRul
   const acc = compact ? firstOfferMatch(compact, rules.acceptedKeywords, DEFAULT_ACCEPTED_KEYWORDS) : null;
   const rej = compact ? firstOfferMatch(compact, rules.rejectedKeywords, DEFAULT_REJECTED_KEYWORDS) : null;
   const hit = [acc, rej].filter((x): x is string => x != null).join('|'); // 分隔符不是空白：避免兩段黏在一起湊出假命中
-  const done = compact && !accept ? firstOfferMatch(compact, rules.completedKeywords, DEFAULT_COMPLETED_KEYWORDS) : null;
+  const finalHit = compact && !accept ? firstOfferMatch(compact, rules.finalKeywords, DEFAULT_FINAL_KEYWORDS) : null;
+  const done = compact && !accept ? (firstOfferMatch(compact, rules.completedKeywords, DEFAULT_COMPLETED_KEYWORDS) ?? finalHit) : null;
+  const stacked = compact ? firstOfferMatch(compact, rules.stackedKeywords, DEFAULT_STACKED_KEYWORDS) != null : false;
   const minutes = accept ? pickMinutes(raw, rules.picker) : null;
   return {
     accept,
@@ -179,6 +208,8 @@ export function summarizeScreen(raw: string | null | undefined, rules: ScreenRul
     offerHit: hit ? matchKeywords(hit, rules.keywords) : [],
     delivered: done != null,
     deliveredHit: done ? matchKeywords(done, rules.keywords) : [],
+    deliveredFinal: finalHit != null,
+    stacked,
   };
 }
 

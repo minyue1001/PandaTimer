@@ -19,8 +19,13 @@ export type Order = {
   activityId?: string;
   /** 已排程的本地通知 id */
   notifIds?: string[];
-  /** v0.4：'auto'＝螢幕廣播自動偵測開的單（其餘為手動/捷徑） */
-  source?: 'auto';
+  /** v0.4：'auto'＝螢幕廣播自動偵測開的單；v0.8 'import'＝deep link 匯入的補記單（其餘為手動/捷徑） */
+  source?: 'auto' | 'import';
+  /** v0.8：夾單（邀請畫面有「夾單」字樣，或匯入時標記） */
+  stacked?: boolean;
+  /** v0.8：匯入時帶的金額（元）與備註 */
+  amount?: number;
+  note?: string;
 };
 
 export const DEFAULT_ESTIMATE = 18;

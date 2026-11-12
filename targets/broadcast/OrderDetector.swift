@@ -34,6 +34,9 @@ struct ScreenRules {
   var acceptedKeywords = OfferSettings.defaultAcceptedKeywords
   var rejectedKeywords = OfferSettings.defaultRejectedKeywords
   var completedKeywords = RemoteConfig.DeliverySettings.defaultCompletedKeywords
+  /// v0.8：優先送達字樣（訂單完成）、夾單字樣
+  var finalKeywords = RemoteConfig.DeliverySettings.defaultFinalKeywords
+  var stackedKeywords = OfferSettings.defaultStackedKeywords
 
   static let standard = ScreenRules()
 }
@@ -76,6 +79,21 @@ enum ScreenInfo {
     ["送達完成", "送达完成"],
     ["確認送達", "确认送达"],
     ["完成送達", "完成送达"],
+    // v0.8 首日實測畫面（夾單邀請、接單後、取餐/送達確認、送達後彈窗）
+    ["夾單", "夹单"],
+    ["訂單完成", "订单完成"],
+    ["確認已送達", "确认已送达"],
+    ["確認已取餐", "确认已取餐"],
+    ["是否已取餐"],
+    ["是否已送達", "是否已送达"],
+    ["pickedup", "Pickedup", "PICKEDUP"],
+    ["即將抵達", "即将抵达"],
+    ["上傳照片", "上传照片"],
+    ["無法聯繫", "无法联系", "無法聯絡"],
+    ["筆訂單", "笔订单"],
+    ["即將準備完成", "即将准备完成"],
+    ["取餐體驗", "取餐体验"],
+    ["每單收入", "每单收入"],
   ]
 
   private static let kmPattern = "(?<![0-9.])([0-9]{1,2}(?:\\.[0-9]{1,2})?)\\s*(?:公里|km)"
@@ -95,6 +113,10 @@ enum ScreenInfo {
     /// v0.7 自動送達：命中 delivery.completedKeywords（有接單鈕的邀請畫面不算）
     let delivered: Bool
     let deliveredHit: [String]
+    /// v0.8：命中 delivery.finalKeywords（「訂單完成」＝最可信的送達時間）
+    let deliveredFinal: Bool
+    /// v0.8：邀請畫面上有「夾單」（offer.stackedKeywords）
+    let stacked: Bool
   }
 
   /// 正規化（全形數字/空白）後去掉所有空白
@@ -165,9 +187,14 @@ enum ScreenInfo {
     let rej = firstOfferMatch(text, rules.rejectedKeywords, fallback: OfferSettings.defaultRejectedKeywords)
     // 分隔符不是空白：避免兩段黏在一起湊出假命中
     let hitText = [acc, rej].compactMap { $0 }.joined(separator: "|")
+    let finalHit: String? = accept
+      ? nil
+      : firstOfferMatch(text, rules.finalKeywords, fallback: RemoteConfig.DeliverySettings.defaultFinalKeywords)
     let done: String? = accept
       ? nil
-      : firstOfferMatch(text, rules.completedKeywords, fallback: RemoteConfig.DeliverySettings.defaultCompletedKeywords)
+      : (firstOfferMatch(text, rules.completedKeywords, fallback: RemoteConfig.DeliverySettings.defaultCompletedKeywords)
+        ?? finalHit)
+    let stacked = firstOfferMatch(text, rules.stackedKeywords, fallback: OfferSettings.defaultStackedKeywords) != nil
     let minutes = accept ? MinutePicker.pick(raw, config: rules.picker) : nil
     return Summary(
       accept: accept,
@@ -180,7 +207,9 @@ enum ScreenInfo {
       offerRejected: rej != nil,
       offerHit: hitText.isEmpty ? [] : matchKeywords(hitText, rows: rules.keywords),
       delivered: done != nil,
-      deliveredHit: done.map { matchKeywords($0, rows: rules.keywords) } ?? [])
+      deliveredHit: done.map { matchKeywords($0, rows: rules.keywords) } ?? [],
+      deliveredFinal: finalHit != nil,
+      stacked: stacked)
   }
 
   /// 金額 → 訊號/去重用的整數鍵（四捨五入，0~999；抓不到或超出範圍 → 0）。同 src/ocrPick.ts 的 amountKey

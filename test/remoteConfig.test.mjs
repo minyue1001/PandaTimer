@@ -103,6 +103,8 @@ test('Swift 預設值與 TS／JSON 一致（MinutePicker.swift、SampleHandler.s
     forceOcrInterval: d.forceOcrSeconds, sameFrameMaxBits: d.sameFrameMaxBits, heartbeatInterval: d.heartbeatSeconds,
     dedupeWindow: d.dedupeSeconds, maxLongEdge: d.maxLongEdge,
     bottomFraction: d.bottomFraction, minimumTextHeight: d.minimumTextHeight, memoryAlertMB: d.memoryAlertMB, refreshSeconds: d.configRefreshSeconds,
+    // v0.8
+    fastOcrInterval: d.fastOcrIntervalSeconds, changeMinBits: d.changeMinBits, changeMinGap: d.changeMinGapSeconds, probeInterval: d.probeIntervalSeconds,
   };
   for (const [name, value] of Object.entries(expect)) {
     const m = new RegExp(`var ${name}(?:: [A-Za-z]+)? = ([0-9.]+)`).exec(ext);
@@ -118,6 +120,8 @@ test('Swift 預設值與 TS／JSON 一致（MinutePicker.swift、SampleHandler.s
   assert.ok(ot.includes(`var ambiguousAs = "${o.ambiguousAs}"`));
   assert.ok(ot.includes(`static let defaultAcceptedKeywords =\n    "${o.acceptedKeywords}"`));
   assert.ok(ot.includes(`static let defaultRejectedKeywords = "${o.rejectedKeywords}"`));
+  assert.ok(ot.includes(`static let defaultStackedKeywords = "${o.stackedKeywords}"`));
+  assert.ok(ot.includes('stackedKeywords = RemoteConfig.offerRegex(o["stackedKeywords"], stackedKeywords)'));
   // v0.7 extension 不再用 detector.goneAfterMisses（改 offer.goneAfterMisses）
   assert.ok(!/d\["goneAfterMisses"\]/.test(ext));
   const rc = read('../modules/live-activity/ios/RemoteConfig.swift');
@@ -152,7 +156,7 @@ test('Swift 的合法範圍與 TS RANGES 一致', () => {
     assert.deepEqual([Number(m[2]), Number(m[3])], RANGES[`offer.${m[1]}`].slice(0, 2), m[1]);
     checked++;
   }
-  assert.ok(checked >= 11 + 7 + 4 + 2, `只比對到 ${checked} 個欄位`);
+  assert.ok(checked >= 15 + 7 + 4 + 2, `只比對到 ${checked} 個欄位`);
 });
 
 test('v0.7 offer 區塊：缺漏補預設、範圍、正則（不得命中空字串）、ambiguousAs 列舉', () => {
@@ -168,8 +172,8 @@ test('v0.7 offer 區塊：缺漏補預設、範圍、正則（不得命中空字
   for (const k of ['goneAfterMisses', 'decideWindowSec', 'acceptedKeywords', 'rejectedKeywords', 'ambiguousAs']) {
     assert.ok(problems.some((p) => p.startsWith(`offer.${k}`)), k);
   }
-  const ok = validateConfig({ version: 'v07b', offer: { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject' } });
-  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject' });
+  const ok = validateConfig({ version: 'v07b', offer: { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單' } });
+  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單' });
   assert.equal(DEFAULT_CONFIG.offer.ambiguousAs, 'accept');
   assert.equal(DEFAULT_CONFIG.offer.decideWindowSec, 25);
   // Swift：offerRegex 擋空字串命中、choice 列舉

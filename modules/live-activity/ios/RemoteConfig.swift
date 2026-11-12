@@ -166,9 +166,18 @@ final class RemoteConfig {
     return s
   }
 
-  /// [[正式名稱, 異體...], ...]：1~40 列、每列 1~6 個 1~12 字的字串；不合法 → nil（用內建）
+  /// JSON 布林（NSNumber 的 CFBoolean）；其他 → fallback
+  static func bool(_ v: Any?, _ fallback: Bool) -> Bool {
+    guard let n = v as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return fallback }
+    return n.boolValue
+  }
+
+  /// v0.8 telemetry.keywords 上限 60 列（v0.7 是 40）
+  static let maxKeywordRows = 60
+
+  /// [[正式名稱, 異體...], ...]：1~60 列、每列 1~6 個 1~12 字的字串；不合法 → nil（用內建）
   static func keywordRows(_ v: Any?) -> [[String]]? {
-    guard let rows = v as? [[String]], (1...40).contains(rows.count),
+    guard let rows = v as? [[String]], (1...maxKeywordRows).contains(rows.count),
           rows.allSatisfy({ (1...6).contains($0.count) && $0.allSatisfy { (1...12).contains($0.count) } })
     else { return nil }
     return rows
@@ -183,28 +192,37 @@ final class RemoteConfig {
   }
 
   /// v0.7 自動送達（extension：completedKeywords/enabled；App：enabled/minOrderAgeSec）。預設＝src/deliveryDetector.ts
+  /// v0.8：finalKeywords（「訂單完成」：看到就以該時間結單）＋pendingSec（只看到送達確認對話框時先等這麼久）
   struct DeliverySettings {
-    // ⚠️ 待實測調整（實機 telemetry 有 screen=delivering kw=完成訂單,聯絡）
+    // v0.8 首日實測：送達確認對話框「…是否已送達?／確認已送達」、送達後彈窗「訂單完成」
     static let defaultCompletedKeywords =
-      "完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达"
+      "訂單完成|订单完成|完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达"
+    static let defaultFinalKeywords = "訂單完成|订单完成|訂單已完成|订单已完成"
     var enabled = true
     var minOrderAgeSec = 120
     var completedKeywords = DeliverySettings.defaultCompletedKeywords
+    var finalKeywords = DeliverySettings.defaultFinalKeywords
+    var pendingSec = 30
   }
 
   static func delivery(_ root: [String: Any]) -> DeliverySettings {
     let d = section(root, "delivery")
     var out = DeliverySettings()
-    if let n = d["enabled"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() { out.enabled = n.boolValue }
+    out.enabled = bool(d["enabled"], out.enabled)
     out.minOrderAgeSec = int(d["minOrderAgeSec"], 0, 1800, out.minOrderAgeSec)
     out.completedKeywords = offerRegex(d["completedKeywords"], out.completedKeywords)
+    out.finalKeywords = offerRegex(d["finalKeywords"], out.finalKeywords)
+    out.pendingSec = int(d["pendingSec"], 0, 60, out.pendingSec)
     return out
   }
 
   /// v0.7 extension OCR 記憶體保護（MB）：目前 > memSkipMB 跳過該幀；OCR 中量到 > memHighMB → 之後 120 秒只認大字
+  /// v0.8：memSkipMB 預設 36；每 rebuildEvery 次 OCR 重建 VNRecognizeTextRequest；englishToo=false 只用 zh-Hant
   struct OcrSettings {
-    var memSkipMB = 38.0
+    var memSkipMB = 36.0
     var memHighMB = 44.0
+    var rebuildEvery = 30
+    var englishToo = false
   }
 
   static func ocr(_ root: [String: Any]) -> OcrSettings {
@@ -212,6 +230,32 @@ final class RemoteConfig {
     var out = OcrSettings()
     out.memSkipMB = number(o["memSkipMB"], 20, 60, out.memSkipMB)
     out.memHighMB = number(o["memHighMB"], 25, 80, out.memHighMB)
+    out.rebuildEvery = int(o["rebuildEvery"], 1, 1000, out.rebuildEvery)
+    out.englishToo = bool(o["englishToo"], out.englishToo)
+    return out
+  }
+
+  /// v0.8 亮綠色金額觸發（detector.greenTrigger；預設＝src/frameTrigger.ts 的 DEFAULT_GREEN）
+  struct GreenTriggerSettings {
+    var enabled = true
+    var minRatio = 0.002
+    var yMin = 60
+    var cbMax = 110
+    var crMax = 110
+    var holdSec = 10.0
+    var regionFraction = 0.55
+  }
+
+  static func greenTrigger(_ root: [String: Any]) -> GreenTriggerSettings {
+    let g = (section(root, "detector")["greenTrigger"] as? [String: Any]) ?? [:]
+    var out = GreenTriggerSettings()
+    out.enabled = bool(g["enabled"], out.enabled)
+    out.minRatio = number(g["minRatio"], 0.0001, 0.5, out.minRatio)
+    out.yMin = int(g["yMin"], 0, 255, out.yMin)
+    out.cbMax = int(g["cbMax"], 0, 255, out.cbMax)
+    out.crMax = int(g["crMax"], 0, 255, out.crMax)
+    out.holdSec = number(g["holdSec"], 1, 120, out.holdSec)
+    out.regionFraction = number(g["regionFraction"], 0.2, 1, out.regionFraction)
     return out
   }
 

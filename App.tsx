@@ -2,6 +2,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  AppState,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,14 +16,18 @@ import { BroadcastPicker, type BroadcastPickerHandle } from './modules/live-acti
 import {
   cancelOrder,
   completeOrder,
+  importOrders,
   initNativeBridge,
   listenDeepLinks,
+  previewImport,
   previewPrune,
   pruneOrders,
   startOrder,
 } from './src/controller';
 import * as Updates from 'expo-updates';
-import { beatAgeSec, countAutoToday, locationAuthPending, offerLine, telemetryLine } from './src/detector';
+import * as Notifications from 'expo-notifications';
+import { beatAgeSec, countAutoToday, isRedetectData, locationAuthPending, offerLine, telemetryLine } from './src/detector';
+import { describeImport, parseImportLink } from './src/importLink';
 import { ensurePermission } from './src/notify';
 import { OtaBox } from './src/OtaBox';
 import {
@@ -196,7 +201,32 @@ function Main() {
     void ensurePermission();
     // 先 drain 原生事件再 reconcile（initNativeBridge 內保證順序）
     const stopBridge = initNativeBridge(showToast);
-    const stopLinks = listenDeepLinks(() => estimateRef.current, showToast);
+    // v0.8 pandatimer://import?d=…：解析 → 確認視窗（筆數/日期/重複）→ 確認才寫入
+    const onImport = (url: string) => {
+      const parsed = parseImportLink(url);
+      if (!parsed) return;
+      if (!parsed.ok) {
+        Alert.alert('匯入連結有問題', parsed.error);
+        return;
+      }
+      void previewImport(parsed.rows).then((plan) => {
+        if (!plan.add.length) {
+          Alert.alert('沒有要匯入的單', describeImport(plan, parsed.skippedActive));
+          return;
+        }
+        Alert.alert('匯入訂單？', describeImport(plan, parsed.skippedActive), [
+          { text: '不要', style: 'cancel' },
+          {
+            text: `匯入 ${plan.add.length} 筆`,
+            onPress: () =>
+              void importOrders(parsed.rows).then((p) =>
+                showToast(`已匯入 ${p.add.length} 筆${p.duplicates.length ? `（略過重複 ${p.duplicates.length} 筆）` : ''}`),
+              ),
+          },
+        ]);
+      });
+    };
+    const stopLinks = listenDeepLinks(() => estimateRef.current, showToast, onImport);
     return () => {
       stopBridge();
       stopLinks();
@@ -246,6 +276,33 @@ function Main() {
     const shown = (await pickerRef.current?.show()) ?? false;
     setDetectMsg(shown ? `${msg}請在跳出的視窗按「開始直播」。` : `${msg}沒跳出視窗的話，請點右邊的圓形按鈕。`);
   };
+
+  // v0.8：點「偵測停止了，點我重新開始」通知（userInfo pandatimer=redetect）→ 回前景後自動走「開始偵測」叫出廣播視窗
+  const startDetectRef = useRef(onStartDetect);
+  startDetectRef.current = onStartDetect;
+  useEffect(() => {
+    let lastId: string | null = null;
+    const run = (resp: Notifications.NotificationResponse | null) => {
+      if (!resp || !isRedetectData(resp.notification.request.content.data)) return;
+      const id = resp.notification.request.identifier;
+      if (id === lastId) return;
+      lastId = id;
+      const go = () => setTimeout(() => void startDetectRef.current(), 600); // 等畫面與 BroadcastPicker 掛好
+      if (AppState.currentState === 'active') go();
+      else {
+        const sub = AppState.addEventListener('change', (s) => {
+          if (s === 'active') {
+            sub.remove();
+            go();
+          }
+        });
+      }
+    };
+    const sub = Notifications.addNotificationResponseReceivedListener(run);
+    // 冷啟動：App 是被這則通知打開的
+    void Notifications.getLastNotificationResponseAsync().then(run).catch(() => undefined);
+    return () => sub.remove();
+  }, []);
 
   const onStopDetect = () => {
     void LiveActivity.stopDetection()
@@ -369,6 +426,11 @@ function Main() {
                   ? `・最近 ${det.lastOrderMinutes} 分 ${formatClock(det.lastOrderAt)}`
                   : ''}
               </Text>
+              {det.stoppedUnexpectedAt != null && !det.armed && (
+                <Text style={[styles.detLine, { color: RED }]}>
+                  ⏹ 偵測已停止（{formatClock(det.stoppedUnexpectedAt)}，點通知或按「開始偵測」重新開始）
+                </Text>
+              )}
               {!!offerText && (
                 <Text style={[styles.detLine, det.offerPendingAt != null && offerText.startsWith('偵測到邀請') ? { color: GREEN } : null]}>
                   {offerText}
@@ -488,6 +550,13 @@ function Main() {
             <Stat label="今日準時率" value={pct(st.today.onTimeRate)} />
             <Stat label="今日超時率" value={pct(st.today.overrunRate)} />
           </View>
+          {st.noStacked.stackedCount > 0 && (
+            <Text style={styles.detLine}>
+              不含夾單（本期夾單 {st.noStacked.stackedCount} 單）：本期準時 {pct(st.noStacked.period.onTimeRate)}・超時{' '}
+              {pct(st.noStacked.period.overrunRate)}；今日準時 {pct(st.noStacked.today.onTimeRate)}・超時{' '}
+              {pct(st.noStacked.today.overrunRate)}（App 紀錄，不含補登）
+            </Text>
+          )}
           <Text style={styles.section}>收入</Text>
           <EarnLines title="本期" e={earn.period} />
           <EarnLines title="今日" e={earn.today} />
@@ -671,6 +740,8 @@ function Main() {
                 </Text>
                 <Text style={styles.histText}>
                   預估 {o.estimateMin}・實際 {o.actualMin}
+                  {o.stacked ? '・夾單' : ''}
+                  {o.source === 'import' ? '・匯入' : ''}
                 </Text>
                 <Text style={[styles.histBadge, { color: late ? RED : GREEN }]}>
                   {late ? `超 ${Math.round(over * 10) / 10}` : '準時'}

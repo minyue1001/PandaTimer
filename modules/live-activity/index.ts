@@ -27,6 +27,8 @@ export type DetectorEvent = {
   how?: string;
   /** v0.5：更新後回讀結果（動態島：已更新✓／疑似被系統擋✗） */
   check?: string;
+  /** v0.8 stopped：使用者沒按「停止偵測」就停了（已發「點我重新開始」通知） */
+  unexpected?: boolean;
 };
 
 // Expo Go / web / Android 沒有這個原生模組 → 為 null，所有呼叫安全地退化成 no-op。

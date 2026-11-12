@@ -21,18 +21,21 @@ const read = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
 const NEW_ORDER =
   '狀態\n上線中\n每單收入\n110.26 $ 6.7公里\n27 分鐘\n鬍鬚張魯肉飯 (台北美食文化館)\n台北市XX區XX路XX巷XX號X樓\n送餐資訊\n需要收取現金\n拒絕\n接受訂單';
 
-test('白名單：v0.7 共 30 個正式名稱、無重複（≤40）', () => {
-  assert.equal(KEYWORD_NAMES.length, 30);
-  assert.equal(new Set(KEYWORD_NAMES).size, 30);
+test('白名單：v0.8 共 44 個正式名稱、無重複（≤60）、每字 ≤12', () => {
+  assert.equal(KEYWORD_NAMES.length, 44);
+  assert.equal(new Set(KEYWORD_NAMES).size, 44);
+  assert.ok(UI_KEYWORDS.every((r) => r.length <= 6 && r.every((w) => w.length >= 1 && w.length <= 12)));
   for (const k of ['接受訂單', '拒絕', '前往取餐', '抵達餐廳', '已取餐', '前往送餐', '抵達', '送達', '完成訂單', '上線中', '休息中', '訂單詳情', '聯絡', '導航', '拍照', '確認取餐', '取消',
     '已拒絕', '訂單已取消', '逾時', '已過期', '已抵達', '抵達店家', '聯絡店家', '取餐',
-    '訂單已完成', '已送達', '送達完成', '確認送達', '完成送達']) {
+    '訂單已完成', '已送達', '送達完成', '確認送達', '完成送達',
+    '夾單', '訂單完成', '確認已送達', '確認已取餐', '是否已取餐', '是否已送達', 'pickedup', '即將抵達', '上傳照片', '無法聯繫',
+    '筆訂單', '即將準備完成', '取餐體驗', '每單收入']) {
     assert.ok(KEYWORD_NAMES.includes(k), k);
   }
 });
 
 test('matchKeywords：只回白名單正式名稱；簡體/字間空白也認得；依白名單順序', () => {
-  assert.deepEqual(matchKeywords(NEW_ORDER), ['接受訂單', '拒絕', '上線中']);
+  assert.deepEqual(matchKeywords(NEW_ORDER), ['接受訂單', '拒絕', '上線中', '每單收入']);
   assert.deepEqual(matchKeywords('前往 取餐\n導航  联系'), ['前往取餐', '聯絡', '導航', '取餐']);
   assert.deepEqual(matchKeywords('抵达餐厅'), ['抵達餐廳', '抵達']);
   assert.deepEqual(matchKeywords('预计送达 16 分钟'), ['送達']);
@@ -79,9 +82,9 @@ test('summarizeScreen：新單畫面 → 結構化欄位，沒有任何原文（
   const s = summarizeScreen(NEW_ORDER);
   // 邀請畫面本身就有「上線中」（rejectedKeywords 命中）——只在邀請消失後才拿來判斷，見 OfferTracker
   assert.deepEqual(s, {
-    accept: true, minutes: 27, amount: 110.26, km: 6.7, kw: ['接受訂單', '拒絕', '上線中'], screen: 'newOrder',
+    accept: true, minutes: 27, amount: 110.26, km: 6.7, kw: ['接受訂單', '拒絕', '上線中', '每單收入'], screen: 'newOrder',
     offerAccepted: false, offerRejected: true, offerHit: ['上線中'],
-    delivered: false, deliveredHit: [],
+    delivered: false, deliveredHit: [], deliveredFinal: false, stacked: false,
   });
   const json = JSON.stringify(s);
   for (const leak of ['鬍鬚張', '台北市', 'XX路', '現金', '送餐資訊']) assert.ok(!json.includes(leak), leak);
