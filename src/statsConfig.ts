@@ -3,6 +3,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { validateConfig } from './remoteConfig';
+import { waitSecFor } from './unconfirmedOffers';
 import { DEFAULT_PAY, type PayParams } from './earnings';
 import {
   BASELINE_STORAGE_KEY,
@@ -18,6 +19,17 @@ import {
 
 const STATS_CACHE_KEY = 'pandatimer.statsParams.v1';
 const PAY_CACHE_KEY = 'pandatimer.payParams.v1';
+const OFFER_WINDOW_CACHE_KEY = 'pandatimer.offerWindowSec.v1';
+
+/** v0.10 未確認邀請的等待秒數（decideWindowSec+10）；讀不到快取 → 35 */
+export async function loadCachedOfferWaitSec(): Promise<number> {
+  try {
+    const raw = await AsyncStorage.getItem(OFFER_WINDOW_CACHE_KEY);
+    return waitSecFor(raw == null ? undefined : Number(raw));
+  } catch {
+    return waitSecFor(undefined);
+  }
+}
 
 /** 遠端設定 JSON（不可信）→ stats 參數（缺漏/不合法 → 預設） */
 export function statsFromConfig(raw: unknown): StatsParams {
@@ -48,7 +60,7 @@ export async function loadCachedPayParams(): Promise<PayParams> {
 }
 
 /** 抓 /api/config（3 秒逾時）→ stats／pay 參數並快取；失敗回 null（呼叫端沿用快取） */
-export async function fetchRemoteParams(): Promise<{ stats: StatsParams; pay: PayParams } | null> {
+export async function fetchRemoteParams(): Promise<{ stats: StatsParams; pay: PayParams; offerWaitSec: number } | null> {
   const url = (Constants.expoConfig?.extra as { configUrl?: unknown } | undefined)?.configUrl;
   if (typeof url !== 'string' || !url.startsWith('https://')) return null;
   const ctrl = new AbortController();
@@ -61,7 +73,9 @@ export async function fetchRemoteParams(): Promise<{ stats: StatsParams; pay: Pa
     const pay = payFromConfig(body);
     await AsyncStorage.setItem(STATS_CACHE_KEY, JSON.stringify(stats)).catch(() => undefined);
     await AsyncStorage.setItem(PAY_CACHE_KEY, JSON.stringify(pay)).catch(() => undefined);
-    return { stats, pay };
+    const window = validateConfig(body).config.offer.decideWindowSec;
+    await AsyncStorage.setItem(OFFER_WINDOW_CACHE_KEY, String(window)).catch(() => undefined);
+    return { stats, pay, offerWaitSec: waitSecFor(window) };
   } catch {
     return null;
   } finally {

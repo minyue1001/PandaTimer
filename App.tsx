@@ -23,8 +23,21 @@ import { OtaBanner, useOtaUpdate } from './src/OtaBox';
 import { clampEstimate, DEFAULT_ESTIMATE, type Order } from './src/orders';
 import { DEFAULT_GOALS, DEFAULT_STATS, goalProgress, periodAndToday, periodOf, type Baseline, type Goals, type StatsParams } from './src/stats';
 import { DEFAULT_PAY, periodAndTodayEarnings, type PayParams } from './src/earnings';
-import { fetchRemoteParams, loadBaseline, loadCachedPayParams, loadCachedStatsParams, loadGoals } from './src/statsConfig';
+import { fetchRemoteParams, loadBaseline, loadCachedOfferWaitSec, loadCachedPayParams, loadCachedStatsParams, loadGoals } from './src/statsConfig';
 import { subscribe } from './src/store';
+import {
+  confirmAcceptedAt,
+  EMPTY_STATE,
+  FALLBACK_WAIT_SEC,
+  matchOrder,
+  OFFERS_STORAGE_KEY,
+  parseOfferState,
+  recordOffer,
+  removeEntry,
+  tick as tickOffers,
+  type OfferEntry,
+  type OfferState,
+} from './src/unconfirmedOffers';
 import { confirmCancel, confirmDeleteOne } from './src/ui/actions';
 import { HistoryScreen } from './src/ui/HistoryScreen';
 import { HomeScreen } from './src/ui/HomeScreen';
@@ -87,6 +100,65 @@ function Main() {
       .catch(() => undefined);
   }, []);
 
+  // v0.10 未確認邀請：收到原生 offer 事件 → 窗內沒有同分鐘 order 入帳 → 首頁問「你有接嗎？」；狀態存 AsyncStorage
+  const [offerState, setOfferState] = useState<OfferState>(EMPTY_STATE);
+  const offerWaitRef = useRef(FALLBACK_WAIT_SEC);
+  const offersLoaded = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    void AsyncStorage.getItem(OFFERS_STORAGE_KEY)
+      .then((raw) => {
+        const saved = parseOfferState(raw);
+        if (!alive) return;
+        setOfferState((cur) => {
+          // 載入前已收到的事件保留；以 id 去重合併
+          const ids = new Set([...cur.pending, ...cur.unconfirmed].map((e) => e.id));
+          return {
+            pending: [...saved.pending.filter((e) => !ids.has(e.id)), ...cur.pending],
+            unconfirmed: [...saved.unconfirmed.filter((e) => !ids.has(e.id)), ...cur.unconfirmed],
+          };
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        offersLoaded.current = true;
+        if (alive) setOfferState((cur) => ({ ...cur })); // 觸發一次存檔
+      });
+    const off = LiveActivity.addDetectorListener((raw) => {
+      const ev = raw as { type: string; minutes?: number };
+      if (typeof ev.minutes !== 'number') return;
+      const at = Date.now();
+      if (ev.type === 'offer') {
+        setOfferState((cur) => recordOffer(cur, ev.minutes as number, at, `${at}-${Math.random().toString(36).slice(2, 7)}`));
+      } else if (ev.type === 'order') {
+        setOfferState((cur) => matchOrder(cur, ev.minutes as number));
+      }
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, []);
+  useEffect(() => {
+    if (offersLoaded.current) {
+      void AsyncStorage.setItem(OFFERS_STORAGE_KEY, JSON.stringify(offerState)).catch(() => undefined);
+    }
+  }, [offerState]);
+  // 每秒推進一次（沒變化時 tick 回傳同一物件，不會重繪）
+  useEffect(() => {
+    setOfferState((cur) => tickOffers(cur, now, offerWaitRef.current));
+  }, [now]);
+  const onOfferYes = useCallback(
+    (e: OfferEntry) => {
+      setOfferState((cur) => removeEntry(cur, e.id));
+      void startOrder(e.min, showToast, { acceptedAt: confirmAcceptedAt(e), source: 'confirm' }).then(() =>
+        showToast(`已補記：預估 ${e.min} 分`),
+      );
+    },
+    [showToast],
+  );
+  const onOfferNo = useCallback((e: OfferEntry) => setOfferState((cur) => removeEntry(cur, e.id)), []);
+
   // v0.7 統計參數（遠端設定 stats）＋目標（AsyncStorage）
   const [statsParams, setStatsParams] = useState<StatsParams>(DEFAULT_STATS);
   const [payParams, setPayParams] = useState<PayParams>(DEFAULT_PAY);
@@ -99,6 +171,10 @@ function Main() {
       if (!alive || !p) return;
       setStatsParams(p.stats);
       setPayParams(p.pay);
+      offerWaitRef.current = p.offerWaitSec;
+    });
+    void loadCachedOfferWaitSec().then((n) => {
+      if (alive) offerWaitRef.current = n;
     });
     void loadGoals().then((g) => alive && setGoals(g));
     return () => {
@@ -328,6 +404,9 @@ function Main() {
             onBump={bump}
             onManualStart={onStart}
             otaBanner={<OtaBanner ota={ota} />}
+            unconfirmed={offerState.unconfirmed}
+            onOfferYes={onOfferYes}
+            onOfferNo={onOfferNo}
           />
         </View>
         <View style={[S.screen, tab !== 'history' && hidden]}>

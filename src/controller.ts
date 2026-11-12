@@ -26,15 +26,22 @@ function waitForActive(timeoutMs = 5000): Promise<void> {
 }
 
 /** 開新單（疊單也照開）。先記錄，再啟動動態島與通知。 */
-export async function startOrder(estimateInput: number, feedback?: Feedback): Promise<Order> {
+export async function startOrder(
+  estimateInput: number,
+  feedback?: Feedback,
+  opts?: { acceptedAt?: number; source?: Order['source'] },
+): Promise<Order> {
   const estimateMin = clampEstimate(estimateInput);
   const now = Date.now();
+  // 補認單（未確認邀請按「有接」）可指定接單時間（邀請時間＋5 秒）；不得晚於現在
+  const acceptedAt = opts?.acceptedAt != null && Number.isFinite(opts.acceptedAt) ? Math.min(opts.acceptedAt, now) : now;
   const order: Order = {
     id: `${now}-${Math.random().toString(36).slice(2, 7)}`,
-    acceptedAt: now,
+    acceptedAt,
     estimateMin,
-    deadline: now + estimateMin * 60_000,
+    deadline: acceptedAt + estimateMin * 60_000,
     status: 'active',
+    ...(opts?.source ? { source: opts.source } : {}),
   };
   await mutate((list) => ({ orders: [order, ...list] }));
 

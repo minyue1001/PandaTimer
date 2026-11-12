@@ -90,6 +90,8 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 ## 收入／補錢（v0.8，`src/earnings.ts`，純 JS 可 OTA）
 - 預估報酬＝max(45, 預估分×4.08355)；補錢＝max(0, 實際報酬−預估報酬)（實際分鐘四捨五入）；被打星的晚到單不補。App 不知道誰被打星 → 顯示樂觀（全補）／保守（晚到全不補）兩情境，`pay.assumeStarredLate`（預設 true＝保守）決定「預計發放」採哪個。三期 1,109 單對帳誤差 <1 元（test/earnings.test.mjs，orders.json 在 scratchpad 不進 repo）。
 - 參數走遠端設定 `pay.ratePerMinute/minFare/assumeStarredLate`（`src/remoteConfig.ts` 驗證，server config*.json 有 `pay` 區塊）；補登多一欄選填「前幾天收入」（`Baseline.income`，同時加進兩情境）。Order 沒存 OCR 金額，`PaySample.estAmount` 是預留欄位。
+## 未確認邀請（v0.10，`src/unconfirmedOffers.ts`＋`src/ui/UnconfirmedCards.tsx`，純 JS 可 OTA）
+- 收原生 `offer` 事件（minutes）→ decideWindowSec+10 秒（預設 35）內沒有同分鐘 `order` 事件就在首頁膠囊下問「你有接嗎？」（最多 3 張、30 分鐘消失、存 `pandatimer.unconfirmedOffers.v1`）；有接＝`startOrder(min,…,{acceptedAt:邀請+5秒, source:'confirm'})`；延遲入帳的同分鐘 order 自動移除卡片。
 ## 刪除紀錄（`src/prune.ts`，純 JS 可 OTA）
 - 歷史列長按＝單筆刪、進行中卡片的接單文字長按＝刪進行中單；「管理紀錄」＝今天（台北）／某時間以前（輸入台北 YYYY-MM-DD HH:mm）／全部（二次確認＋輸入「刪除」）；`controller.pruneOrders`：先寫墓碑（`pandatimer.tombstones.v1`，7 天）→ drain（`dropTombstonedEvents` 擋復活）→ 刪 → 進行中單走 `cleanup`（偵測卡走 afterFinish）；補登不受影響。
 

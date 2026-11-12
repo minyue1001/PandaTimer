@@ -10,6 +10,8 @@ import type { Pill } from './logic';
 import { OrderCard } from './OrderCard';
 import { PeriodCard, TodayCard } from './StatCard';
 import { StatusPill } from './StatusPill';
+import { UnconfirmedCards } from './UnconfirmedCards';
+import type { OfferEntry } from '../unconfirmedOffers';
 import { C, F, pressed, S } from './theme';
 
 export type HomeProps = {
@@ -41,6 +43,9 @@ export type HomeProps = {
   onBump: (d: number) => void;
   onManualStart: () => void;
   otaBanner: ReactNode;
+  unconfirmed: readonly OfferEntry[];
+  onOfferYes: (e: OfferEntry) => void;
+  onOfferNo: (e: OfferEntry) => void;
 };
 
 export const HomeScreen = memo(function HomeScreen(p: HomeProps) {
@@ -55,6 +60,7 @@ export const HomeScreen = memo(function HomeScreen(p: HomeProps) {
         onStop={p.onStopDetect}
         onShowPicker={p.onShowPicker}
       />
+      <UnconfirmedCards offers={p.unconfirmed} onYes={p.onOfferYes} onNo={p.onOfferNo} />
       {!p.laSupported && (
         <Text style={S.warn}>動態島不可用（需原生版本，且 設定 › 熊貓倒數 › 即時動態 要開啟）</Text>
       )}

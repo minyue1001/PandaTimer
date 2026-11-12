@@ -187,6 +187,7 @@ export function orderTags(o: Pick<Order, 'source' | 'stacked'>): string[] {
   const t: string[] = [];
   if (o.source === 'auto') t.push('自動');
   if (o.source === 'import') t.push('匯入');
+  if (o.source === 'confirm') t.push('補認');
   if (o.stacked) t.push('夾單');
   return t;
 }
