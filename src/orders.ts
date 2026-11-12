@@ -33,6 +33,16 @@ export type Order = {
 export const DEFAULT_ESTIMATE = 18;
 export const SHORT_ORDER_MAX_MIN = 8;
 
+/**
+ * 預估報酬（＝ pandarider 邀請畫面金額）：時薪 245 元換算每分鐘（245/60），再加 1 分錢後無條件捨去到分，最低 45 元。
+ * 依使用者 3 期報酬單 12~38 分全部金額驗證（12→49.01、13→53.09、14→57.17、15→61.26、20→81.67、21→85.76）。
+ * 用整數分計算避免浮點誤差。
+ */
+export function exactFare(estimateMin: number): number {
+  const cents = Math.floor((estimateMin * 24500) / 60 + 1 + 1e-9);
+  return Math.max(4500, cents) / 100;
+}
+
 export function clampEstimate(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_ESTIMATE;
   return Math.min(180, Math.max(1, Math.round(n)));

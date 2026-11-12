@@ -8,6 +8,7 @@
 //     都沒有 → 最早一筆進行中。
 //     指定了但找不到（例如已在 App 內按過送達/取消）→ 忽略，不誤結別張單。
 import type { Order } from './orders';
+import { exactFare } from './orders.ts';
 
 export type NativeStartEvent = {
   type: 'start';
@@ -87,6 +88,7 @@ export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order
           estimateMin: Math.min(180, Math.max(1, Math.round(ev.estimateMin))),
           deadline: ev.deadline,
           status: 'active',
+          amount: exactFare(Math.min(180, Math.max(1, Math.round(ev.estimateMin)))),
           activityId: ev.activityId,
           notifIds: ev.notifIds ?? [],
           ...(ev.source ? { source: ev.source } : {}),

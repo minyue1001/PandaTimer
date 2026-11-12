@@ -17,7 +17,14 @@ test('start 事件新增進行中訂單，重複 id 忽略', () => {
   assert.equal(ev.length, 2);
   const out = applyNativeEvents([], ev);
   assert.equal(out.length, 1);
-  assert.deepEqual(out[0], { id: 'n1', acceptedAt: 1000, estimateMin: 22, deadline: 1000 + 22 * MIN, status: 'active', activityId: 'A1', notifIds: ['x', 'y'] });
+  assert.deepEqual(out[0], { id: 'n1', acceptedAt: 1000, estimateMin: 22, deadline: 1000 + 22 * MIN, status: 'active', amount: 89.84, activityId: 'A1', notifIds: ['x', 'y'] });
+});
+
+test('exactFare：與報酬單/邀請畫面金額一致', async () => {
+  const { exactFare } = await import('../src/orders.ts');
+  for (const [min, amt] of [[8, 45], [11, 45], [12, 49.01], [13, 53.09], [14, 57.17], [19, 77.59], [21, 85.76], [25, 102.09], [27, 110.26]]) {
+    assert.equal(exactFare(min), amt, `${min} 分`);
+  }
 });
 
 test('done 無指定 → 最早一筆進行中；含原生剛開的單', () => {

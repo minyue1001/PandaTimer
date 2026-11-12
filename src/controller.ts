@@ -2,7 +2,7 @@ import { AppState, Linking } from 'react-native';
 import * as LiveActivity from '../modules/live-activity';
 import { activeMirror, applyNativeEvents, orphanActivityIds, parseNativeEvents } from './nativeEvents';
 import { cancelReminders, scheduleReminders } from './notify';
-import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, parseDeepLink, type Order } from './orders';
+import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, exactFare, parseDeepLink, type Order } from './orders';
 import { addTombstones, applyPrune, dropTombstonedEvents, planPrune, type PruneCriteria, type PrunePlan } from './prune';
 import { planImport, type ImportPlan, type ImportRow } from './importLink';
 import { getOrders, loadSyncCode, loadSyncState, loadTombstones, mutate, subscribe, updateTombstones } from './store';
@@ -42,6 +42,7 @@ export async function startOrder(
     estimateMin,
     deadline: acceptedAt + estimateMin * 60_000,
     status: 'active',
+    amount: exactFare(estimateMin),
     ...(opts?.source ? { source: opts.source } : {}),
   };
   await mutate((list) => ({ orders: [order, ...list] }));
