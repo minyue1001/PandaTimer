@@ -163,7 +163,7 @@ test('v0.6：app.json 背景模式／定位說明／runtimeVersion 與 OtaBox �
   assert.deepEqual([...plist.UIBackgroundModes].sort(), ['audio', 'location']);
   assert.ok(plist.NSLocationWhenInUseUsageDescription.length > 5);
   assert.ok(plist.NSLocationAlwaysAndWhenInUseUsageDescription.length > 5);
-  assert.equal(app.runtimeVersion, '0.8');
+  assert.equal(app.runtimeVersion, '0.9');
   // v0.6 遠端回報：寫入金鑰在 extra（進 App 可接受），網址 https；讀取金鑰絕不進 repo
   assert.match(app.extra.telemetryKey, /^[A-Za-z0-9_-]{32,}$/);
   assert.match(app.extra.telemetryUrl, /^https:\/\/.+\/api\/telemetry$/);

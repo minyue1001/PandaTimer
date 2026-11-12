@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-13.1",
+  "version": "2026-11-14.1",
   "picker": {
     "minutePattern": "(?<![0-9.])([0-9]{1,3})(?![0-9.])\\s*(?:分鐘|分钟|分|min)",
     "minMinutes": 1,
@@ -267,11 +267,12 @@
         "每单收入"
       ]
     ],
-    "flushSeconds": 30,
+    "flushSeconds": 60,
     "batchSize": 10
   },
   "app": {
-    "beatTimeoutSeconds": 150
+    "beatTimeoutSeconds": 150,
+    "cardRefreshSeconds": 300
   },
   "offer": {
     "goneAfterMisses": 2,
@@ -302,5 +303,21 @@
     "memHighMB": 44,
     "rebuildEvery": 30,
     "englishToo": false
+  },
+  "away": {
+    "enabled": true,
+    "afterMisses": 5,
+    "intervalSec": 6,
+    "probeIntervalSec": 0.5,
+    "keywords": "上線中|上线中|休息中|抵達|抵达|取餐|送達|送达|每單收入|每单收入|接受訂單|接受订单|訂單|订单|預計|预计|夾單|夹单|導航|导航"
+  },
+  "power": {
+    "saverFactor": 1.5,
+    "thermalLevel": 2,
+    "onLowPower": true
+  },
+  "keepAlive": {
+    "locationAccuracy": "hundred",
+    "distanceFilterM": 50
   }
 }

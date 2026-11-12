@@ -2,7 +2,7 @@ import * as Updates from 'expo-updates';
 import { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 
-const APP_VERSION = '0.8'; // 與 app.json runtimeVersion 一致
+const APP_VERSION = '0.9'; // 與 app.json runtimeVersion 一致
 
 function fmt(d: Date | null | undefined): string {
   if (!d) return '—';

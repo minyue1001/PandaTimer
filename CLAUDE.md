@@ -2,36 +2,30 @@
 
 foodpanda 外送員自用 iPhone App：接單時在動態島／鎖定畫面（Live Activity）顯示「預估送達」倒數，截止前 3 分與截止時本地通知，記錄每單預估/實際時間並算今日準時率、平均超出比例（foodpanda 超時率近似）。
 Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號** → GitHub Actions 編未簽章 .ipa → 免費 Apple ID 重簽側載到 iPhone 14 Pro Max（iOS 26）。
-**現況（2026-11-11）**：SideStore 登入被 Apple 擋（-80045），改用 Windows **Sideloadly** 經 USB 簽裝；v0.1 實機驗收通過。CI 約 7 分鐘，取 IPA 一律用 `bash scripts/fetch-ipa.sh [run-id]`（使用者要求：只留一個資料夾 `C:\Users\minyue\Downloads\PandaTimer\`、舊版自動刪、檔名帶版本 `PandaTimer-v<rv>-<sha7>.ipa`）。v0.2（App Intents＋動態島送達按鈕）已過 CI。v0.3 實機：偵測（OCR/接單鈕/27 分）成功，但 extension 內 ActivityKit 完全不可用、記憶體峰值 44MB。v0.4 實機：偵測→Darwin 訊號→App 入帳/提醒 OK，但**音訊保活下背景更新動態島全部無效**、extension 峰值 43MB。v0.5 實機：定位保活下背景 update **有生效但動態島要關螢幕再開才重繪**；**只偵測得到第一單**（同一張 27 分圖：extension 180 秒＋App 90 秒「同分鐘數」去重，且同名 Darwin 通知在 App 暫停時會合併）。v0.6（多單＋alert 強制重繪＋遠端狀態回報＋遠端設定）已部署。v0.7 實機首日見下節。**v0.8（runtime 0.8：快速偵測/綠色觸發、停止補救、記憶體、夾單、送達待定、匯入 deep link）寫好，尚未 CI/實機驗收**。
+**現況**：SideStore 被 Apple 擋（-80045）→ Windows **Sideloadly** USB 簽裝。CI 約 7 分鐘，取 IPA 一律 `bash scripts/fetch-ipa.sh [run-id]`（只留 `C:\Users\minyue\Downloads\PandaTimer\`、舊版自動刪、檔名 `PandaTimer-v<rv>-<sha7>.ipa`）。實機史：v0.3 extension 內 ActivityKit 不可用；v0.4 音訊保活下背景 update 無效；v0.5 定位保活可 update（要關螢幕再開才重繪）、只抓到第一單；v0.6 多單/遠端設定；v0.7 首日見下節；v0.8（runtime 0.8）已裝實機。**v0.9（runtime 0.9：省電量測＋away 模式＋省電倍率＋卡片 update 節流）寫好，尚未 CI/實機驗收**。
 
-## v0.7 首日實測結論（2026-11-12，telemetry＋30 張截圖）
+## v0.7 首日實測（2026-11-12，telemetry＋30 張截圖）
 - 邀請（暗色）：下半部「每單收入／85.76 $（亮綠大字）／(5.8 公里)／21 分鐘」…底部白色「接受訂單」；夾單邀請上方「夾單訂單依系統顯示金額為主」、金額「+49.01 $」。金額＝分鐘×4.08355。接單後「預計N分鐘後抵達店家・1筆訂單」「再 N 分鐘即將準備完成」「取餐體驗如何呢?」；取餐/送達確認「…是否已取餐/已送達?」「確認已取餐/已送達」；送達後彈窗「訂單完成」；拍照「上傳照片」。
-- broadcast 只跑了 4 段、每段 `ext stop` 正常結束；8 次邀請幾乎都在沒跑的時段。**2/4 次停止緊接在送達確認對話框後 1~40 秒**（疑拍照上傳；待 v0.8 的 lock/pause/stop 欄位確認）。
-- 跑的時候也漏：邀請只在畫面 1~3 秒，閒置 3 秒一次＋同畫面跳過 → 只抓到 km、沒看到接單鈕。記憶體平時 27MB、OCR 瞬間 +15~20MB，13:01 在非 pandarider 畫面（無關鍵字）衝到 70MB 未被殺。
+- broadcast 常停（2/4 次緊接送達確認對話框後，疑拍照）；邀請只在畫面 1~3 秒 → v0.7 閒置 3 秒一次常漏。記憶體平時 27MB、OCR 瞬間 +15~20MB，曾到 70MB 未被殺。
 
 ## 目錄
 - `App.tsx` 單頁 UI；`src/orders.ts` 純邏輯；`src/store.ts` AsyncStorage（key `pandatimer.orders.v1`，`mutate()` 序列化）
 - `src/controller.ts` 開單/送達/取消、deep link、`initNativeBridge()`（原生同步）、孤兒 Live Activity 對帳
 - `src/nativeEvents.ts` 原生事件解析/合併、進行中鏡像（純函式）；`src/ocrPick.ts` OCR 分鐘/金額規則 TS 版；`src/detector.ts` 訊號名稱/狀態解析；v0.6 `src/cardPlan.ts`（多單卡片）、`src/screenInfo.ts`（回報用畫面摘要/白名單關鍵字）、`src/remoteConfig.ts`（遠端設定預設/範圍/驗證）、v0.7 `src/offerTracker.ts`（接單判定狀態機，樣本 `test/fixtures/offer-cases.json`）——都是 Swift 的測試替身；v0.7 `src/stats.ts`（本期統計/目標/補登，純 JS）＋`src/statsConfig.ts`（AsyncStorage/遠端 stats）
-- v0.8 `src/frameTrigger.ts`（綠色金額/畫面變化/OCR 排程）、`src/importLink.ts`（匯入 deep link，`scripts/make-import-link.mjs <json>` 產生連結）
-- `src/notify.ts` expo-notifications **本地**通知
+- v0.8 `src/frameTrigger.ts`（綠色金額/畫面變化/OCR 排程）、`src/importLink.ts`（匯入 deep link，`scripts/make-import-link.mjs <json>` 產生連結）；v0.9 `src/powerSaver.ts`（away 狀態機/省電倍率/有效排程）；`src/notify.ts` expo-notifications **本地**通知
 - `modules/live-activity/` 本地 Expo module（pod `LiveActivity`）：`isSupported/start/end/endAll/activeIds/drainNativeEvents/syncActiveOrders`；v0.3 加 `startStandby/activitySummaries`、view `BroadcastPicker`（`ref.show()`）；v0.4 加 `DetectorHub.swift`（`armDetection/stopDetection/detectorStatus`、事件 `onDetectorSignal`）；v0.5 同檔加 `KeepAlive`（定位）/`AudioKeepAlive`（備援）；v0.6 加 `DetectorCardPlan.swift`、`PandaTelemetry.swift`、`RemoteConfig.swift`、`setTelemetryContext`
-- `native/intents/*.swift` **主 App target** 的 App Intents（由 `plugins/withAppIntents.js` 加進 PandaTimer 的 Sources，並明確連結 AppIntents.framework）
-- `targets/widget/` @bacons/apple-targets 的 widget（PandaWidget），資料夾同步：目錄內 .swift 全自動編進 widget
-- `targets/broadcast/` 螢幕廣播 extension（apple-targets 型別 `broadcast-upload`，PandaBroadcast，`com.pandatimer.app.broadcast`）
+- `native/intents/*.swift` **主 App target** 的 App Intents（由 `plugins/withAppIntents.js` 加進 PandaTimer 的 Sources，並明確連結 AppIntents.framework）；`targets/widget/` @bacons/apple-targets 的 widget（PandaWidget），資料夾同步：目錄內 .swift 全自動編進 widget；`targets/broadcast/` 螢幕廣播 extension（apple-targets 型別 `broadcast-upload`，PandaBroadcast，`com.pandatimer.app.broadcast`）
 - `plugins/withNoEntitlements.js` 清空 entitlements 安全網；`plugins/withTelemetry.js` 把 app.json `extra.telemetryKey/telemetryUrl`＋runtimeVersion 寫進主 App Info.plist（`PandaTelemetryKey/URL/PandaRuntimeVersion`）；`test/*.test.mjs` node 單元測試（含 test/server.test.mjs 本機起伺服器）
 - `.github/workflows/ios-unsigned-ipa.yml` CI：共用檔 diff → prebuild → 無 entitlements → pod install → 未簽章 archive → 驗 PandaWidget＋PandaBroadcast 兩個 appex／**驗 Metadata.appintents 含四個 intent**、Info.plist 背景模式/定位字串、Expo.plist runtimeVersion → 打包 ipa
 - `ios/` 由 prebuild 產生（gitignore，不要手改）
 
 ## 指令
 - `npx tsc --noEmit`；`node --test`（不帶路徑；Node 22.18+ 直接載 .ts）
-- `npx expo prebuild -p ios --clean --no-install`（Linux 可跑，不能編譯）；`npx expo export -p ios --output-dir <tmp>`
-- 本機無法編 iOS；真正編譯只在 CI（push main/master 或 workflow_dispatch），artifact `PandaTimer-unsigned-ipa`
+- `npx expo prebuild -p ios --clean --no-install`（Linux 可跑，不能編譯）；`npx expo export -p ios --output-dir <tmp>`；本機無法編 iOS；真正編譯只在 CI（push main/master 或 workflow_dispatch），artifact `PandaTimer-unsigned-ipa`
 
 ## 鐵律：零 entitlement
 - 主 App、widget、PandaBroadcast 都**不得**有任何 entitlement（aps-environment、App Groups、iCloud、Siri、time-sensitive…），免費帳號簽不了。App Intents／App Shortcuts 不需要 entitlement。
-- expo-notifications 保持 `enableRemoteNotifications: false`；`withNoEntitlements` 是第二道防線。
-- `targets/*/expo-target.config.js` 不准加 `entitlements`；目錄內不准放 `*.entitlements`。
+- expo-notifications 保持 `enableRemoteNotifications: false`；`withNoEntitlements` 是第二道防線。`targets/*/expo-target.config.js` 不准加 `entitlements`；目錄內不准放 `*.entitlements`。
 - Live Activity 只靠 `NSSupportsLiveActivities` + `Activity.request(pushType: nil)`；JS 端只能前景啟動，背景啟動只能走 LiveActivityIntent。
 - 沒 App Group → widget 與 App 不共享資料；原生↔JS 只能用主 App 程序內的 `UserDefaults.standard`。
 - 背景模式只用 Info.plist `UIBackgroundModes=[location,audio]`＋`NSLocationWhenInUse/AlwaysAndWhenInUseUsageDescription`（app.json；都不是 entitlement，CI 與 test 會驗）。
@@ -40,8 +34,7 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 
 ## v0.2 App Intents（背景執行、不開 App、不切走 pandarider）
 - `StartFromScreenshotIntent`「從截圖開始」：參數 IntentFile（`supportedTypeIdentifiers`，iOS 17 不能用 supportedContentTypes）→ Vision OCR → `MinutePicker.pick`（規則與 `src/ocrPick.ts` 同一套，改一邊改兩邊）→ 開 Live Activity＋2 則通知＋寫事件。找不到分鐘數就丟可讀錯誤。
-- `DeliveredIntent`「送達」：結最早一筆進行中（依鏡像）。`DeliverActivityIntent`：動態島/鎖定畫面「送達」按鈕（`Button(intent:)`），結該卡片的單（同卡多單結最早截止、切下一單）；`isDiscoverable=false`，主 App 與 widget 都要有此型別。`PandaShortcuts` 讓前兩個出現在捷徑 App。
-- UserDefaults：`pandatimer.native.events.v1`（事件佇列：start/done）、`pandatimer.native.activeOrders.v1`（進行中鏡像）；讀改寫都在 `objc_sync(UserDefaults.standard)` 內。
+- `DeliveredIntent`「送達」：結最早一筆進行中（依鏡像）。`DeliverActivityIntent`：動態島/鎖定畫面「送達」按鈕（`Button(intent:)`），結該卡片的單（同卡多單結最早截止、切下一單）；`isDiscoverable=false`，主 App 與 widget 都要有此型別。`PandaShortcuts` 讓前兩個出現在捷徑 App。UserDefaults：`pandatimer.native.events.v1`（事件佇列：start/done）、`pandatimer.native.activeOrders.v1`（進行中鏡像）；讀改寫都在 `objc_sync(UserDefaults.standard)` 內。
 - **同步順序（鐵律）**：App 啟動 → `drainNativeEvents` 合併進 AsyncStorage → **之後**才 `reconcileActivities()`（否則原生剛開的動態島被當孤兒關掉）→ 之後每次訂單變動 `syncActiveOrders` 寫鏡像；回前景再 drain。原生 `syncActiveOrders` 會把尚未 drain 的 start/done 事件併進鏡像。
 - 捷徑：「熊貓接單」＝擷取螢幕畫面→從截圖開始（背面輕點兩下）；「熊貓送達」備用（輕點三下）。deep link `pandatimer://start?min=18`、`pandatimer://done`、v0.8 `pandatimer://import?d=…`（同 URL 3 秒內去重）。
 
@@ -67,6 +60,13 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - 備援①：點「偵測到新單」通知 → App 回前景 → 依鏡像重推偵測卡＋回讀。備援②：偵測卡 standby 時的「開始倒數」（`StartDetectedCountdownIntent`，App 程序）→ 依鏡像套用卡片。兩者都只改卡、不記錄。
 - 「停止偵測」：停保活；卡上還有單 → 保留倒數（heartbeat=nil），否則結束。心跳 >150 秒沒來 → 通知「偵測沒有回應」。
 
+## v0.9 省電（以 `test/powerSaver.test.mjs` 為準；遠端設定 2026-11-14.1）
+- **量測先行**：app beat/arm/disarm/sig 帶 `batt/charging/thermal(0~3)/lowPower`（`DevicePower`：UIDevice 只在主執行緒讀進快取）＋`cardSkip`；ext beat 帶 `ocrMin`（每分鐘 OCR 次數）/`probes`/`mode`/`awaySec`/`saver`/`lowPower/thermal`＋既有 `trig`；ext 事件 `mode`（away 進出＋reason）、`power`（省電開關）。新欄位要**伺服器重新部署**才收得到。
+- **away 模式**（`AwayTracker`＝TS 同名類）：連 `away.afterMisses`(5) 次 OCR 沒有 `away.keywords` 特徵詞（去空白比對）也沒接單鈕、沒在判定邀請/等送達 → 取消畫面變化觸發、固定間隔 `away.intervalSec`(6)、取樣 `away.probeIntervalSec`(0.5)；看到特徵詞或綠色觸發立刻回正常。判定用 `ScreenInfo.analyzeWithPresence`（原文不離開 runOCR）。
+- **省電倍率**：`ProcessInfo` 低電量模式（`power.onLowPower`）或 thermalState ≥ `power.thermalLevel`(2＝serious；4＝不看)→ 取樣/一般/閒置/快速/變化最小間隔/同畫面強制全部 ×`power.saverFactor`(1.5)（`PowerTiming`＝TS `effectiveTiming`）；偵測卡與 ext 診斷字顯示「省電中」。
+- **保活**：`keepAlive.locationAccuracy` hundred|kilometer|threeKilometers、`distanceFilterM`(0＝None)，預設 hundred/50（＝v0.5 實測）。Apple 論壇 727015：iOS 16.4 起「低精度＋距離過濾」背景可能被暫停，`showsBackgroundLocationIndicator=true`（本 App 有開）可避免——未實測，切低精度前先看 telemetry。
+- **動態島**：倒數是 `Text(style: .timer)`（系統畫，無每秒 update）；心跳的卡片 update 只在診斷字去掉心跳時間後有變、模式要變、或滿 `app.cardRefreshSeconds`(300) 才做（其他事件照舊立即）。telemetry 批次 `telemetry.flushSeconds` 預設 30→60（beat 仍 60 秒）。
+
 ## 遠端設定（v0.6：原生不能 OTA，參數改由伺服器下發）
 - **調偵測參數 → 改 `server/config.json`（記得改 `version`）跑 `bash scripts/push-config.sh`，不用重裝。** 公開 `GET /api/config`；內容：`picker`（分鐘/金額規則）、`detector`（接單鈕正則、去重秒數、OCR/裁切/雜湊/心跳；`goneAfterMisses` 只剩 v0.6 用）、`telemetry`（白名單、批次）、`app`（心跳逾時）、v0.7 `offer`（goneAfterMisses、decideWindowSec 5~60、accepted/rejectedKeywords 正則（去空白文字比對、不得命中空字串）、ambiguousAs accept|reject）、`stats`（JS 讀：graceFactor 1.05、overrunCap 1）、`delivery`（enabled、minOrderAgeSec 120、completedKeywords；v0.8 finalKeywords/pendingSec）、`ocr`（memSkipMB、memHighMB；v0.8 rebuildEvery/englishToo）；v0.8 `detector.fastOcrIntervalSeconds/changeMinBits/changeMinGapSeconds/probeIntervalSeconds/greenTrigger{…}`、`offer.stackedKeywords`、telemetry.keywords ≤60 列。伺服器以 config.default.json 補齊缺漏區塊。
 - extension：broadcastStarted 與每 `configRefreshSeconds`（600）抓；App（DetectorHub）：開始偵測、回前景（60 秒節流）、看門狗到期時抓。逾時 3 秒，失敗用各程序 UserDefaults 快取（`pandatimer.remoteConfig.v1`）或內建預設；**欄位缺漏/不合法 → 該欄位用預設**（範圍＝`src/remoteConfig.ts` RANGES，test 比對 Swift）。主 App 的「從截圖開始」用 `PickerConfig.cached()`。
@@ -75,13 +75,13 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 
 ## 遠端狀態回報（v0.6 telemetry，取代截圖回報）
 - **隱私鐵律：不得上傳 OCR 原文、地址、店名、顧客資訊。** 只送結構化欄位：時間、來源 ext/app、事件、幀/OCR 次數/記憶體、接單鈕、分鐘、金額、公里、**白名單 UI 關鍵字命中**（`ScreenInfo.keywords`＝`src/screenInfo.ts`＝server `TELEMETRY_KEYWORDS`，test 比對）、畫面分類、動態島回讀 ✓/✗、保活模式、定位授權、前景/背景、版本/OTA id。client 與 server 各擋一次欄位白名單（`allowedKeys`＝`FIELD_RULES`）。
-- 原生送（`PandaTelemetry`：10 筆或 30 秒一批、新單/錯誤立即送、失敗暫存 200 筆、每分鐘 ≤100 筆）；extension 讀所屬 App 的 Info.plist 拿金鑰/網址。JS 只顯示「回報：最後成功 HH:mm:ss」。
+- 原生送（`PandaTelemetry`：10 筆或 60 秒（v0.9）一批、新單/錯誤立即送、失敗暫存 200 筆、每分鐘 ≤100 筆）；extension 讀所屬 App 的 Info.plist 拿金鑰/網址。JS 只顯示「回報：最後成功 HH:mm:ss」。
 - 查詢：`bash scripts/telemetry.sh [YYYY-MM-DD] [--since 10m] [--follow] [--raw]`（唯讀 GET，讀取金鑰 `~/.config/pandatimer/telemetry-read-key`）。事件：ext `start/beat/screen/order/dup/stop/crashPrev/config`；app `arm/disarm/sig/beat/order/restore/keep/beatTimeout/fg/bg/config`。伺服器白名單關鍵字＝內建 ∪ 遠端設定 `telemetry.keywords`。
 - 金鑰：寫入＝app.json `extra.telemetryKey`＝`~/.config/pandatimer/telemetry-write-key`；讀取只在本機與伺服器 `server.env`。換金鑰＝改兩個本機檔＋app.json → 部署＋重編 App。
 
 ## OTA 更新（expo-updates，自架伺服器見 `server/README.md`）
-- app.json：`runtimeVersion:"0.8"`（固定字串）、`updates.url=https://wheat.yueshengift.xyz/pandatimer/api/manifest`、code signing 憑證 `server/certs/certificate.pem`（keyid main, rsa-v1_5-sha256）；`src/OtaBox.tsx` 在 App 底部顯示版本/更新 id/時間，回前景自動檢查＋下載，**不自動 reload**，出現「有新版，點此套用」按鈕才 `reloadAsync()`（`__DEV__` 或未啟用時隱藏）。
-- 純 JS 改動 → `bash scripts/publish-update.sh 0.8`（`--list`；`--republish <ts>` 回滾；`--rollback-embedded`）。原生改動（Swift、plugin、原生套件、app.json 原生設定）→ 升 runtimeVersion（app.json＋OtaBox APP_VERSION＋發佈參數）＋CI 編 ipa＋Sideloadly 重裝。
+- app.json：`runtimeVersion:"0.9"`（固定字串）、`updates.url=https://wheat.yueshengift.xyz/pandatimer/api/manifest`、code signing 憑證 `server/certs/certificate.pem`（keyid main, rsa-v1_5-sha256）；`src/OtaBox.tsx` 在 App 底部顯示版本/更新 id/時間，回前景自動檢查＋下載，**不自動 reload**，出現「有新版，點此套用」按鈕才 `reloadAsync()`（`__DEV__` 或未啟用時隱藏）。
+- 純 JS 改動 → `bash scripts/publish-update.sh 0.9`（`--list`；`--republish <ts>` 回滾；`--rollback-embedded`）。原生改動（Swift、plugin、原生套件、app.json 原生設定）→ 升 runtimeVersion（app.json＋OtaBox APP_VERSION＋發佈參數）＋CI 編 ipa＋Sideloadly 重裝。
 - 憑證換了＝已裝 App 拒收舊簽章更新，需重裝；私鑰在 `~/.config/pandatimer/keys/`，不進 repo。
 
 ## 本期統計（v0.7，`src/stats.ts`）
@@ -95,6 +95,5 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 
 ## 已知風險
 - Swift 只在 CI 編譯；CI 失敗先看 `xcodebuild.log` 的 error 行。runner `macos-26`（fileSystemSynchronizedGroups 需 Xcode 16+）。定位保活下背景 update、alertConfiguration 本地 update 都**沒有官方文件**，以實機為準。
-- v0.8 Swift 未經編譯。最不確定：`FrameProbe` 讀 CbCr 平面指標運算、`DeliveryEdge.observe(final:)` 標籤、`UIApplication.protectedData*Notification`（pod 內）、`FrameOCR` 重建 request。新 telemetry 欄位 `dMB/green/trig/stacked/lockAge/locked` 要**伺服器重新部署**才收得到。
-- 遠端設定 2026-11-13.1 的 telemetry.keywords 52 列 > v0.7 上限 40 → **v0.7 App 會整份改用內建白名單**（只影響回報，裝 v0.8 後恢復）；idle 1.5 秒與 memSkip 36 對 v0.7 也生效。
+- v0.9 Swift 未經編譯。最不確定：`DevicePower`（`Task { @MainActor }` 讀 UIDevice）、`PowerTiming.make` 回傳具名 tuple、`NSProcessInfoPowerStateDidChange`/`thermalStateDidChangeNotification` 觀察者。telemetry.keywords >40 列時 v0.7 App 整份改用內建白名單。
 - 免費帳號：每 7 天重簽、App ID 佔 **3** 個（主 App＋widget＋broadcast；免費帳號 7 天最多 10 個新 App ID）。動態島/通知權限需在 iPhone 允許。

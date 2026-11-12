@@ -22,9 +22,9 @@ test('欄位白名單：Swift allowedKeys ＝ 伺服器 FIELD_RULES 的鍵', () 
   }
 });
 
-test('節流參數：批次 10 筆／30 秒／暫存 200 筆／每分鐘 ≤100 筆（伺服器 120）', () => {
+test('節流參數：批次 10 筆／60 秒（v0.9）／暫存 200 筆／每分鐘 ≤100 筆（伺服器 120）', () => {
   const swift = read('../modules/live-activity/ios/PandaTelemetry.swift');
-  for (const s of ['static let maxBuffer = 200', 'static let batchSize = 10', 'static let flushInterval = 30', 'static let maxPerMinute = 100']) {
+  for (const s of ['static let maxBuffer = 200', 'static let batchSize = 10', 'static let flushInterval = 60', 'static let maxPerMinute = 100']) {
     assert.ok(swift.includes(s), s);
   }
   assert.ok(read('../server/index.mjs').includes("process.env.TELEMETRY_RATE_PER_MIN || 120"));

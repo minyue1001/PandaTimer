@@ -10,6 +10,7 @@ import { DEFAULT_STATS, type StatsParams } from './stats.ts';
 import { DEFAULT_PAY, type PayParams } from './earnings.ts';
 import { DEFAULT_DELIVERY, type DeliverySettings } from './deliveryDetector.ts';
 import { DEFAULT_GREEN, type GreenTriggerSettings } from './frameTrigger.ts';
+import { DEFAULT_AWAY, DEFAULT_POWER, type AwaySettings, type PowerSettings } from './powerSaver.ts';
 
 /** v0.7 extension OCR 記憶體保護；v0.8 每 rebuildEvery 次 OCR 重建 VNRecognizeTextRequest、englishToo=false 只用 zh-Hant */
 export type OcrSettings = { memSkipMB: number; memHighMB: number; rebuildEvery: number; englishToo: boolean };
@@ -42,7 +43,15 @@ export type DetectorSettings = {
 };
 
 export type TelemetrySettings = { keywords: string[][]; flushSeconds: number; batchSize: number };
-export type AppSettings = { beatTimeoutSeconds: number };
+/** v0.9 cardRefreshSeconds：心跳的動態島 update 只在診斷字有實質變化、或距上次 update 滿這麼多秒才做 */
+export type AppSettings = { beatTimeoutSeconds: number; cardRefreshSeconds: number };
+
+/** v0.9 App 定位保活精度（App 只需要不被暫停、不需要精準位置；低精度可能被 iOS 暫停 → 預設維持 hundred，看 telemetry 再切） */
+export type LocationAccuracy = 'hundred' | 'kilometer' | 'threeKilometers';
+export const LOCATION_ACCURACIES: readonly LocationAccuracy[] = ['hundred', 'kilometer', 'threeKilometers'];
+/** distanceFilterM 0＝kCLDistanceFilterNone */
+export type KeepAliveSettings = { locationAccuracy: LocationAccuracy; distanceFilterM: number };
+export const DEFAULT_KEEP_ALIVE: Readonly<KeepAliveSettings> = Object.freeze({ locationAccuracy: 'hundred', distanceFilterM: 50 });
 
 export type RemoteConfig = {
   version: string;
@@ -60,6 +69,10 @@ export type RemoteConfig = {
   delivery: DeliverySettings;
   /** v0.7 extension OCR 記憶體保護：目前 > memSkipMB 跳過該幀；OCR 中量到 > memHighMB → 之後 120 秒只認大字 */
   ocr: OcrSettings;
+  /** v0.9 省電：pandarider 不在畫面上（extension）、低電量/過熱倍率（extension＋App 偵測卡「省電中」）、定位保活精度（App） */
+  away: AwaySettings;
+  power: PowerSettings;
+  keepAlive: KeepAliveSettings;
 };
 
 export const DEFAULT_DETECTOR: Readonly<DetectorSettings> = Object.freeze({
@@ -88,13 +101,16 @@ export const DEFAULT_CONFIG: Readonly<RemoteConfig> = Object.freeze({
   version: 'default',
   picker: { ...DEFAULT_PICKER, keywords: [...DEFAULT_PICKER.keywords] },
   detector: { ...DEFAULT_DETECTOR, greenTrigger: { ...DEFAULT_GREEN } },
-  telemetry: { keywords: UI_KEYWORDS.map((r) => [...r]), flushSeconds: 30, batchSize: 10 },
-  app: { beatTimeoutSeconds: 150 },
+  telemetry: { keywords: UI_KEYWORDS.map((r) => [...r]), flushSeconds: 60, batchSize: 10 },
+  app: { beatTimeoutSeconds: 150, cardRefreshSeconds: 300 },
   offer: { ...DEFAULT_OFFER },
   stats: { ...DEFAULT_STATS },
   pay: { ...DEFAULT_PAY },
   delivery: { ...DEFAULT_DELIVERY },
   ocr: { ...DEFAULT_OCR },
+  away: { ...DEFAULT_AWAY },
+  power: { ...DEFAULT_POWER },
+  keepAlive: { ...DEFAULT_KEEP_ALIVE },
 });
 
 /** 數值欄位的合法範圍（[min, max, 是否整數]）；Swift 端用同一組範圍 */
@@ -132,6 +148,7 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'telemetry.flushSeconds': [5, 600, true],
   'telemetry.batchSize': [1, 50, true],
   'app.beatTimeoutSeconds': [60, 1800, true],
+  'app.cardRefreshSeconds': [60, 1800, true],
   'offer.goneAfterMisses': [1, 20, true],
   'offer.decideWindowSec': [5, 60, true], // 延遲訊號只編 0~60 秒
   'stats.graceFactor': [1, 2, false],
@@ -143,10 +160,18 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'ocr.memSkipMB': [20, 60, false],
   'ocr.memHighMB': [25, 80, false],
   'ocr.rebuildEvery': [1, 1000, true],
+  'away.afterMisses': [1, 100, true],
+  'away.intervalSec': [1, 60, false],
+  'away.probeIntervalSec': [0.05, 2, false],
+  'power.saverFactor': [1, 5, false],
+  'power.thermalLevel': [1, 4, true], // 4＝不看溫度
+  'keepAlive.distanceFilterM': [0, 5000, true], // 0＝kCLDistanceFilterNone
 };
 
 /** 布林欄位 */
-const BOOL_FIELDS = new Set(['delivery.enabled', 'pay.assumeStarredLate', 'ocr.englishToo', 'detector.greenTrigger.enabled']);
+const BOOL_FIELDS = new Set([
+  'delivery.enabled', 'pay.assumeStarredLate', 'ocr.englishToo', 'detector.greenTrigger.enabled', 'away.enabled', 'power.onLowPower',
+]);
 
 /** 正則欄位：要編得過，且（需要的）至少 1 個捕捉群組 */
 const REGEX_FIELDS: Record<string, { flags: string; groups: number }> = {
@@ -159,6 +184,7 @@ const REGEX_FIELDS: Record<string, { flags: string; groups: number }> = {
   'offer.stackedKeywords': { flags: '', groups: 0 },
   'delivery.completedKeywords': { flags: '', groups: 0 },
   'delivery.finalKeywords': { flags: '', groups: 0 },
+  'away.keywords': { flags: '', groups: 0 },
 };
 
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
@@ -181,7 +207,7 @@ export function validateConfig(raw: unknown): { config: RemoteConfig; problems: 
   if (typeof src.version === 'string' && src.version.length > 0 && src.version.length <= 40) out.version = src.version;
   else problems.push('version 缺漏或不是 1~40 字的字串');
 
-  for (const section of ['picker', 'detector', 'telemetry', 'app', 'offer', 'stats', 'pay', 'delivery', 'ocr'] as const) {
+  for (const section of ['picker', 'detector', 'telemetry', 'app', 'offer', 'stats', 'pay', 'delivery', 'ocr', 'away', 'power', 'keepAlive'] as const) {
     const s = src[section];
     if (s !== undefined && !isObj(s)) problems.push(`${section} 不是物件`);
     const sec = isObj(s) ? s : {};
@@ -224,11 +250,14 @@ function checkFields(prefix: string, sec: Record<string, unknown>, target: Recor
       } else if (regex) {
         const g = typeof v === 'string' && v.length > 0 && v.length <= 300 ? captureGroups(v, regex.flags) : null;
         // 能命中空字串的（例如 'a|' 或 '.*'）一律不收：每個畫面都會「命中」
-        if (g != null && g >= regex.groups && !((path.startsWith('offer.') || path.startsWith('delivery.')) && new RegExp(v as string, regex.flags).test(''))) target[key] = v;
+        if (g != null && g >= regex.groups && !((path.startsWith('offer.') || path.startsWith('delivery.') || path.startsWith('away.')) && new RegExp(v as string, regex.flags).test(''))) target[key] = v;
         else problems.push(`${path} 正則編不過或捕捉群組不足 → 用預設`);
       } else if (BOOL_FIELDS.has(path)) {
         if (typeof v === 'boolean') target[key] = v;
         else problems.push(`${path} 要是 true/false → 用預設`);
+      } else if (path === 'keepAlive.locationAccuracy') {
+        if (LOCATION_ACCURACIES.includes(v as LocationAccuracy)) target[key] = v;
+        else problems.push(`${path} 要是 ${LOCATION_ACCURACIES.map((x) => `"${x}"`).join('/')} → 用預設`);
       } else if (path === 'offer.ambiguousAs') {
         if (v === 'accept' || v === 'reject') target[key] = v;
         else problems.push(`${path} 要是 "accept" 或 "reject" → 用預設`);

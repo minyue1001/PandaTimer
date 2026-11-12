@@ -212,6 +212,15 @@ enum ScreenInfo {
       stacked: stacked)
   }
 
+  /// v0.9：摘要＋「畫面上有沒有 pandarider」（特徵詞 away.keywords 或接單鈕；away 模式用，同 src/powerSaver.ts pandaPresent）。
+  /// 只回布林，原文同樣不離開這裡
+  static func analyzeWithPresence(_ raw: String, rules: ScreenRules, awayKeywords: String) -> (summary: Summary, panda: Bool) {
+    let info = analyze(raw, rules: rules)
+    let panda = info.accept
+      || firstOfferMatch(compact(raw), awayKeywords, fallback: RemoteConfig.AwaySettings.defaultKeywords) != nil
+    return (info, panda)
+  }
+
   /// 金額 → 訊號/去重用的整數鍵（四捨五入，0~999；抓不到或超出範圍 → 0）。同 src/ocrPick.ts 的 amountKey
   static func amountKey(_ amount: Double?) -> Int {
     guard let a = amount, a.isFinite else { return 0 }

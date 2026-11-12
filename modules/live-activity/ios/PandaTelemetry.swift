@@ -9,7 +9,7 @@ import Foundation
 //   （PlugIns/PandaBroadcast.appex 往上兩層）。缺設定 → 停用，只記在 snapshot。
 // 隱私鐵律：不得上傳 OCR 原文、地址、店名、顧客資訊。呼叫端只能傳結構化欄位；這裡再擋一次：
 //   只收 allowedKeys（伺服器 server/index.mjs 的 FIELD_RULES 也只收同一批）、字串截 80 字、kw 只收 ≤12 字的字串陣列。
-// 批次＋節流：累積 10 筆或每 30 秒送一次；urgent（新單/錯誤）立即送；失敗留在記憶體最多 200 筆（丟最舊）；
+// 批次＋節流：累積 10 筆或每 60 秒（v0.9 省電；v0.6~0.8 是 30 秒，遠端 telemetry.flushSeconds 可調）送一次；urgent（新單/錯誤）立即送；失敗留在記憶體最多 200 筆（丟最舊）；
 // 每分鐘最多記 100 筆（伺服器上限 120），超過的非 urgent 事件直接丟（計入 dropped）。全部在自己的 queue 上跑，不阻塞偵測。
 final class PandaTelemetry {
   struct Snapshot {
@@ -24,7 +24,7 @@ final class PandaTelemetry {
   static let maxBuffer = 200
   static let batchSize = 10
   static let maxPerPost = 50
-  static let flushInterval = 30
+  static let flushInterval = 60
   static let maxPerMinute = 100
 
   /// ⚠️ 與 server/index.mjs 的 FIELD_RULES 鍵名一致（test/telemetry.test.mjs 比對）
@@ -36,6 +36,9 @@ final class PandaTelemetry {
     "note", "code", "sent", "dropped", "beatAge", "reason", "cfg",
     "result", "wait", "delay", "hit",
     "dMB", "green", "trig", "stacked", "lockAge", "locked",
+    // v0.9 省電量測：電量%/充電中/溫度狀態 0~3/低電量模式；ext 每分鐘 OCR 次數、取樣次數、模式 normal|away、
+    //   本心跳區間 away 秒數、省電倍率生效中；app 心跳的動態島 update 略過次數
+    "batt", "charging", "thermal", "lowPower", "ocrMin", "probes", "mode", "awaySec", "saver", "cardSkip",
   ]
 
   private let endpoint: URL?

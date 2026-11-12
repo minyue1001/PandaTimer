@@ -394,6 +394,8 @@ const FIELD_RULES = {
   result: S, wait: N, delay: N, hit: 'kw',
   // v0.8：OCR 前後記憶體差最大值、綠色金額比例、OCR 觸發原因、夾單、鎖屏（距上次鎖屏秒數／目前是否鎖屏）
   dMB: N, green: N, trig: S, stacked: B, lockAge: N, locked: B,
+  // v0.9 省電量測：電量%、充電中、溫度狀態 0~3、低電量模式；ext 每分鐘 OCR 次數/取樣次數/模式/away 秒數/省電倍率生效；app 動態島略過次數
+  batt: N, charging: B, thermal: N, lowPower: B, ocrMin: N, probes: N, mode: S, awaySec: N, saver: B, cardSkip: N,
 };
 const MAX_STR = 80;
 

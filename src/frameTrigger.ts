@@ -14,6 +14,7 @@
 //   ④ 其餘照固定間隔：疑似邀請狀態（綠色 hold 中／OfferTracker 等判定中／上次 OCR 有接單鈕）fastOcrIntervalSeconds，
 //      否則 ocrIntervalSeconds，連 idleAfterMisses 次沒接單鈕 idleOcrIntervalSeconds（v0.8 預設 1.5）；
 //      到了間隔但畫面跟上次 OCR 幾乎相同（≤ sameFrameMaxBits）→ 跳過，最多 forceOcrSeconds 強制一次。
+// v0.9 省電（src/powerSaver.ts）：away 模式取消③、間隔/取樣拉長；低電量/過熱時所有間隔 ×saverFactor。
 
 export type GreenTriggerSettings = {
   enabled: boolean;
@@ -138,14 +139,17 @@ export function planOcr(input: {
   diffFromPrev: number | null;
   greenPending: boolean;
   s: ScheduleSettings;
+  /** v0.9：away 模式（pandarider 不在畫面上）取消畫面變化觸發；省略＝true */
+  changeEnabled?: boolean;
 }): OcrPlan {
   const { now, lastOcrAt, interval, fast, diffFromOcr, diffFromPrev, greenPending, s } = input;
+  const changeEnabled = input.changeEnabled ?? true;
   if (lastOcrAt == null) return { run: true, why: 'first' };
   const since = now - lastOcrAt;
   if (since >= s.changeMinGapSeconds) {
     if (greenPending) return { run: true, why: 'green' };
     const settled = diffFromPrev != null && diffFromPrev <= s.sameFrameMaxBits;
-    if (diffFromOcr != null && diffFromOcr > s.changeMinBits && settled) return { run: true, why: 'change' };
+    if (changeEnabled && diffFromOcr != null && diffFromOcr > s.changeMinBits && settled) return { run: true, why: 'change' };
   }
   if (since < interval) return { run: false, skip: 'wait' };
   const same = diffFromOcr != null && diffFromOcr <= s.sameFrameMaxBits;

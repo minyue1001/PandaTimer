@@ -36,6 +36,12 @@ import UserNotifications
 //   - 鎖屏/解鎖（protectedData 通知）回報 lock/unlock；偵測中（使用者沒按停止偵測）卻收到 stopped →
 //     通知「偵測停止了，點我重新開始」（userInfo pandatimer=redetect，JS 點了自動叫出廣播視窗；60 秒內不重複）＋偵測卡顯示。
 //   註冊：517＋1＋61＝579 個（< 1000）。
+// v0.9 省電：
+//   - 心跳的偵測卡 update 只在診斷字有實質變化（去掉心跳時間後不同、模式要變）或距上次 update 滿 app.cardRefreshSeconds（300）
+//     才做（pushCard throttle；其他事件照舊立即 update）。倒數用 Text(style: .timer) 由系統畫，不需要每秒 update。
+//   - beat/arm/disarm/sig 帶 batt/charging/thermal/lowPower（DevicePower；UIDevice 只在主執行緒讀，快取）。
+//   - 低電量模式或過熱（power 設定，同 extension 規則）→ 偵測卡診斷字加「省電中」。
+//   - 定位保活精度/距離過濾走遠端設定 keepAlive（預設 hundred/50＝v0.5~0.8 行為）。
 final class DetectorHub {
   static let shared = DetectorHub()
 
@@ -180,6 +186,11 @@ final class DetectorHub {
 
   private let watchdogInterval = 30
   private var beatTimeout: TimeInterval = 150
+  /// v0.9：心跳 update 節流、省電判定設定、心跳略過的 update 次數
+  private var cardRefresh: TimeInterval = 300
+  private var lastCardPushAt: Date?
+  private var cardSkips = 0
+  private var power = RemoteConfig.PowerSettings()
 
   // MARK: - 對外（由 LiveActivityModule 呼叫）
 
@@ -226,6 +237,10 @@ final class DetectorHub {
   private func applyConfig() {
     let root = remote.snapshot()
     beatTimeout = RemoteConfig.beatTimeout(root)
+    cardRefresh = RemoteConfig.cardRefreshSeconds(root)
+    power = RemoteConfig.power(root)
+    let k = RemoteConfig.keepAlive(root)
+    keepAlive.configure(accuracy: k.locationAccuracy, distanceFilterM: k.distanceFilterM)
     let t = RemoteConfig.telemetry(root)
     telemetry.configure(flushSeconds: t.flushSeconds, batchSize: t.batchSize)
     telemetry.setContext(["cfg": RemoteConfig.version(root)])
@@ -282,7 +297,8 @@ final class DetectorHub {
       self.keepAlive.start()
       self.startWatchdog()
       self.refreshConfig(force: true)
-      self.telemetry.log("arm", self.appFields(), urgent: true)
+      DevicePower.refresh()
+      self.telemetry.log("arm", self.appFields().merging(DevicePower.fields()) { $1 }, urgent: true)
     }
   }
 
@@ -293,7 +309,7 @@ final class DetectorHub {
       self.stoppedUnexpectedAt = nil
       self.keepAlive.stop()
       self.stopWatchdog()
-      self.telemetry.log("disarm", self.appFields())
+      self.telemetry.log("disarm", self.appFields().merging(DevicePower.fields()) { $1 })
     }
     for activity in Activity<PandaTimerAttributes>.activities where Self.isDetectorCard(activity) {
       var state = activity.content.state
@@ -404,13 +420,18 @@ final class DetectorHub {
         startWatchdog()
       }
       pushCard(note: "偵測已啟動")
-      telemetry.log("sig", appFields().merging(["note": "started"]) { $1 }, urgent: true)
+      DevicePower.refresh()
+      telemetry.log(
+        "sig", appFields().merging(["note": "started"]) { $1 }.merging(DevicePower.fields()) { $1 }, urgent: true)
       emit(["type": "started"])
     case .heartbeat:
       lastBeat = now
       beatAlerted = false
-      pushCard(note: nil)
-      telemetry.log("beat", appFields())
+      pushCard(note: nil, throttle: true)
+      var fields = appFields().merging(DevicePower.fields()) { $1 }
+      fields["cardSkip"] = cardSkips
+      telemetry.log("beat", fields)
+      DevicePower.refresh()  // 下一次 beat 用（UIDevice 要在主執行緒讀）
       emit(["type": "heartbeat"])
     case .stopped:
       // v0.8：使用者沒按「停止偵測」（仍 armed）＝非預期停止 → 通知可一鍵重新開始
@@ -420,7 +441,7 @@ final class DetectorHub {
       keepAlive.stop()
       stopWatchdog()
       clearOffer()
-      var fields = appFields().merging(["note": "stopped"]) { $1 }
+      var fields = appFields().merging(["note": "stopped"]) { $1 }.merging(DevicePower.fields()) { $1 }
       fields["locked"] = lockedAt != nil
       if let at = lockedAt { fields["lockAge"] = Int(now.timeIntervalSince(at)) }
       fields["reason"] = unexpected ? "unexpected" : "userStopped"
@@ -790,9 +811,13 @@ final class DetectorHub {
   }
 
   /// 只更新心跳與診斷字（倒數內容不動）。stopping：非倒數中的卡改成「偵測已停止」。
-  private func pushCard(note: String?, stopping: Bool = false) {
+  /// v0.9 throttle（只有心跳用）：卡上的診斷字去掉心跳時間後一樣、模式不變、且距上次 update 未滿 cardRefreshSeconds → 不 update
+  /// （省 Live Activity 更新；心跳停了由看門狗 150 秒逾時強制 update 警告）。
+  private func pushCard(note: String?, stopping: Bool = false, throttle: Bool = false) {
     let text = diagText(note: note)
     let beat = lastBeat ?? Date()
+    let now = Date()
+    let due = !throttle || lastCardPushAt.map { now.timeIntervalSince($0) >= cardRefresh } ?? true
     Task {
       guard let activity = Self.detectorCard() else { return }
       let current = activity.content
@@ -803,11 +828,25 @@ final class DetectorHub {
       } else if state.mode == "stopped" {
         state.mode = "standby"
       }
+      if !due && state.mode == current.state.mode
+        && Self.stableDiag(current.state.diag) == Self.stableDiag(text)
+      {
+        self.queue.async { self.cardSkips += 1 }
+        return
+      }
       state.heartbeat = beat
       state.diag = text
       let staleDate = state.mode == "countdown" ? current.staleDate : nil
+      self.queue.async { self.lastCardPushAt = Date() }
       await activity.update(ActivityContent(state: state, staleDate: staleDate))
     }
+  }
+
+  /// 診斷字去掉心跳時間（「App 已收到心跳 12:34:56」→「App 已收到心跳」），比較「實質變化」用
+  static func stableDiag(_ text: String?) -> String {
+    guard let text = text else { return "" }
+    return text.replacingOccurrences(
+      of: "App 已收到心跳 [0-9]{1,2}:[0-9]{2}:[0-9]{2}", with: "App 已收到心跳", options: .regularExpression)
   }
 
   private func diagText(note: String?) -> String {
@@ -819,6 +858,8 @@ final class DetectorHub {
       parts.append("App 尚未收到心跳")
     }
     parts.append("保活:\(keepAlive.snapshot().text)")
+    // v0.9：低電量模式/過熱 → extension 所有間隔 ×saverFactor（同一套規則，各程序自己看 ProcessInfo）
+    if RemoteConfig.deviceSaver(power).saver { parts.append("省電中") }
     parts.append("設定 \(remote.version)")
     if let m = lastOrderMinutes, let at = lastOrderAt {
       parts.append("最近新單:\(m)分 \(Self.hm(at))")
@@ -853,11 +894,12 @@ final class DetectorHub {
       refreshConfig(force: true)
     }
     let keep = keepAlive.snapshot()
-    let keepTag = "\(keep.mode)|\(keep.locationAuth)|\(keep.error ?? "")"
+    let keepTag = "\(keep.mode)|\(keep.locationAuth)|\(keep.error ?? "")|\(keep.accuracyText)"
     if keepTag != lastKeepLogged {
       lastKeepLogged = keepTag
       var fields = appFields()
       if let e = keep.error { fields["reason"] = e }
+      fields["note"] = keep.accuracyText
       telemetry.log("keep", fields, urgent: keep.error != nil)
     }
     let since = lastBeat ?? armedAt ?? now
@@ -922,6 +964,8 @@ final class KeepAlive: NSObject, CLLocationManagerDelegate {
     let locationAuth: String
     let lastFixAt: Date?
     let error: String?
+    /// v0.9：目前套用的精度/距離過濾（例 "hundred/50m"）
+    let accuracyText: String
 
     var text: String {
       guard wanted else { return "無" }
@@ -944,6 +988,7 @@ final class KeepAlive: NSObject, CLLocationManagerDelegate {
     var auth = "unknown"
     var fix: Date?
     var error: String?
+    var accuracy = "hundred/50m"
   }
   private var published = Published()
 
@@ -955,6 +1000,9 @@ final class KeepAlive: NSObject, CLLocationManagerDelegate {
   private var fallbackReason: String?  // "denied" | "failed"
   private var locationError: String?
   private(set) var lastLocation: CLLocation?  // 以後做到點提醒用；本版只存記憶體
+  /// v0.9 遠端設定 keepAlive（只在主執行緒）：保活只需要 App 不被暫停，不需要精準位置
+  private var accuracyName = "hundred"
+  private var distanceFilterM = 50
 
   func snapshot() -> Snapshot {
     lock.lock()
@@ -964,7 +1012,8 @@ final class KeepAlive: NSObject, CLLocationManagerDelegate {
     var error = p.error
     if p.mode == "audio", let e = audioSnap.error { error = (error.map { $0 + "；" } ?? "") + "音訊：\(e)" }
     return Snapshot(
-      wanted: p.wanted, mode: p.mode, audio: audioSnap, locationAuth: p.auth, lastFixAt: p.fix, error: error)
+      wanted: p.wanted, mode: p.mode, audio: audioSnap, locationAuth: p.auth, lastFixAt: p.fix, error: error,
+      accuracyText: p.accuracy)
   }
 
   func start() {
@@ -996,6 +1045,28 @@ final class KeepAlive: NSObject, CLLocationManagerDelegate {
     }
   }
 
+  /// v0.9 遠端設定 keepAlive.locationAccuracy（"hundred"|"kilometer"|"threeKilometers"）/ distanceFilterM（0＝不過濾）。
+  /// ⚠️ Apple（論壇 727015）：iOS 16.4 起「低精度＋距離過濾」可能在背景被暫停，除非 showsBackgroundLocationIndicator=true
+  /// （本 App 有開）→ 預設維持 hundred/50（v0.5 實測可行），低精度要看 telemetry 對照後再切。
+  func configure(accuracy: String, distanceFilterM: Int) {
+    onMain {
+      guard accuracy != self.accuracyName || distanceFilterM != self.distanceFilterM else { return }
+      self.accuracyName = accuracy
+      self.distanceFilterM = distanceFilterM
+      if let m = self.manager { self.applyAccuracy(m) }
+      self.publish()
+    }
+  }
+
+  private func applyAccuracy(_ m: CLLocationManager) {
+    switch accuracyName {
+    case "kilometer": m.desiredAccuracy = kCLLocationAccuracyKilometer
+    case "threeKilometers": m.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+    default: m.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+    m.distanceFilter = distanceFilterM > 0 ? CLLocationDistance(distanceFilterM) : kCLDistanceFilterNone
+  }
+
   private func onMain(_ work: @escaping () -> Void) {
     if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
   }
@@ -1004,8 +1075,7 @@ final class KeepAlive: NSObject, CLLocationManagerDelegate {
     guard manager == nil else { return }
     let m = CLLocationManager()
     m.delegate = self
-    m.desiredAccuracy = kCLLocationAccuracyHundredMeters
-    m.distanceFilter = 50
+    applyAccuracy(m)  // v0.9：預設 kCLLocationAccuracyHundredMeters / 50m（遠端設定 keepAlive）
     m.activityType = .otherNavigation
     m.pausesLocationUpdatesAutomatically = false
     m.showsBackgroundLocationIndicator = true
@@ -1065,7 +1135,8 @@ final class KeepAlive: NSObject, CLLocationManagerDelegate {
   private func publish() {
     let auth = manager.map { Self.authText($0.authorizationStatus) } ?? "unknown"
     let next = Published(
-      wanted: wanted, mode: wanted ? mode : "none", auth: auth, fix: lastLocation?.timestamp, error: locationError)
+      wanted: wanted, mode: wanted ? mode : "none", auth: auth, fix: lastLocation?.timestamp, error: locationError,
+      accuracy: "\(accuracyName)/\(distanceFilterM)m")
     lock.lock()
     published = next
     lock.unlock()
@@ -1267,6 +1338,41 @@ final class AudioKeepAlive {
 }
 
 // MARK: - v0.7 自動送達：從進行中鏡像結單（同 PandaSharedStore.finishOrder 的格式與鎖；pod 看不到主 App target 的型別）
+
+// MARK: - v0.9 電量/溫度量測（telemetry batt/charging/thermal/lowPower）
+// UIDevice 是主執行緒 API → 在主執行緒讀進快取（refresh），任何執行緒讀快取（fields）；ProcessInfo 執行緒安全，直接讀。
+
+enum DevicePower {
+  private static let lock = NSLock()
+  private static var battery: (level: Int, charging: Bool)?
+
+  static func refresh() {
+    Task { @MainActor in
+      let device = UIDevice.current
+      if !device.isBatteryMonitoringEnabled { device.isBatteryMonitoringEnabled = true }
+      let level = device.batteryLevel  // 0…1；未知 -1
+      let state = device.batteryState
+      let value: (level: Int, charging: Bool)? =
+        level < 0 ? nil : (level: Int((level * 100).rounded()), charging: state == .charging || state == .full)
+      DevicePower.lock.lock()
+      DevicePower.battery = value
+      DevicePower.lock.unlock()
+    }
+  }
+
+  static func fields() -> [String: Any] {
+    let info = ProcessInfo.processInfo
+    var d: [String: Any] = ["thermal": info.thermalState.rawValue, "lowPower": info.isLowPowerModeEnabled]
+    lock.lock()
+    let b = battery
+    lock.unlock()
+    if let b = b {
+      d["batt"] = b.level
+      d["charging"] = b.charging
+    }
+    return d
+  }
+}
 
 enum AutoDelivery {
   /// 手動結單時間（ms；PandaSharedStore.finishOrder 與 JS 結單〔syncActiveOrders 偵測到單被移除〕寫入）

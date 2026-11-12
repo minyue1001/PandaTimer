@@ -27,6 +27,12 @@ import Vision
 //   - 送達：「訂單完成」優先；只看到「確認已送達」對話框先待定 delivery.pendingSec 秒（DeliveryEdge＝src/deliveryDetector.ts），
 //     送出前先送 com.pandatimer.delivered.delay.<秒>；廣播停止時待定的照對話框時間送出。
 //   - broadcastPaused/Resumed 回報 pause/resume；stop 帶最後畫面（screen/kw）方便對照停止原因。
+// v0.9 省電（規則＝src/powerSaver.ts，以 TS 測試為準）：
+//   - away 模式：連 away.afterMisses 次 OCR 沒有 pandarider 特徵詞（away.keywords）也沒接單鈕、沒在判定邀請/等送達
+//     → 取消畫面變化觸發（只留綠色金額觸發）、固定間隔 away.intervalSec（6 秒）、取樣 away.probeIntervalSec（0.5 秒）；
+//     看到特徵詞或綠色觸發立刻回正常（AwayTracker；切換時 telemetry "mode"）。
+//   - 低電量模式或 thermalState ≥ power.thermalLevel → 所有間隔 ×power.saverFactor（PowerTiming；切換時 telemetry "power"）。
+//   - beat 多帶 ocrMin（每分鐘 OCR 次數）/probes（本區間取樣次數）/mode/awaySec/saver/lowPower/thermal。
 //
 // 省記憶體（v0.4 實測峰值 43MB → v0.5 目標 ≤36MB；jetsam 約 50MB）：
 //  - 不用 CIContext：直接讀 pixel buffer 的亮度平面（420f 的 Y），只取畫面下方 50%，
@@ -143,6 +149,9 @@ final class BroadcastDetector {
     /// v0.7 自動送達（遠端設定 "delivery"）、OCR 記憶體保護（"ocr"）
     var delivery = RemoteConfig.DeliverySettings()
     var ocrGuard = RemoteConfig.OcrSettings()
+    /// v0.9 省電（遠端設定 "away"、"power"）
+    var away = RemoteConfig.AwaySettings()
+    var power = RemoteConfig.PowerSettings()
     var version = "default"
 
     init() {}
@@ -177,6 +186,8 @@ final class BroadcastDetector {
       rules.completedKeywords = delivery.completedKeywords
       rules.finalKeywords = delivery.finalKeywords
       ocrGuard = RemoteConfig.ocr(root)
+      away = RemoteConfig.away(root)
+      power = RemoteConfig.power(root)
       version = RemoteConfig.version(root)
     }
   }
@@ -215,8 +226,18 @@ final class BroadcastDetector {
   private var skipped = 0
   private var imageFailures = 0
   private var badFormat: OSType?
+  /// 最近一次取樣實際用的固定 OCR 間隔（含 away/省電倍率；只給診斷/回報顯示）
   private var currentInterval: CFAbsoluteTime = 1.5
   private var settings = DetectorSettings()
+  /// v0.9 省電：連續沒接單鈕（閒置間隔）、away 狀態機、省電倍率生效中、本心跳區間取樣次數與 away 秒數
+  private var idleFlag = false
+  private let awayTracker = AwayTracker()
+  private var saverFlag = false
+  private var lowPowerNow = false
+  private var thermalNow = 0
+  private var probeCount = 0
+  private var awaySince: CFAbsoluteTime?
+  private var awaySecAcc: Double = 0
 
   // 只在 workQueue 存取
   private var ocrCount = 0
@@ -248,6 +269,10 @@ final class BroadcastDetector {
   private var ocrDeltaMax: Double = 0
   private var lastInfo: ScreenInfo.Summary?
   private var lastWhy = ""
+  /// v0.9：上次心跳時的 OCR 次數與時間（算每分鐘 OCR 次數）、省電狀態通知
+  private var ocrCountAtBeat = 0
+  private var lastBeatAt = Date()
+  private var powerObservers: [NSObjectProtocol] = []
 
   // MARK: - 生命週期（由 SampleHandler 轉呼叫）
 
@@ -259,7 +284,17 @@ final class BroadcastDetector {
     settings = initial
     currentInterval = initial.ocrInterval
     lock.unlock()
+    // v0.9：低電量模式/溫度變化 → 重算省電倍率（通知在任意執行緒，轉到 workQueue）
+    let center = NotificationCenter.default
+    for name in [Notification.Name.NSProcessInfoPowerStateDidChange, ProcessInfo.thermalStateDidChangeNotification] {
+      powerObservers.append(
+        center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
+          guard let self = self else { return }
+          self.workQueue.async { self.refreshPower() }
+        })
+    }
     workQueue.async {
+      self.lastBeatAt = Date()
       self.applyConfig(self.remote.snapshot())
       self.refreshConfig()
       if let previous = RunRecord.reportPreviousIfCrashed() {
@@ -284,6 +319,8 @@ final class BroadcastDetector {
   func finish() {
     heartbeatTimer?.cancel()
     heartbeatTimer = nil
+    powerObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    powerObservers = []
     // v0.7：還在等判定的邀請先結案（offered → 未接；deciding → 依 ambiguousAs），訂單訊號要在 stopped 之前送
     workQueue.sync {
       self.decisionTimer?.cancel()
@@ -303,7 +340,7 @@ final class BroadcastDetector {
       let text = self.diag()
       RunRecord.save(diag: "偵測已停止 \(Clock.hms(Date())) · \(text)", finished: true)
       // v0.8：帶最後一次 OCR 的畫面摘要與距今秒數，對照停止原因（例如送達對話框→拍照）
-      var fields = self.statsFields()
+      var fields = self.statsFields().merging(self.powerFields(reset: false)) { $1 }
       if let i = self.lastInfo {
         fields["screen"] = i.screen
         fields["kw"] = i.kw
@@ -335,9 +372,10 @@ final class BroadcastDetector {
   private func heartbeat() {
     PandaSignal.post(PandaSignal.heartbeat)
     sampleMemory()
+    refreshPower()
     let text = diag()
     RunRecord.save(diag: text, finished: false)
-    telemetry.log("beat", statsFields())
+    telemetry.log("beat", statsFields().merging(powerFields(reset: true)) { $1 })
     // dMB / green / trig 是「這個心跳區間」的值
     ocrDeltaMax = 0
     lock.lock()
@@ -368,9 +406,7 @@ final class BroadcastDetector {
     lock.lock()
     let old = settings
     settings = next
-    if currentInterval == old.ocrInterval || currentInterval == old.idleOcrInterval {
-      currentInterval = missStreak >= next.idleAfterMisses ? next.idleOcrInterval : next.ocrInterval
-    }
+    idleFlag = missStreak >= next.idleAfterMisses
     lock.unlock()
     ocr.setMinimumTextHeight(Float(next.minimumTextHeight))
     let t = RemoteConfig.telemetry(root)
@@ -385,6 +421,70 @@ final class BroadcastDetector {
         deadline: .now() + .seconds(next.heartbeatInterval), repeating: .seconds(next.heartbeatInterval),
         leeway: .seconds(5))
     }
+    refreshPower()
+  }
+
+  // MARK: - v0.9 省電（只在 workQueue）
+
+  /// 低電量模式/溫度 → 省電倍率生效與否；有變化記 telemetry "power"
+  private func refreshPower() {
+    let s = currentSettings()
+    let d = RemoteConfig.deviceSaver(s.power)
+    lock.lock()
+    let changed = d.saver != saverFlag
+    saverFlag = d.saver
+    lowPowerNow = d.lowPower
+    thermalNow = d.thermal
+    lock.unlock()
+    if changed {
+      telemetry.log(
+        "power", ["saver": d.saver, "lowPower": d.lowPower, "thermal": d.thermal, "note": d.saver ? "on" : "off"],
+        urgent: false)
+    }
+  }
+
+  /// away 進出記帳（呼叫端持 lock）
+  private func noteModeLocked(_ away: Bool, now: CFAbsoluteTime) {
+    if away {
+      if awaySince == nil { awaySince = now }
+    } else if let since = awaySince {
+      awaySecAcc += max(0, now - since)
+      awaySince = nil
+    }
+  }
+
+  private func logMode(_ c: AwayTracker.Change, trig: String) {
+    telemetry.log("mode", ["mode": c.away ? "away" : "normal", "reason": c.reason, "trig": trig])
+  }
+
+  /// 心跳/停止回報的省電量測欄位；reset＝心跳（區間值歸零）
+  private func powerFields(reset: Bool) -> [String: Any] {
+    let now = Date()
+    let elapsed = max(1, now.timeIntervalSince(lastBeatAt))
+    let ocrs = ocrCount - ocrCountAtBeat
+    let t = CFAbsoluteTimeGetCurrent()
+    lock.lock()
+    let probes = probeCount
+    let awaySec = awaySecAcc + (awaySince.map { max(0, t - $0) } ?? 0)
+    let away = awayTracker.away
+    let saver = saverFlag
+    let low = lowPowerNow
+    let thermal = thermalNow
+    if reset {
+      probeCount = 0
+      awaySecAcc = 0
+      if awaySince != nil { awaySince = t }
+    }
+    lock.unlock()
+    if reset {
+      ocrCountAtBeat = ocrCount
+      lastBeatAt = now
+    }
+    return [
+      "ocrMin": (Double(ocrs) * 60 / elapsed * 10).rounded() / 10, "probes": probes,
+      "mode": away ? "away" : "normal", "awaySec": Int(awaySec.rounded()), "saver": saver, "lowPower": low,
+      "thermal": thermal,
+    ]
   }
 
   private func refreshConfig() {
@@ -411,10 +511,13 @@ final class BroadcastDetector {
     lock.lock()
     framesReceived += 1
     let s = settings
-    let due = !busy && now - lastProbeAt >= s.probeInterval
+    // v0.9：away 0.5 秒、正常 0.2 秒取樣；省電再 ×saverFactor
+    let probeEvery = PowerTiming.make(s, away: awayTracker.away, saver: saverFlag).probe
+    let due = !busy && now - lastProbeAt >= probeEvery
     if due {
       busy = true
       lastProbeAt = now
+      probeCount += 1
     }
     lock.unlock()
     guard due else { return }  // 節流＋OCR 進行中就丟幀
@@ -437,19 +540,29 @@ final class BroadcastDetector {
     let ratio = p.greenTotal > 0 ? Double(p.greenCount) / Double(p.greenTotal) : 0
     if ratio > greenMax { greenMax = ratio }
     let greenHit = s.green.enabled && p.greenTotal > 0 && ratio >= s.green.minRatio
+    var modeChange: AwayTracker.Change?
     if greenEdge.observe(hit: greenHit) {
       greenPending = true
       greenTriggers += 1
       fastUntil = now + s.green.holdSec
+      // v0.9：疑似邀請 → 離開 away
+      modeChange = awayTracker.observeGreen()
+      if let c = modeChange { noteModeLocked(c.away, now: now) }
     }
     let diffOcr = lastOcrHash.map { GrayFrame.distance($0, p.hash) }
     let diffPrev = lastProbeHash.map { GrayFrame.distance($0, p.hash) }
     lastProbeHash = p.hash
     let fast = OcrPlanner.isFast(
       now: now, fastUntil: fastUntil, offerActive: offerActiveFlag, lastSawAccept: lastSawAcceptFlag)
+    let timing = PowerTiming.make(s, away: awayTracker.away, saver: saverFlag)
+    let t = timing.s
+    let interval = fast ? t.fastOcrInterval : (idleFlag ? t.idleOcrInterval : t.ocrInterval)
+    currentInterval = interval
     let plan = OcrPlanner.plan(
-      now: now, lastOcrAt: lastOcrAt, interval: fast ? s.fastOcrInterval : currentInterval, fast: fast,
-      diffFromOcr: diffOcr, diffFromPrev: diffPrev, greenPending: greenPending, s: s)
+      now: now, lastOcrAt: lastOcrAt, interval: interval, fast: fast,
+      diffFromOcr: diffOcr, diffFromPrev: diffPrev, greenPending: greenPending, s: t,
+      changeEnabled: timing.changeEnabled)
+    if let c = modeChange { logMode(c, trig: "green") }
     guard let why = plan.why else {
       if plan.same && !lastPlanSame { skipped += 1 }  // 同畫面跳過：每段只算一次
       lastPlanSame = plan.same
@@ -510,13 +623,17 @@ final class BroadcastDetector {
     let highMem = (highMemUntil.map { Date() < $0 } ?? false) || currentMB > s.ocrGuard.memSkipMB
     ocr.setMinimumTextHeight(Float(highMem ? max(s.minimumTextHeight, 0.03) : s.minimumTextHeight))
     let info: ScreenInfo.Summary
+    // v0.9：畫面上有沒有 pandarider（特徵詞或接單鈕）；原文同樣不離開這裡
+    var panda = false
     do {
       guard let image = frame.cgImage() else {
         ocrErrors += 1
         return
       }
       let ocrText = try ocr.recognize(image, orientation: frame.orientation)
-      info = ScreenInfo.analyze(ocrText, rules: s.rules)
+      let analyzed = ScreenInfo.analyzeWithPresence(ocrText, rules: s.rules, awayKeywords: s.away.keywords)
+      info = analyzed.summary
+      panda = analyzed.panda
     } catch {
       ocrErrors += 1
       return
@@ -549,13 +666,17 @@ final class BroadcastDetector {
       handleDelivery(deliveryEdge.observe(Date(), hit: info.delivered, final: info.deliveredFinal), info: info)
     }
     scheduleDecisionTimer()
-    // v0.8：疑似邀請（接單鈕/判定中/綠色 hold）的快速間隔在取樣時決定；這裡只決定一般/閒置間隔
-    let interval = missStreak >= s.idleAfterMisses ? s.idleOcrInterval : s.ocrInterval
+    // v0.8：疑似邀請（接單鈕/判定中/綠色 hold）的快速間隔在取樣時決定；這裡只決定一般/閒置
+    // v0.9：away 判定（邀請判定中、送達待定中都算在 pandarider）
+    let busyWithOffer = tracker.isActive || deliveryEdge.deadline != nil
     lock.lock()
-    currentInterval = interval
+    idleFlag = missStreak >= s.idleAfterMisses
     lastSawAcceptFlag = info.accept
     offerActiveFlag = tracker.isActive
+    let change = awayTracker.observeOcr(panda: panda, offerActive: busyWithOffer, s.away)
+    if let c = change { noteModeLocked(c.away, now: CFAbsoluteTimeGetCurrent()) }
     lock.unlock()
+    if let c = change { logMode(c, trig: why) }
   }
 
   /// v0.8 送達動作（只在 workQueue）：send＝先送延遲再送 delivered；pending＝只看到確認對話框；repeat＝60 秒內送過
@@ -768,6 +889,12 @@ final class BroadcastDetector {
     if triggerCount > 0, let m = lastTriggerMinutes { parts.append("觸發\(triggerCount)(\(m)分)") }
     if deliveredCount > 0 { parts.append("送達\(deliveredCount)") }
     if memSkips > 0 { parts.append("記憶體跳\(memSkips)") }
+    lock.lock()
+    let away = awayTracker.away
+    let saver = saverFlag
+    lock.unlock()
+    if away { parts.append("非熊貓畫面(慢速)") }
+    if saver { parts.append("省電中") }
     parts.append("設定 \(currentSettings().version)")
     if ocrErrors + fails > 0 { parts.append("錯\(ocrErrors)/\(fails)") }
     if let f = format { parts.append("格式\(String(format: "%08X", f))") }
@@ -1020,20 +1147,79 @@ enum OcrPlanner {
 
   static func plan(
     now: CFAbsoluteTime, lastOcrAt: CFAbsoluteTime?, interval: CFAbsoluteTime, fast: Bool,
-    diffFromOcr: Int?, diffFromPrev: Int?, greenPending: Bool, s: BroadcastDetector.DetectorSettings
+    diffFromOcr: Int?, diffFromPrev: Int?, greenPending: Bool, s: BroadcastDetector.DetectorSettings,
+    changeEnabled: Bool = true
   ) -> Plan {
     guard let last = lastOcrAt else { return Plan(why: "first", same: false) }
     let since = now - last
     if since >= s.changeMinGap {
       if greenPending { return Plan(why: "green", same: false) }
       let settled = diffFromPrev.map { $0 <= s.sameFrameMaxBits } ?? false
-      if let d = diffFromOcr, d > s.changeMinBits, settled { return Plan(why: "change", same: false) }
+      if changeEnabled, let d = diffFromOcr, d > s.changeMinBits, settled { return Plan(why: "change", same: false) }
     }
     if since < interval { return Plan(why: nil, same: false) }
     let same = diffFromOcr.map { $0 <= s.sameFrameMaxBits } ?? false
     if !same { return Plan(why: "interval", same: false) }
     let force = fast ? min(s.forceOcrInterval, fastForceSeconds) : s.forceOcrInterval
     return since >= force ? Plan(why: "force", same: false) : Plan(why: nil, same: true)
+  }
+}
+
+// MARK: - v0.9 省電（⚠️ 與 src/powerSaver.ts 同規則，以 TS 測試為準）
+
+/// away 狀態機（同 TS AwayTracker）：連 afterMisses 次 OCR 沒有 pandarider → away；看到特徵詞/判定中/綠色觸發 → 回正常。呼叫端持 lock
+final class AwayTracker {
+  struct Change {
+    let away: Bool
+    /// noPanda / panda / offer / green / disabled
+    let reason: String
+  }
+
+  private(set) var away = false
+  private(set) var misses = 0
+
+  func observeOcr(panda: Bool, offerActive: Bool, _ s: RemoteConfig.AwaySettings) -> Change? {
+    if !s.enabled {
+      misses = 0
+      guard away else { return nil }
+      away = false
+      return Change(away: false, reason: "disabled")
+    }
+    if panda || offerActive {
+      misses = 0
+      guard away else { return nil }
+      away = false
+      return Change(away: false, reason: panda ? "panda" : "offer")
+    }
+    misses += 1
+    if away || misses < s.afterMisses { return nil }
+    away = true
+    return Change(away: true, reason: "noPanda")
+  }
+
+  func observeGreen() -> Change? {
+    misses = 0
+    guard away else { return nil }
+    away = false
+    return Change(away: false, reason: "green")
+  }
+}
+
+/// 依模式算這次取樣用的排程參數（同 TS effectiveTiming）：away → 一般/閒置間隔＝away.intervalSec、取樣＝away.probeIntervalSec、
+/// 不做畫面變化觸發；saver → 所有間隔 ×power.saverFactor
+enum PowerTiming {
+  static func make(_ s: BroadcastDetector.DetectorSettings, away: Bool, saver: Bool)
+    -> (s: BroadcastDetector.DetectorSettings, probe: CFAbsoluteTime, changeEnabled: Bool)
+  {
+    let f = saver ? s.power.saverFactor : 1
+    var t = s
+    t.ocrInterval = (away ? s.away.intervalSec : s.ocrInterval) * f
+    t.idleOcrInterval = (away ? s.away.intervalSec : s.idleOcrInterval) * f
+    t.fastOcrInterval = s.fastOcrInterval * f
+    t.changeMinGap = s.changeMinGap * f
+    t.forceOcrInterval = s.forceOcrInterval * f
+    let probe = (away ? s.away.probeIntervalSec : s.probeInterval) * f
+    return (t, probe, !away)
   }
 }
 

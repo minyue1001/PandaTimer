@@ -207,7 +207,8 @@ struct OthersText: View {
   }
 }
 
-/// 偵測卡的心跳時間（時:分:秒）。偵測程式每 60 秒更新一次；停在舊時間＝偵測程式已經沒在跑。
+/// 偵測卡的心跳時間（時:分:秒）。v0.9 起心跳的卡片 update 有節流（診斷字沒實質變化時最多每 app.cardRefreshSeconds＝5 分更新一次），
+/// 時間舊幾分鐘是正常的；偵測停了由 App 看門狗在 150 秒內把卡片改成「⚠️ N 分鐘沒收到偵測心跳」。
 struct HeartbeatText: View {
   let state: PandaTimerAttributes.ContentState
 

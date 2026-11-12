@@ -187,7 +187,7 @@ final class RemoteConfig {
     let t = section(root, "telemetry")
     return TelemetrySettings(
       keywords: keywordRows(t["keywords"]),
-      flushSeconds: int(t["flushSeconds"], 5, 600, 30),
+      flushSeconds: int(t["flushSeconds"], 5, 600, 60),
       batchSize: int(t["batchSize"], 1, 50, 10))
   }
 
@@ -262,6 +262,78 @@ final class RemoteConfig {
   /// App：心跳逾時秒數（預設 150）
   static func beatTimeout(_ root: [String: Any]) -> TimeInterval {
     Double(int(section(root, "app")["beatTimeoutSeconds"], 60, 1800, 150))
+  }
+
+  /// v0.9 App：心跳的動態島 update 只在診斷字有實質變化、或距上次 update 滿這麼多秒才做（預設 300）
+  static func cardRefreshSeconds(_ root: [String: Any]) -> TimeInterval {
+    Double(int(section(root, "app")["cardRefreshSeconds"], 60, 1800, 300))
+  }
+
+  // MARK: - v0.9 省電（預設＝src/powerSaver.ts / src/remoteConfig.ts；以 TS 測試為準）
+
+  /// extension：pandarider 不在畫面上（連 afterMisses 次 OCR 沒有特徵詞）→ away：不做畫面變化觸發、間隔/取樣拉長
+  struct AwaySettings {
+    static let defaultKeywords =
+      "上線中|上线中|休息中|抵達|抵达|取餐|送達|送达|每單收入|每单收入|接受訂單|接受订单|訂單|订单|預計|预计|夾單|夹单|導航|导航"
+    var enabled = true
+    var afterMisses = 5
+    var intervalSec = 6.0
+    var probeIntervalSec = 0.5
+    var keywords = AwaySettings.defaultKeywords
+  }
+
+  static func away(_ root: [String: Any]) -> AwaySettings {
+    let a = section(root, "away")
+    var out = AwaySettings()
+    out.enabled = bool(a["enabled"], out.enabled)
+    out.afterMisses = int(a["afterMisses"], 1, 100, out.afterMisses)
+    out.intervalSec = number(a["intervalSec"], 1, 60, out.intervalSec)
+    out.probeIntervalSec = number(a["probeIntervalSec"], 0.05, 2, out.probeIntervalSec)
+    out.keywords = offerRegex(a["keywords"], out.keywords)
+    return out
+  }
+
+  /// 低電量模式（onLowPower）或 thermalState ≥ thermalLevel（2＝serious；4＝不看溫度）→ extension 所有間隔 ×saverFactor
+  struct PowerSettings {
+    var saverFactor = 1.5
+    var thermalLevel = 2
+    var onLowPower = true
+  }
+
+  static func power(_ root: [String: Any]) -> PowerSettings {
+    let p = section(root, "power")
+    var out = PowerSettings()
+    out.saverFactor = number(p["saverFactor"], 1, 5, out.saverFactor)
+    out.thermalLevel = int(p["thermalLevel"], 1, 4, out.thermalLevel)
+    out.onLowPower = bool(p["onLowPower"], out.onLowPower)
+    return out
+  }
+
+  /// 同 src/powerSaver.ts isSaver（thermal＝ProcessInfo.ThermalState.rawValue）
+  static func isSaver(lowPower: Bool, thermal: Int, _ p: PowerSettings) -> Bool {
+    (p.onLowPower && lowPower) || thermal >= p.thermalLevel
+  }
+
+  /// 目前這個程序看到的省電狀態（ProcessInfo 執行緒安全，extension 也能用）
+  static func deviceSaver(_ p: PowerSettings) -> (saver: Bool, lowPower: Bool, thermal: Int) {
+    let info = ProcessInfo.processInfo
+    let low = info.isLowPowerModeEnabled
+    let thermal = info.thermalState.rawValue
+    return (isSaver(lowPower: low, thermal: thermal, p), low, thermal)
+  }
+
+  /// App 定位保活：locationAccuracy "hundred"|"kilometer"|"threeKilometers"；distanceFilterM 0＝不過濾
+  struct KeepAliveSettings {
+    var locationAccuracy = "hundred"
+    var distanceFilterM = 50
+  }
+
+  static func keepAlive(_ root: [String: Any]) -> KeepAliveSettings {
+    let k = section(root, "keepAlive")
+    var out = KeepAliveSettings()
+    out.locationAccuracy = choice(k["locationAccuracy"], ["hundred", "kilometer", "threeKilometers"], out.locationAccuracy)
+    out.distanceFilterM = int(k["distanceFilterM"], 0, 5000, out.distanceFilterM)
+    return out
   }
 
   /// 多久重抓一次（預設 600 秒）

@@ -117,7 +117,7 @@ test('Swift 與 TS 同規則：FrameProbe 取樣格數、YCbCr 係數、GreenEdg
     'c((299 * rd + 587 * gd + 114 * bd) / 1000)', 'c(128 + (-169 * rd - 331 * gd + 500 * bd) / 1000)', 'c(128 + (500 * rd - 419 * gd - 81 * bd) / 1000)',
     'y >= s.yMin && cb <= s.cbMax && cr <= s.crMax', 'static let goneAfter = 2', 'static let fastForceSeconds: CFAbsoluteTime = 2',
     'offerActive || lastSawAccept || now < fastUntil', 'if greenPending { return Plan(why: "green", same: false) }',
-    'if let d = diffFromOcr, d > s.changeMinBits, settled { return Plan(why: "change", same: false) }',
+    'if changeEnabled, let d = diffFromOcr, d > s.changeMinBits, settled { return Plan(why: "change", same: false) }',
     'let force = fast ? min(s.forceOcrInterval, fastForceSeconds) : s.forceOcrInterval',
     'let cp = c + (sy >> 1) * chromaStride + (sx >> 1) * 2']) {
     assert.ok(ext.includes(s), s);
