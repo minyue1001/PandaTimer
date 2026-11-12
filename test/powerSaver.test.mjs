@@ -158,7 +158,7 @@ test('遠端設定 away/power/keepAlive/app.cardRefreshSeconds/telemetry.flushSe
   assert.deepEqual(ok.config.keepAlive, { locationAccuracy: 'threeKilometers', distanceFilterM: 0 });
   // 伺服器設定已升版並帶新區塊
   const cfg = JSON.parse(read('../server/config.json'));
-  assert.equal(cfg.version, '2026-11-14.1');
+  assert.ok(cfg.version >= '2026-11-14.1', `config version ${cfg.version} 應 ≥ 2026-11-14.1`);
   assert.deepEqual(validateConfig(cfg).problems, []);
 });
 

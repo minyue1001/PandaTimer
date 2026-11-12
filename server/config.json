@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-14.1",
+  "version": "2026-11-14.2",
   "picker": {
     "minutePattern": "(?<![0-9.])([0-9]{1,3})(?![0-9.])\\s*(?:分鐘|分钟|分|min)",
     "minMinutes": 1,
@@ -27,7 +27,7 @@
   },
   "detector": {
     "acceptPattern": "(?<!已)接受(?:訂單|订单)",
-    "dedupeSeconds": 90,
+    "dedupeSeconds": 3600,
     "goneAfterMisses": 2,
     "ocrIntervalSeconds": 1.5,
     "idleOcrIntervalSeconds": 1.5,
@@ -279,8 +279,8 @@
     "decideWindowSec": 25,
     "acceptedKeywords": "前往取餐|抵達(?:店家|餐廳)|抵达(?:店家|餐厅)|確認取餐|确认取餐|已抵達|已抵达|取餐|導航|导航|訂單詳情|订单详情|聯絡店家|联络店家|联系店家|即將準備完成|即将准备完成|準備完成|准备完成|筆訂單|笔订单|取餐體驗|取餐体验",
     "rejectedKeywords": "已拒絕|已拒绝|訂單已取消|订单已取消|逾時|逾时|已過期|已过期|上線中|上线中",
-    "ambiguousAs": "accept",
-    "stackedKeywords": "夾單|夹单"
+    "ambiguousAs": "reject",
+    "stackedKeywords": "夾單訂單|夹单订单|夾單訂單依系統"
   },
   "stats": {
     "graceFactor": 1.05,
@@ -296,7 +296,7 @@
     "minOrderAgeSec": 120,
     "completedKeywords": "訂單完成|订单完成|完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达",
     "finalKeywords": "訂單完成|订单完成|訂單已完成|订单已完成",
-    "pendingSec": 30
+    "pendingSec": 6
   },
   "ocr": {
     "memSkipMB": 36,
