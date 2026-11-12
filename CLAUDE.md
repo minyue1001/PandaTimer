@@ -9,7 +9,7 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - broadcast 常停（2/4 次緊接送達確認對話框後，疑拍照）；邀請只在畫面 1~3 秒 → v0.7 閒置 3 秒一次常漏。記憶體平時 27MB、OCR 瞬間 +15~20MB，曾到 70MB 未被殺。
 
 ## 目錄
-- `App.tsx` 單頁 UI；`src/orders.ts` 純邏輯；`src/store.ts` AsyncStorage（key `pandatimer.orders.v1`，`mutate()` 序列化）
+- `App.tsx` 只管狀態/原生與通知接線/分頁切換；畫面在 `src/ui/`（見「UI」節）；`src/orders.ts` 純邏輯；`src/store.ts` AsyncStorage（key `pandatimer.orders.v1`，`mutate()` 序列化）
 - `src/controller.ts` 開單/送達/取消、deep link、`initNativeBridge()`（原生同步）、孤兒 Live Activity 對帳
 - `src/nativeEvents.ts` 原生事件解析/合併、進行中鏡像（純函式）；`src/ocrPick.ts` OCR 分鐘/金額規則 TS 版；`src/detector.ts` 訊號名稱/狀態解析；v0.6 `src/cardPlan.ts`（多單卡片）、`src/screenInfo.ts`（回報用畫面摘要/白名單關鍵字）、`src/remoteConfig.ts`（遠端設定預設/範圍/驗證）、v0.7 `src/offerTracker.ts`（接單判定狀態機，樣本 `test/fixtures/offer-cases.json`）——都是 Swift 的測試替身；v0.7 `src/stats.ts`（本期統計/目標/補登，純 JS）＋`src/statsConfig.ts`（AsyncStorage/遠端 stats）
 - v0.8 `src/frameTrigger.ts`（綠色金額/畫面變化/OCR 排程）、`src/importLink.ts`（匯入 deep link，`scripts/make-import-link.mjs <json>` 產生連結）；v0.9 `src/powerSaver.ts`（away 狀態機/省電倍率/有效排程）；`src/notify.ts` expo-notifications **本地**通知
@@ -92,6 +92,13 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - 參數走遠端設定 `pay.ratePerMinute/minFare/assumeStarredLate`（`src/remoteConfig.ts` 驗證，server config*.json 有 `pay` 區塊）；補登多一欄選填「前幾天收入」（`Baseline.income`，同時加進兩情境）。Order 沒存 OCR 金額，`PaySample.estAmount` 是預留欄位。
 ## 刪除紀錄（`src/prune.ts`，純 JS 可 OTA）
 - 歷史列長按＝單筆刪、進行中卡片的接單文字長按＝刪進行中單；「管理紀錄」＝今天（台北）／某時間以前（輸入台北 YYYY-MM-DD HH:mm）／全部（二次確認＋輸入「刪除」）；`controller.pruneOrders`：先寫墓碑（`pandatimer.tombstones.v1`，7 天）→ drain（`dropTombstonedEvents` 擋復活）→ 刪 → 進行中單走 `cleanup`（偵測卡走 afterFinish）；補登不受影響。
+
+## UI（v0.9 OTA 改版：暗色三分頁，純 JS，不得加原生套件）
+- 底部自製分頁列（`TabBar`，不用 react-navigation）：**首頁**（騎車用：偵測膠囊 `StatusPill`→進行中卡 `OrderCard`（最早截止在上、長按刪、取消、大送達）→本期大卡/今日小卡 `StatCard`→手動開始（折疊））／**紀錄**（收入摘要→管理紀錄（折疊，三種批次刪除）→依台北日分組歷史＋日小計，60 筆一頁）／**設定**（目標→補登→偵測診斷→OTA→說明與捷徑）。
+- 三頁都掛著、非目前頁 `display:'none'`（保留捲動/草稿）；**BroadcastPicker 只在首頁膠囊裡** → `onStartDetect`/redetect 通知流程一律先 `setTab('home')`。上次分頁存 `pandatimer.ui.tab.v1`；膠囊「變成」🔴/🟡或進行中單數變多 → 自動切回首頁（`shouldJumpHome`，邊緣觸發）。
+- 純函式在 `src/ui/logic.ts`（`detectPill`/`actionHint`/`groupHistory`/`orderCountdown`…，測試 `test/uiLogic.test.mjs`）；顏色字級在 `src/ui/theme.ts`（暗底 #121212、卡 #1E1E1E、粉 #FF2B85；最小字 16、按鈕高 ≥56）；Alert 流程在 `src/ui/actions.ts`。OTA 狀態 `useOtaUpdate()` 掛在 App 頂層（首頁有新版橫條、設定頁有檢查/套用按鈕）。
+- 膠囊「省電中」與診斷「省電/記憶體」讀 `DetectorStatus.power`（`parseDetectorStatus` 只在原生 statusJSON 帶 `lowPower/thermal/saver/memMB` 時才有）；**v0.9 原生沒帶** → 要顯示得等下次原生版把這幾個 key 加進 `DetectorHub.statusJSON()`。
+- app.json `userInterfaceStyle` 仍是 light（原生設定，改了要升 runtime）→ 系統 Alert/鍵盤以外的畫面都是 App 自畫的暗色；TextInput 用 `keyboardAppearance="dark"`。
 
 ## 已知風險
 - Swift 只在 CI 編譯；CI 失敗先看 `xcodebuild.log` 的 error 行。runner `macos-26`（fileSystemSynchronizedGroups 需 Xcode 16+）。定位保活下背景 update、alertConfiguration 本地 update 都**沒有官方文件**，以實機為準。

@@ -199,6 +199,11 @@ export type DetectorStatus = {
   offerNote: string;
   /** v0.8：偵測中卻收到廣播停止（使用者沒按停止偵測）的時間；重新開始後清掉 */
   stoppedUnexpectedAt: number | null;
+  /**
+   * v0.10 預留（v0.9 原生 statusJSON 沒帶 → 欄位不存在）：低電量模式、thermalState(0~3)、省電倍率中、App 記憶體 MB。
+   * 原生哪天加進 statusJSON 就會自動顯示在首頁膠囊（省電中）與設定頁診斷；只有原生真的帶了才會有這個 key。
+   */
+  power?: { lowPower?: boolean; thermal?: number; saver?: boolean; memMB?: number };
 };
 
 const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
@@ -214,7 +219,13 @@ export function parseDetectorStatus(raw: unknown): DetectorStatus | null {
   }
   if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
   const o = r as Record<string, unknown>;
+  const power: NonNullable<DetectorStatus['power']> = {};
+  if (typeof o.lowPower === 'boolean') power.lowPower = o.lowPower;
+  if (num(o.thermal) != null) power.thermal = o.thermal as number;
+  if (typeof o.saver === 'boolean') power.saver = o.saver;
+  if (num(o.memMB) != null) power.memMB = o.memMB as number;
   return {
+    ...(Object.keys(power).length ? { power } : {}),
     armed: o.armed === true,
     keepAlive: typeof o.keepAlive === 'string' ? o.keepAlive : '未知',
     keepAliveMode: typeof o.keepAliveMode === 'string' ? o.keepAliveMode : 'none',

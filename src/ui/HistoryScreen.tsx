@@ -1,0 +1,231 @@
+// 紀錄頁：收入摘要 → 管理紀錄（批次刪除，折疊）→ 依日期分組的歷史（日小計）；列長按＝單筆刪除
+import { memo, useMemo, useState } from 'react';
+import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { money, type EarningsSummary, type PayParams } from '../earnings';
+import type { Order } from '../orders';
+import { formatTaipeiDateTime, parseTaipeiDateTime } from '../prune';
+import type { StatsParams, Summary } from '../stats';
+import { confirmDeleteOne, confirmPrune, runPrune, type Toast } from './actions';
+import { Btn, Collapsible, Tags } from './common';
+import { groupHistory, pctText, type DayGroup } from './logic';
+import { C, F, pressed, S } from './theme';
+
+const PAGE = 60;
+
+export type HistoryProps = {
+  orders: Order[];
+  /** 分鐘級時間（今天/昨天標籤用；不必每秒重畫） */
+  now: number;
+  stats: StatsParams;
+  pay: PayParams;
+  earn: { period: EarningsSummary; today: EarningsSummary };
+  periodLabel: string;
+  noStacked: { period: Summary; today: Summary; stackedCount: number; stackedToday: number };
+  toast: Toast;
+};
+
+export const HistoryScreen = memo(function HistoryScreen(p: HistoryProps) {
+  const [limit, setLimit] = useState(PAGE);
+  const hist = useMemo(
+    () => groupHistory(p.orders, { now: p.now, limit, stats: p.stats, pay: p.pay }),
+    [p.orders, p.now, limit, p.stats, p.pay],
+  );
+  return (
+    <ScrollView contentContainerStyle={S.scroll} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
+      <Text style={S.h1}>紀錄</Text>
+      <IncomeCard earn={p.earn} periodLabel={p.periodLabel} noStacked={p.noStacked} />
+      <ManageCard toast={p.toast} />
+      {hist.groups.length === 0 && (
+        <View style={[S.card, { alignItems: 'center' }]}>
+          <Text style={[S.text, { color: C.dim }]}>還沒有紀錄</Text>
+        </View>
+      )}
+      {hist.groups.map((g) => (
+        <DayCard key={g.key} g={g} toast={p.toast} />
+      ))}
+      {hist.shown < hist.total && (
+        <Btn kind="ghost" small title={`顯示更多（還有 ${hist.total - hist.shown} 筆）`} onPress={() => setLimit(limit + PAGE)} />
+      )}
+      <Text style={S.small}>長按任一筆可單筆刪除。金額「約」＝依預估分鐘估算的報酬。</Text>
+    </ScrollView>
+  );
+});
+
+function IncomeCard({
+  earn,
+  periodLabel,
+  noStacked,
+}: {
+  earn: { period: EarningsSummary; today: EarningsSummary };
+  periodLabel: string;
+  noStacked: HistoryProps['noStacked'];
+}) {
+  return (
+    <View style={S.card}>
+      <View style={S.rowBetween}>
+        <Text style={S.h2}>收入</Text>
+        <Text style={S.label}>本期 {periodLabel}</Text>
+      </View>
+      <EarnBlock title="本期" e={earn.period} />
+      <View style={S.divider} />
+      <EarnBlock title="今日" e={earn.today} />
+      {noStacked.stackedCount > 0 && (
+        <>
+          <View style={S.divider} />
+          <Text style={S.small}>
+            不含夾單（本期夾單 {noStacked.stackedCount} 單）：本期準時 {pctText(noStacked.period.onTimeRate)}・超時{' '}
+            {pctText(noStacked.period.overrunRate)}；今日準時 {pctText(noStacked.today.onTimeRate)}・超時{' '}
+            {pctText(noStacked.today.overrunRate)}（App 紀錄，不含補登）
+          </Text>
+        </>
+      )}
+    </View>
+  );
+}
+
+function EarnBlock({ title, e }: { title: string; e: EarningsSummary }) {
+  const cons = e.scenario === 'conservative';
+  return (
+    <View style={{ gap: 4 }}>
+      <View style={S.rowBetween}>
+        <Text style={S.label}>{title}預計發放</Text>
+        <Text style={[S.midNum, { color: C.green }]} adjustsFontSizeToFit numberOfLines={1}>
+          {money(e.payout)}
+        </Text>
+      </View>
+      <Text style={S.small}>
+        {cons ? '保守：晚到單全被打星' : '樂觀：都沒被打星'}；{cons ? '若未被打星' : '若晚到單全被打星'} {money(e.payoutOther)}
+      </Text>
+      <Text style={S.text}>
+        預估收入 {money(e.estTotal)}（{e.count} 單{e.baselineIncome > 0 ? `，含補登 ${money(e.baselineIncome)}` : ''}）
+      </Text>
+      <Text style={S.text}>
+        補錢 {money(e.adjustment)}（若未被打星；晚到 {e.lateCount} 單）
+      </Text>
+    </View>
+  );
+}
+
+function ManageCard({ toast }: { toast: Toast }) {
+  const [beforeText, setBeforeText] = useState('');
+  const [allDraft, setAllDraft] = useState<string | null>(null);
+  const onDeleteBefore = () => {
+    const ts = parseTaipeiDateTime(beforeText);
+    if (ts == null) {
+      Alert.alert('時間格式不對', '請輸入台北時間 YYYY-MM-DD HH:mm，例如 2026-11-12 09:30');
+      return;
+    }
+    void confirmPrune(`刪除 ${formatTaipeiDateTime(ts)} 以前的紀錄`, { kind: 'before', ts }, toast);
+  };
+  return (
+    <Collapsible title="🗑 管理紀錄">
+      <Text style={S.small}>批次刪除含進行中與已取消的單；補登不受影響。長按下面任一筆可單筆刪除。</Text>
+      <Btn
+        kind="ghost"
+        small
+        title="刪除今天的紀錄"
+        onPress={() => void confirmPrune('刪除今天的紀錄', { kind: 'today', now: Date.now() }, toast)}
+      />
+      <View style={S.row}>
+        <TextInput
+          style={[S.input, { flex: 1, fontSize: F.body }]}
+          value={beforeText}
+          onChangeText={setBeforeText}
+          placeholder="YYYY-MM-DD HH:mm"
+          placeholderTextColor={C.dim}
+          keyboardAppearance="dark"
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        <Btn kind="ghost" small title="刪除以前的" onPress={onDeleteBefore} />
+      </View>
+      <Btn
+        kind="danger"
+        small
+        title="刪除全部紀錄…"
+        onPress={() => void confirmPrune('刪除全部紀錄', { kind: 'all' }, toast, () => setAllDraft(''))}
+      />
+      {allDraft != null && (
+        <View style={{ gap: 10 }}>
+          <TextInput
+            style={[S.input, { fontSize: F.body }]}
+            value={allDraft}
+            onChangeText={setAllDraft}
+            placeholder="輸入「刪除」兩字確認"
+            placeholderTextColor={C.dim}
+            keyboardAppearance="dark"
+          />
+          <View style={S.row}>
+            <Btn
+              style={{ flex: 1 }}
+              kind="danger"
+              small
+              title="確定全刪"
+              disabled={allDraft.trim() !== '刪除'}
+              onPress={() => {
+                setAllDraft(null);
+                runPrune({ kind: 'all' }, toast);
+              }}
+            />
+            <Btn style={{ flex: 1 }} kind="ghost" small title="取消" onPress={() => setAllDraft(null)} />
+          </View>
+        </View>
+      )}
+    </Collapsible>
+  );
+}
+
+function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
+  const s = g.subtotal;
+  return (
+    <View style={[S.card, { gap: 0, paddingVertical: 12 }]}>
+      <View style={[S.rowBetween, { paddingBottom: 8 }]}>
+        <Text style={S.h2}>
+          {g.label}
+          {g.relative ? ` ${g.relative}` : ''}
+        </Text>
+        <Text style={[S.textBold, { color: C.green }]}>{money(s.payout)}</Text>
+      </View>
+      <Text style={[S.small, { paddingBottom: 6 }]}>
+        {s.count} 單・準時 {pctText(s.onTimeRate)}・超時 {pctText(s.overrunRate)}
+        {s.stacked ? `・夾單 ${s.stacked}` : ''}
+      </Text>
+      {g.rows.map((r) => (
+        <Pressable
+          key={r.order.id}
+          onLongPress={() => confirmDeleteOne(r.order, toast)}
+          delayLongPress={500}
+          style={(st) => [rowStyle, pressed(st)]}
+        >
+          <Text style={[S.textBold, { width: 58, fontVariant: ['tabular-nums'] }]}>{r.time}</Text>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text style={S.text}>
+              {r.est} → {r.act} 分
+            </Text>
+            <Tags tags={r.tags} />
+          </View>
+          <View style={{ alignItems: 'flex-end', gap: 2 }}>
+            <Text style={[S.textBold, { color: r.onTime ? C.green : C.red }]}>
+              {r.onTime ? '準時' : `超 +${r.overMin}`}
+            </Text>
+            <Text style={[S.small, { color: C.sub }]}>
+              {r.amountEstimated ? '約' : ''}
+              {money(r.amount)}
+            </Text>
+          </View>
+        </Pressable>
+      ))}
+      {g.hidden > 0 && <Text style={[S.small, { paddingTop: 6 }]}>這天還有 {g.hidden} 筆，按下面「顯示更多」</Text>}
+    </View>
+  );
+}
+
+const rowStyle = {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 10,
+  minHeight: 56,
+  paddingVertical: 8,
+  borderTopWidth: 1,
+  borderTopColor: C.border,
+} as const;
