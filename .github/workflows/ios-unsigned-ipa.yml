@@ -54,6 +54,9 @@ jobs:
 
       # OCR 分鐘挑選規則（與 native/intents/MinutePicker.swift 同一套）＋原生事件合併
       - name: Unit tests
+        # 使用者在台灣；部分 UI 文字用裝置本地時間，測試以台北時區為準（CI runner 預設 UTC）
+        env:
+          TZ: Asia/Taipei
         run: node --test
 
       # 多份必須逐字相同的 Swift 檔（ActivityKit 以型別名＋Codable 結構對應；規則檔兩邊要一致）
