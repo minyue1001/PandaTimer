@@ -90,7 +90,7 @@ function EarnBlock({ title, e }: { title: string; e: EarningsSummary }) {
       <View style={S.rowBetween}>
         <Text style={[S.label, { flexShrink: 0, marginRight: 8 }]}>{title}預計發放</Text>
         <Text
-          style={[S.midNum, { color: C.green, flex: 1, textAlign: 'right' }]}
+          style={[S.midNum, { color: C.green, flex: 1, textAlign: 'right', fontSize: 26 }]}
           adjustsFontSizeToFit
           minimumFontScale={0.4}
           numberOfLines={1}

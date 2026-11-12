@@ -76,7 +76,7 @@ function Cell({ label, value, color }: { label: string; value: string; color?: s
   return (
     <View style={{ flex: 1, alignItems: 'center' }}>
       <Text
-        style={[S.midNum, { fontSize: 40, alignSelf: 'stretch', textAlign: 'center' }, color ? { color } : null]}
+        style={[S.midNum, { fontSize: 30, alignSelf: 'stretch', textAlign: 'center' }, color ? { color } : null]}
         adjustsFontSizeToFit
         minimumFontScale={0.4}
         numberOfLines={1}
