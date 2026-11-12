@@ -49,6 +49,9 @@ const PORT = Number(process.env.PORT || 3970);
 const UPDATES_DIR = path.resolve(process.env.UPDATES_DIR || '/opt/pandatimer-updates/updates');
 const PRIVATE_KEY_PATH = process.env.PRIVATE_KEY_PATH || '/opt/pandatimer-updates/keys/private-key.pem';
 const PUBLIC_URL = (process.env.PUBLIC_URL || 'https://wheat.yueshengift.xyz/pandatimer').replace(/\/+$/, '');
+const PUBLIC_HOST = (() => {
+  try { return new URL(PUBLIC_URL).host; } catch { return ''; }
+})();
 const TELEMETRY_DIR = path.resolve(process.env.TELEMETRY_DIR || '/opt/pandatimer-updates/telemetry');
 const TELEMETRY_WRITE_KEY = process.env.TELEMETRY_WRITE_KEY || '';
 const TELEMETRY_READ_KEY = process.env.TELEMETRY_READ_KEY || '';
@@ -682,10 +685,9 @@ function maybeBackup(store, now) {
   }
 }
 
-// ── 管理頁 session（簽章 cookie；金鑰＝資料庫裡的隨機 sessionKey × 管理密碼 → 改密碼即全部登出） ──
+// ── 管理頁 session（簽章 cookie；金鑰＝資料庫裡的隨機 sessionKey × 管理密碼 → 改密碼或登出即全部登出） ──
 const SESSION_TTL_MS = 12 * 3_600_000;
 const COOKIE = 'pt_admin';
-const revoked = new Map(); // sid → exp（登出的 session，到期前拒收）
 const adminConfigured = () => ADMIN_PASSWORD.length >= 12;
 function sessionKey(store) {
   const pw = crypto.createHash('sha256').update(ADMIN_PASSWORD, 'utf8').digest();
@@ -711,7 +713,6 @@ function verifySession(store, req, now) {
   const exp = Number(m[2]);
   if (!(exp > now) || exp > now + SESSION_TTL_MS + 60_000) return null;
   if (!secretEqual(hmac(sessionKey(store), `v1.${m[1]}.${m[2]}`), m[3])) return null;
-  if (revoked.has(m[1])) return null;
   return { sid: m[1], exp, csrf: hmac(sessionKey(store), `csrf.${m[1]}`) };
 }
 function cookieHeader(value, maxAgeSec) {
@@ -738,7 +739,8 @@ function requireAdmin(store, req, mode) {
     if (origin) {
       let host = '';
       try { host = new URL(origin).host; } catch { /* 壞 Origin */ }
-      if (host !== req.headers.host) throw new HttpError(403, 'Cross-origin request');
+      // 與 Host 相同，或等於 PUBLIC_URL 的主機（nginx 若沒轉 Host、後端看到 127.0.0.1:port 時，管理頁寫入才不會全被擋）
+      if (!host || (host !== req.headers.host && host !== PUBLIC_HOST)) throw new HttpError(403, 'Cross-origin request');
     }
   }
   return { via: 'session', ...s };
@@ -833,10 +835,13 @@ async function handleAdminApi(req, res, url) {
     return sendJson(res, 200, { ok: true, expiresAt: s.exp }, { 'set-cookie': cookieHeader(s.token, SESSION_TTL_MS / 1000) });
   }
   if (p === 'logout' && m === 'POST') {
-    const s = verifySession(store, req, now);
+    // 登出＝換 session 金鑰（存在資料庫，重啟後仍有效）→ 所有裝置的 cookie（含被偷走的）一起失效。
+    // 要通過寫入檢查（cookie＋CSRF＋JSON）才換，避免同站其他子網域/頁面隨手把管理者登出；沒通過只清這個瀏覽器的 cookie。
+    let s = null;
+    try { s = requireAdmin(store, req, 'write'); } catch { /* 沒登入或 CSRF 不對 */ }
     if (s) {
-      revoked.set(s.sid, s.exp);
-      for (const [sid, exp] of revoked) if (exp < now) revoked.delete(sid);
+      store.setMeta('sessionKey', crypto.randomBytes(32).toString('base64url'));
+      console.log('[admin] 已登出（所有裝置的登入一併失效）');
     }
     return sendJson(res, 200, { ok: true }, { 'set-cookie': cookieHeader('', 0) });
   }

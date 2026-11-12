@@ -280,6 +280,9 @@ export class Store {
     const rejectedO = new Set(); // 伺服器較新而沒採用的 → 一定回傳伺服器版（就算它在 since 之前）
     const rejectedB = new Set();
     const invalid = [];
+    // 游標合法性要用「這次寫入前」的伺服器游標判斷：寫入會把 clock 推到現在時間，
+    // 若用寫入後的 clock，資料庫被還原成舊版時 App 帶來的新游標會被當成合法 → 漏掉 reset、漏拉資料
+    const clockBefore = this.clock;
     this.tx(() => {
       for (const raw of orders) {
         const r = validateOrder(raw, now);
@@ -317,7 +320,8 @@ export class Store {
         acceptedB.add(v.period);
       }
     });
-    const from = Number.isFinite(since) && since > 0 && since <= this.clock ? since : 0;
+    const reset = Number.isFinite(since) && since > clockBefore;
+    const from = Number.isFinite(since) && since > 0 && !reset ? since : 0;
     const rows = this.s.ordersSince.all(from, CHANGES_PAGE);
     const more = rows.length >= CHANGES_PAGE;
     const cursor = more ? rows[rows.length - 1].syncAt : this.clock;
@@ -331,7 +335,7 @@ export class Store {
       more,
       dbId: this.dbId,
       // since 比伺服器游標還大＝伺服器資料庫被換過（或 App 帶了別台的游標）→ 從頭給
-      reset: Number.isFinite(since) && since > this.clock,
+      reset,
       changes: {
         orders: rows.filter((o) => !acceptedO.has(o.id)).map(orderOut),
         baselines: bRows.filter((b) => !acceptedB.has(b.period)).map(baselineOut),
@@ -405,7 +409,7 @@ export class Store {
     return { orders: Number(c?.n ?? 0), deleted: Number(c?.d ?? 0) };
   }
 
-  /** 每日備份（VACUUM INTO，留 keep 份）；失敗只記 log */
+  /** 每日備份（VACUUM INTO，留 keep 份；備份檔的 dbId 換新，還原時 App 會全部重傳）；失敗只記 log */
   backup(dir, dateStr, keep = 14) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
     const file = path.join(dir, `orders-${dateStr}.db`);
@@ -413,6 +417,14 @@ export class Store {
       const tmp = `${file}.tmp`;
       fs.rmSync(tmp, { force: true });
       this.db.prepare('VACUUM INTO ?').run(tmp);
+      // 備份換一個新的 dbId：日後把備份蓋回來時，App 會看到 dbId 變了 → 全部重傳（否則備份之後才上傳的單，
+      // App 以為伺服器已經有了、永遠不再送，伺服器就少了那些單）
+      const copy = new this.db.constructor(tmp);
+      try {
+        copy.prepare('UPDATE meta SET value = ? WHERE key = ?').run(crypto.randomBytes(9).toString('base64url'), 'dbId');
+      } finally {
+        copy.close();
+      }
       fs.renameSync(tmp, file);
     }
     const old = fs.readdirSync(dir).filter((n) => /^orders-\d{4}-\d{2}-\d{2}\.db$/.test(n)).sort();

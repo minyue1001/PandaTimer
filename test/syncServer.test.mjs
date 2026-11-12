@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { openStore } from '../server/orders.mjs';
 
 const SERVER = new URL('../server/index.mjs', import.meta.url).pathname;
 const PW = 'correct-horse-battery';
@@ -52,7 +53,7 @@ async function startServer(name, extraEnv = {}) {
     });
     child.on('exit', (code) => reject(new Error(`server 結束 code=${code}：${out}`)));
   });
-  return { url: `http://127.0.0.1:${port}`, logs: () => out + err, dir };
+  return { url: `http://127.0.0.1:${port}`, logs: () => out + err, dir, child };
 }
 
 before(async () => {
@@ -382,4 +383,65 @@ test('每日備份：啟動後 DATA_DIR/backup 有今天的 orders-YYYY-MM-DD.db
   const dir = path.join(tmp, 'main', 'data', 'backup');
   const names = fs.readdirSync(dir);
   assert.ok(names.some((n) => /^orders-\d{4}-\d{2}-\d{2}\.db$/.test(n)), names.join(','));
+});
+
+test('登出＝換 session 金鑰：所有裝置的 cookie 失效、重啟後仍失效；沒帶 CSRF 的登出不影響其他裝置', async () => {
+  const s = await startServer('logout');
+  const a = await login(s.url);
+  const b = await login(s.url);
+  const sessOf = async (cookie) => (await fetch(`${s.url}/api/admin/session`, { headers: { cookie } }));
+  // 沒 CSRF（例如同站其他頁面亂打）→ 只清自己的 cookie，不換金鑰
+  await fetch(`${s.url}/api/admin/logout`, { method: 'POST', headers: { cookie: b.cookie, 'content-type': 'application/json' }, body: '{}' });
+  assert.equal((await sessOf(a.cookie)).status, 200);
+  assert.equal((await sessOf(b.cookie)).status, 200);
+  const csrf = (await (await sessOf(a.cookie)).json()).csrf;
+  const out = await fetch(`${s.url}/api/admin/logout`, { method: 'POST', headers: { cookie: a.cookie, 'x-pt-csrf': csrf, 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(out.status, 200);
+  assert.match(out.headers.get('set-cookie'), /Max-Age=0/);
+  assert.equal((await sessOf(a.cookie)).status, 401);
+  assert.equal((await sessOf(b.cookie)).status, 401, '其他裝置也登出');
+  await new Promise((r) => { s.child.on('exit', r); s.child.kill('SIGTERM'); });
+  const again = await startServer('logout');
+  assert.equal((await fetch(`${again.url}/api/admin/session`, { headers: { cookie: a.cookie } })).status, 401, '重啟後舊 cookie 仍無效');
+  assert.equal((await login(again.url)).status, 200);
+});
+
+test('Origin＝PUBLIC_URL 的主機也算同站（nginx 沒轉 Host 時）；其他 Origin、壞 Origin 照擋', async () => {
+  const s = await startServer('origin', { PUBLIC_URL: 'https://pub.example/pandatimer' });
+  const { cookie } = await login(s.url);
+  const csrf = (await (await fetch(`${s.url}/api/admin/session`, { headers: { cookie } })).json()).csrf;
+  const body = JSON.stringify({ acceptedAt: T0, estimateMin: 18, status: 'canceled' });
+  const post = (origin) => fetch(`${s.url}/api/admin/orders`, { method: 'POST', headers: { cookie, 'x-pt-csrf': csrf, 'content-type': 'application/json', origin }, body });
+  assert.equal((await post('https://pub.example')).status, 200);
+  assert.equal((await post('https://pub.example.evil.example')).status, 403);
+  assert.equal((await post('null')).status, 403);
+});
+
+test('還原備份：備份檔 dbId 換新（App 會全部重傳）；寫入不會掩蓋「游標比伺服器新」的 reset', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-restore-test-'));
+  try {
+    const db = path.join(dir, 'orders.db');
+    const t = Date.now() - 3 * 3_600_000;
+    const o = (id, u) => order(id, { acceptedAt: t, deliveredAt: t + 600_000, updatedAt: u });
+    let s = await openStore(db);
+    const liveId = s.dbId;
+    let r = s.sync({ since: 0, orders: [o('a', t + 1)] });
+    s.backup(path.join(dir, 'bk'), '2026-11-13');
+    await new Promise((x) => setTimeout(x, 5));
+    r = s.sync({ since: r.now, orders: [o('b', t + 2)] }); // 備份之後才上傳
+    const appSince = r.now;
+    s.close();
+    fs.copyFileSync(path.join(dir, 'bk', 'orders-2026-11-13.db'), db);
+    for (const ext of ['-wal', '-shm']) fs.rmSync(db + ext, { force: true });
+    s = await openStore(db);
+    assert.notEqual(s.dbId, liveId, '還原後 dbId 不同 → App needsFullResync');
+    await new Promise((x) => setTimeout(x, 5));
+    // App 這次剛好也帶了新變更：仍要回報 reset（舊寫法寫入後 clock 變大，reset 被吃掉）
+    r = s.sync({ since: appSince, orders: [o('c', Date.now())] });
+    assert.equal(r.reset, true);
+    assert.ok(r.changes.orders.some((x) => x.id === 'a'), 'reset 時從頭給');
+    s.close();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
