@@ -75,7 +75,12 @@ export function TodayCard({ today, earn }: { today: Summary; earn: EarningsSumma
 function Cell({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <View style={{ flex: 1, alignItems: 'center' }}>
-      <Text style={[S.midNum, { fontSize: 40 }, color ? { color } : null]} adjustsFontSizeToFit numberOfLines={1}>
+      <Text
+        style={[S.midNum, { fontSize: 40, alignSelf: 'stretch', textAlign: 'center' }, color ? { color } : null]}
+        adjustsFontSizeToFit
+        minimumFontScale={0.4}
+        numberOfLines={1}
+      >
         {value}
       </Text>
       <Text style={S.small}>{label}</Text>

@@ -88,8 +88,13 @@ function EarnBlock({ title, e }: { title: string; e: EarningsSummary }) {
   return (
     <View style={{ gap: 4 }}>
       <View style={S.rowBetween}>
-        <Text style={S.label}>{title}預計發放</Text>
-        <Text style={[S.midNum, { color: C.green }]} adjustsFontSizeToFit numberOfLines={1}>
+        <Text style={[S.label, { flexShrink: 0, marginRight: 8 }]}>{title}預計發放</Text>
+        <Text
+          style={[S.midNum, { color: C.green, flex: 1, textAlign: 'right' }]}
+          adjustsFontSizeToFit
+          minimumFontScale={0.4}
+          numberOfLines={1}
+        >
           {money(e.payout)}
         </Text>
       </View>
