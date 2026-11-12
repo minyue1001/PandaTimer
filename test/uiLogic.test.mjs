@@ -137,8 +137,8 @@ test('orderCountdown：剩餘 mm:ss、<3 分 urgent、超時 lateMin（無條件
 test('orderAmount / orderTags / sortActive', () => {
   assert.deepEqual(orderAmount({ estimateMin: 21, amount: 85.76 }), { value: 85.76, estimated: false });
   const est = orderAmount({ estimateMin: 21 }, DEFAULT_PAY);
-  assert.equal(est.estimated, true);
-  assert.ok(Math.abs(est.value - 21 * 4.08355) < 1e-9);
+  assert.equal(est.estimated, false); // 平台確切算法，視為確切值
+  assert.equal(est.value, 85.76);
   assert.equal(orderAmount({ estimateMin: 5 }).value, 45); // 最低車資
   assert.deepEqual(orderTags({ source: 'auto', stacked: true }), ['自動', '夾單']);
   assert.deepEqual(orderTags({ source: 'import' }), ['匯入']);
@@ -194,7 +194,7 @@ test('groupHistory：依台北日分組（新→舊）、今天/昨天、日小�
   assert.equal(today.subtotal.stacked, 1);
   assert.ok(Math.abs(today.subtotal.onTimeRate - 2 / 3) < 1e-9);
   // 預計發放（保守）＝預估報酬合計：20 分 ×2＋10 分（最低 45）
-  assert.ok(Math.abs(today.subtotal.payout - (2 * 20 * 4.08355 + 45)) < 1e-6);
+  assert.ok(Math.abs(today.subtotal.payout - (2 * 81.67 + 45)) < 1e-6);
   assert.equal(r.groups[2].label, '11/9（一）');
 });
 

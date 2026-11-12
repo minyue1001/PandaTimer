@@ -250,7 +250,7 @@
     "overrunCap": 1
   },
   "pay": {
-    "ratePerMinute": 4.08355,
+    "ratePerMinute": 4.083333333333333,
     "minFare": 45,
     "assumeStarredLate": true
   },

@@ -116,7 +116,7 @@ const TAIPEI = 8 * 3600e3, DAY = 86400e3, SPAN = 14 * DAY;
 const ANCHOR = Date.UTC(2026, 8, 27, 16, 0, 0); // 2026-09-28 00:00 台北
 const WEEK = '日一二三四五六';
 let csrf = '';
-let cfg = { graceFactor: 1.05, overrunCap: 1, rate: 4.08355, minFare: 45 };
+let cfg = { graceFactor: 1.05, overrunCap: 1, rate: 245 / 60, minFare: 45 };
 let pIndex = Math.floor((Date.now() - ANCHOR) / SPAN);
 let orders = [];
 let baselines = new Map();
@@ -163,9 +163,9 @@ const actualMin = (o) => (o.deliveredAt == null ? null : Math.round(((o.delivere
 const line = (o) => o.estimateMin * cfg.graceFactor;
 const onTime = (o) => actualMin(o) <= line(o) + 1e-9;
 const overrun = (o) => Math.min(cfg.overrunCap, Math.max(0, (actualMin(o) - line(o)) / line(o)));
-const estPay = (o) => Math.max(cfg.minFare, o.estimateMin * cfg.rate);
+const estPay = (o) => Math.max(cfg.minFare, Math.floor(o.estimateMin * cfg.rate * 100 + 1 + 1e-6) / 100);
 const pct = (x) => (x == null ? '—' : `${Math.round(x * 1000) / 10}%`);
-const money = (x) => `$${(Math.round(x * 100) / 100).toLocaleString('zh-TW')}`;
+const money = (x) => `$${(Math.round(x * 100) / 100).toLocaleString('zh-TW', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 function summarize(list) {
   const done = list.filter((o) => !o.deleted && o.status === 'delivered' && o.deliveredAt != null);
   let ok = 0, over = 0, income = 0, guessed = 0, stacked = 0;

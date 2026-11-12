@@ -9,13 +9,15 @@ import type { Order } from './orders';
 import { periodOf, taipeiDayStart, type Baseline } from './stats.ts';
 
 export type PayParams = { ratePerMinute: number; minFare: number; assumeStarredLate: boolean };
-export const DEFAULT_PAY: Readonly<PayParams> = Object.freeze({ ratePerMinute: 4.08355, minFare: 45, assumeStarredLate: true });
+export const DEFAULT_PAY: Readonly<PayParams> = Object.freeze({ ratePerMinute: 245 / 60, minFare: 45, assumeStarredLate: true });
 
 const DAY_MS = 86_400_000;
 
 /** 分鐘 → 報酬（含最低車資） */
 export function fareFor(minutes: number, p: PayParams = DEFAULT_PAY): number {
-  return Math.max(p.minFare, minutes * p.ratePerMinute);
+  // 平台算法：每分鐘費率（245/60）× 分鐘，加 1 分錢後捨去到分（與報酬單逐分吻合）
+  const cents = Math.floor(minutes * p.ratePerMinute * 100 + 1 + 1e-6);
+  return Math.max(p.minFare, cents / 100);
 }
 
 export type PaySample = {
@@ -114,5 +116,6 @@ export function periodAndTodayEarnings(
 
 /** 金額顯示：整數元，千分位 */
 export function money(x: number): string {
-  return `$${Math.round(x).toLocaleString('en-US')}`;
+  const [i, d] = (Math.round(x * 100) / 100).toFixed(2).split('.');
+  return `$${i.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${d}`;
 }

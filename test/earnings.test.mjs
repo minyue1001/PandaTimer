@@ -6,43 +6,49 @@ import { DEFAULT_PAY, fareFor, orderPay, summarizeEarnings, periodAndTodayEarnin
 import { parseBaseline, periodOf } from '../src/stats.ts';
 import { validateConfig, DEFAULT_CONFIG } from '../src/remoteConfig.ts';
 
-const R = 4.08355;
+// 平台確切算法：245/60 每分鐘，加 1 分錢後捨去到分，最低 45（以整數運算獨立計算期望值）
+const fare = (m) => Math.max(45, Math.floor((m * 245 * 100 + 60) / 60 + 1e-6) / 100);
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≉ ${b}`);
 
-test('公式：max(45, 分鐘 × 4.08355)；最低 45', () => {
-  near(fareFor(20), 20 * R);
+test('公式：max(45, 分鐘 × 245/60 加 1 分捨去到分)；最低 45', () => {
+  near(fareFor(20), fare(20));
+  // 與使用者報酬單逐分吻合的確切值
+  assert.equal(fareFor(12), 49.01);
+  assert.equal(fareFor(13), 53.09);
+  assert.equal(fareFor(20), 81.67);
+  assert.equal(fareFor(21), 85.76);
   assert.equal(fareFor(5), 45);
-  assert.equal(fareFor(11), 45); // 11 × 4.08355 = 44.92
-  near(fareFor(12), 12 * R); // 49.0
+  assert.equal(fareFor(11), 45); // 11 × 245/60 = 44.92
+  near(fareFor(12), fare(12)); // 49.01
 });
 
 test('單筆：準時不補、晚到補差額、實際分鐘四捨五入、補錢不為負', () => {
   const ontime = orderPay({ est: 20, act: 15 });
   assert.equal(ontime.adjustment, 0);
   assert.equal(ontime.late, false);
-  near(ontime.estPay, 20 * R);
+  near(ontime.estPay, fare(20));
   const late = orderPay({ est: 12, act: 31 });
-  near(late.actPay, 31 * R);
-  near(late.adjustment, 31 * R - 12 * R);
+  near(late.actPay, fare(31));
+  near(late.adjustment, fare(31) - fare(12));
   assert.equal(late.late, true);
   // 最低 45：預估 10（45）、實際 11（45）→ 沒補，但仍算晚到
   const floor = orderPay({ est: 10, act: 11 });
   assert.equal(floor.adjustment, 0);
   assert.equal(floor.late, true);
   // 實際 20.4 → 20、20.6 → 21
-  near(orderPay({ est: 15, act: 20.4 }).actPay, 20 * R);
-  near(orderPay({ est: 15, act: 20.6 }).actPay, 21 * R);
+  near(orderPay({ est: 15, act: 20.4 }).actPay, fare(20));
+  near(orderPay({ est: 15, act: 20.6 }).actPay, fare(21));
   // 有 OCR 金額 → 當預估報酬
   const amt = orderPay({ est: 20, act: 30, estAmount: 80 });
   assert.equal(amt.estPay, 80);
-  near(amt.adjustment, 30 * R - 80);
+  near(amt.adjustment, fare(30) - 80);
 });
 
 test('期別彙總：兩種情境、晚到單數、assumeStarredLate 切換', () => {
   const samples = [{ est: 20, act: 15 }, { est: 12, act: 31 }, { est: 30, act: 40 }];
   const cons = summarizeEarnings(samples, DEFAULT_PAY);
-  const estTotal = 20 * R + 12 * R + 30 * R;
-  const adj = 31 * R - 12 * R + (40 * R - 30 * R);
+  const estTotal = fare(20) + fare(12) + fare(30);
+  const adj = fare(31) - fare(12) + (fare(40) - fare(30));
   assert.equal(cons.count, 3);
   assert.equal(cons.lateCount, 2);
   near(cons.estTotal, estTotal);
@@ -70,12 +76,12 @@ test('補登收入併入本期（兩種情境都加），今日不含；換期�
   const orders = [mk('a', 12, 31, now - 3_600_000), mk('b', 20, 15, now - 7_200_000)];
   const base = { periodId: '2026-11-09', count: 10, onTimeRate: 0.5, overrunRate: 0.1, income: 1000 };
   const e = periodAndTodayEarnings(orders, now, DEFAULT_PAY, base);
-  near(e.period.estTotal, 1000 + 12 * R + 20 * R);
-  near(e.period.optimisticTotal, 1000 + 12 * R + 20 * R + (31 * R - 12 * R));
-  near(e.period.payout, 1000 + 12 * R + 20 * R);
+  near(e.period.estTotal, 1000 + fare(12) + fare(20));
+  near(e.period.optimisticTotal, 1000 + fare(12) + fare(20) + (fare(31) - fare(12)));
+  near(e.period.payout, 1000 + fare(12) + fare(20));
   assert.equal(e.period.baselineIncome, 1000);
   assert.equal(e.today.baselineIncome, 0);
-  near(e.today.estTotal, 12 * R + 20 * R);
+  near(e.today.estTotal, fare(12) + fare(20));
   // 別期的補登不算
   const other = periodAndTodayEarnings(orders, now, DEFAULT_PAY, { ...base, periodId: '2026-10-26' });
   assert.equal(other.period.baselineIncome, 0);
@@ -93,7 +99,7 @@ test('parseBaseline 的 income 欄位：合法保留、不合法丟掉但補登�
 });
 
 test('遠端設定 pay 區塊：預設、覆寫、不合法回預設', () => {
-  assert.deepEqual(DEFAULT_CONFIG.pay, { ratePerMinute: 4.08355, minFare: 45, assumeStarredLate: true });
+  assert.deepEqual(DEFAULT_CONFIG.pay, { ratePerMinute: 245 / 60, minFare: 45, assumeStarredLate: true });
   const ok = validateConfig({ version: 'p1', pay: { ratePerMinute: 4.2, minFare: 50, assumeStarredLate: false } });
   assert.deepEqual(ok.config.pay, { ratePerMinute: 4.2, minFare: 50, assumeStarredLate: false });
   const bad = validateConfig({ version: 'p2', pay: { ratePerMinute: 0, minFare: -1, assumeStarredLate: 'no' } });
@@ -133,6 +139,8 @@ test('三期報酬單對帳：單件費用＋金額調整 合計 vs fin 合計�
 });
 
 test('money 格式', () => {
-  assert.equal(money(1234.4), '$1,234');
-  assert.equal(money(0), '$0');
+  assert.equal(money(1234.4), '$1,234.40');
+  assert.equal(money(0), '$0.00');
+  assert.equal(money(49.01), '$49.01');
+  assert.equal(money(1234567.5), '$1,234,567.50');
 });

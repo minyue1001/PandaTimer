@@ -179,7 +179,8 @@ export function orderCountdown(o: Pick<Order, 'deadline'>, now: number): Countdo
 /** 卡片/紀錄的金額：匯入帶的金額優先；否則用預估報酬（max(最低, 預估分×費率)），estimated=true 顯示「約」 */
 export function orderAmount(o: Pick<Order, 'amount' | 'estimateMin'>, p: PayParams = DEFAULT_PAY): { value: number; estimated: boolean } {
   if (o.amount != null && Number.isFinite(o.amount) && o.amount > 0) return { value: o.amount, estimated: false };
-  return { value: fareFor(o.estimateMin, p), estimated: true };
+  // 預估分鐘換算的金額與平台算法逐分吻合，視為確切值
+  return { value: fareFor(o.estimateMin, p), estimated: false };
 }
 
 /** 標籤：自動／匯入／夾單 */
