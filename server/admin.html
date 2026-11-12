@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark">
+<title>熊貓倒數 管理</title>
+<style nonce="__NONCE__">
+:root { --bg:#121212; --card:#1E1E1E; --card2:#262626; --border:#333; --text:#F2F2F2; --dim:#9A9A9A; --pink:#FF2B85; --green:#3DDC84; --red:#FF5A5F; --yellow:#FFC83D; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", sans-serif; }
+body { padding: 12px 12px calc(24px + env(safe-area-inset-bottom)); max-width: 760px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 4px 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+h2 { font-size: 18px; margin: 0 0 8px; }
+h3 { font-size: 16px; margin: 18px 4px 8px; color: var(--dim); font-weight: 600; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.between { justify-content: space-between; }
+.grow { flex: 1; }
+button, .btn { min-height: 44px; padding: 8px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--card2); color: var(--text); font-size: 16px; font-weight: 600; cursor: pointer; }
+button.pink { background: var(--pink); border-color: var(--pink); color: #fff; }
+button.danger { color: var(--red); }
+button.small { min-height: 36px; padding: 4px 10px; font-size: 15px; }
+button:disabled { opacity: .4; }
+input, select { min-height: 44px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: #0E0E0E; color: var(--text); font-size: 16px; width: 100%; }
+input[type=checkbox] { width: 24px; min-height: 24px; height: 24px; }
+label.f { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px; align-items: center; margin: 6px 0; color: var(--dim); }
+label.f > input, label.f > select { min-width: 0; max-width: 100%; }
+.kv { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.kv div { background: var(--card2); border-radius: 10px; padding: 8px 10px; }
+.kv b { display: block; font-size: 20px; }
+.kv span { color: var(--dim); font-size: 14px; }
+.ok { color: var(--green); } .late { color: var(--red); } .warn { color: var(--yellow); } .dim { color: var(--dim); }
+.order { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+.order.deleted { opacity: .5; border-style: dashed; }
+.order .main { display: flex; justify-content: space-between; gap: 8px; cursor: pointer; }
+.order .t { font-size: 18px; font-weight: 700; }
+.order .sub { color: var(--dim); font-size: 15px; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 14px; font-weight: 700; background: var(--card2); margin-left: 4px; }
+.badge.ok { background: rgba(61,220,132,.15); } .badge.late { background: rgba(255,90,95,.15); }
+.tag { display: inline-block; padding: 0 6px; border-radius: 6px; font-size: 13px; background: var(--card2); color: var(--dim); margin: 2px 4px 0 0; }
+.amt { font-size: 18px; font-weight: 700; text-align: right; white-space: nowrap; }
+.edit { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.hidden { display: none !important; }
+#toast { position: fixed; left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); background: #333; border: 1px solid var(--border); border-radius: 14px; padding: 12px; text-align: center; font-weight: 700; z-index: 9; }
+.code { font: 700 22px/1.2 ui-monospace, Menlo, monospace; letter-spacing: 1px; }
+.err { color: var(--red); min-height: 22px; }
+</style>
+</head>
+<body>
+<div id="login" class="hidden">
+  <h1>熊貓倒數・管理</h1>
+  <div class="card">
+    <h2>登入</h2>
+    <label class="f">管理密碼<input id="pw" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false"></label>
+    <div id="loginErr" class="err"></div>
+    <button id="loginBtn" class="pink">登入</button>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <h1><span>熊貓倒數・管理</span><button id="logoutBtn" class="small">登出</button></h1>
+
+  <div class="card">
+    <div class="row between">
+      <button id="prevP" class="small">‹ 上期</button>
+      <div><b id="pLabel"></b> <span id="pNow" class="dim"></span></div>
+      <button id="nextP" class="small">下期 ›</button>
+    </div>
+    <div class="kv" id="pStats"></div>
+    <div id="pNote" class="dim"></div>
+  </div>
+
+  <div class="card">
+    <div class="row between"><h2>補登本期</h2><button id="blEdit" class="small">編輯</button></div>
+    <div id="blView" class="dim"></div>
+    <div id="blForm" class="hidden">
+      <label class="f">單數<input id="blOrders" type="number" inputmode="numeric" min="0" max="2000" step="1"></label>
+      <label class="f">準時率 %<input id="blOnTime" type="number" inputmode="decimal" min="0" max="100" step="0.1"></label>
+      <label class="f">超時率 %<input id="blOverrun" type="number" inputmode="decimal" min="0" max="100" step="0.1"></label>
+      <label class="f">收入 $<input id="blIncome" type="number" inputmode="decimal" min="0" step="0.01" placeholder="可空"></label>
+      <div class="row">
+        <button id="blSave" class="pink grow">儲存補登</button>
+        <button id="blCancel" class="grow">取消</button>
+        <button id="blDelete" class="danger">刪除補登</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="addBtn" class="pink grow">＋ 新增一筆</button>
+    <button id="csvBtn" class="grow">匯出 CSV</button>
+    <label class="row dim"><input id="showDel" type="checkbox"> 顯示已刪除</label>
+  </div>
+  <div id="newForm" class="card hidden"></div>
+  <div id="list"></div>
+
+  <div class="card">
+    <h2>App 同步碼</h2>
+    <div class="row between">
+      <span id="syncCode" class="code">••••-••••-••••</span>
+      <span class="row"><button id="syncShow" class="small">顯示</button><button id="syncReset" class="small danger">重設</button></span>
+    </div>
+    <div class="dim">在 App「設定 › 雲端同步」輸入這組碼。重設後舊碼立即失效，App 要重新輸入。</div>
+  </div>
+  <div class="dim" id="footer"></div>
+</div>
+<div id="toast" class="hidden"></div>
+
+<script nonce="__NONCE__">
+'use strict';
+// 路徑：/pandatimer/admin → API 在 /pandatimer/api/admin/…（本機測試在 /admin → /api/admin/…）
+const BASE = location.pathname.replace(/\/admin\/?$/, '/');
+const TAIPEI = 8 * 3600e3, DAY = 86400e3, SPAN = 14 * DAY;
+const ANCHOR = Date.UTC(2026, 8, 27, 16, 0, 0); // 2026-09-28 00:00 台北
+const WEEK = '日一二三四五六';
+let csrf = '';
+let cfg = { graceFactor: 1.05, overrunCap: 1, rate: 4.08355, minFare: 45 };
+let pIndex = Math.floor((Date.now() - ANCHOR) / SPAN);
+let orders = [];
+let baselines = new Map();
+let openId = null;
+let syncCodeText = '';
+
+const $ = (id) => document.getElementById(id);
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k in el && typeof v !== 'string') el[k] = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+let toastTimer = 0;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.add('hidden'), 3500);
+}
+
+// ── 台北時間 ──
+const pad = (n) => String(n).padStart(2, '0');
+const tp = (ms) => new Date(ms + TAIPEI);
+const dateKey = (ms) => { const d = tp(ms); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`; };
+const hm = (ms) => { const d = tp(ms); return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`; };
+const md = (ms) => { const d = tp(ms); return `${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCDate())}`; };
+const toInput = (ms) => (ms == null ? '' : `${dateKey(ms)}T${hm(ms)}`);
+function fromInput(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(s || '');
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) - TAIPEI : null;
+}
+const period = (i) => ({ start: ANCHOR + i * SPAN, end: ANCHOR + (i + 1) * SPAN, id: dateKey(ANCHOR + i * SPAN) });
+
+// ── 統計（與 App src/stats.ts、src/earnings.ts 同算法） ──
+const actualMin = (o) => (o.deliveredAt == null ? null : Math.round(((o.deliveredAt - o.acceptedAt) / 60000) * 10) / 10);
+const line = (o) => o.estimateMin * cfg.graceFactor;
+const onTime = (o) => actualMin(o) <= line(o) + 1e-9;
+const overrun = (o) => Math.min(cfg.overrunCap, Math.max(0, (actualMin(o) - line(o)) / line(o)));
+const estPay = (o) => Math.max(cfg.minFare, o.estimateMin * cfg.rate);
+const pct = (x) => (x == null ? '—' : `${Math.round(x * 1000) / 10}%`);
+const money = (x) => `$${(Math.round(x * 100) / 100).toLocaleString('zh-TW')}`;
+function summarize(list) {
+  const done = list.filter((o) => !o.deleted && o.status === 'delivered' && o.deliveredAt != null);
+  let ok = 0, over = 0, income = 0, guessed = 0, stacked = 0;
+  for (const o of done) {
+    if (onTime(o)) ok++;
+    over += overrun(o);
+    if (o.amount != null) income += o.amount; else { income += estPay(o); guessed++; }
+    if (o.stacked) stacked++;
+  }
+  return { n: done.length, ok, over, income, guessed, stacked };
+}
+
+// ── API ──
+async function api(method, path, body) {
+  const res = await fetch(BASE + 'api/admin/' + path, {
+    method,
+    credentials: 'same-origin',
+    headers: body !== undefined ? { 'content-type': 'application/json', 'x-pt-csrf': csrf } : method === 'GET' ? {} : { 'content-type': 'application/json', 'x-pt-csrf': csrf },
+    body: body !== undefined ? JSON.stringify(body) : method === 'GET' ? undefined : '{}',
+  });
+  let data = null;
+  try { data = await res.json(); } catch { /* 非 JSON */ }
+  if (res.status === 401 && path !== 'login') { showLogin(); throw new Error('請重新登入'); }
+  if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+  return data;
+}
+
+function showLogin() {
+  csrf = '';
+  $('app').classList.add('hidden');
+  $('login').classList.remove('hidden');
+  $('pw').focus();
+}
+async function login() {
+  $('loginErr').textContent = '';
+  $('loginBtn').disabled = true;
+  try {
+    await api('POST', 'login', { password: $('pw').value });
+    $('pw').value = '';
+    await boot();
+  } catch (e) {
+    $('loginErr').textContent = e.message;
+  } finally {
+    $('loginBtn').disabled = false;
+  }
+}
+
+async function boot() {
+  let s;
+  try {
+    const res = await fetch(BASE + 'api/admin/session', { credentials: 'same-origin' });
+    if (res.status === 401) return showLogin();
+    s = await res.json();
+    if (!res.ok) throw new Error(s.error || `HTTP ${res.status}`);
+  } catch (e) {
+    showLogin();
+    $('loginErr').textContent = e.message;
+    return;
+  }
+  csrf = s.csrf;
+  syncCodeText = s.syncCode;
+  $('syncCode').textContent = '••••-••••-' + s.syncCode.slice(-4);
+  $('syncShow').textContent = '顯示';
+  $('footer').textContent = `資料庫 ${s.dbId}・共 ${s.counts.orders} 筆（已刪除 ${s.counts.deleted}）・登入到 ${hm(s.expiresAt)}`;
+  $('login').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  try {
+    const c = await (await fetch(BASE + 'api/config')).json();
+    const g = Number(c?.stats?.graceFactor), cap = Number(c?.stats?.overrunCap), r = Number(c?.pay?.ratePerMinute), mf = Number(c?.pay?.minFare);
+    if (g >= 1 && g <= 2) cfg.graceFactor = g;
+    if (cap > 0 && cap <= 10) cfg.overrunCap = cap;
+    if (r > 0 && r < 100) cfg.rate = r;
+    if (mf >= 0 && mf < 1000) cfg.minFare = mf;
+  } catch { /* 用預設 */ }
+  await load();
+}
+
+async function load() {
+  const p = period(pIndex);
+  const q = `from=${dateKey(p.start)}&to=${dateKey(p.end - DAY)}${$('showDel').checked ? '&deleted=1' : ''}`;
+  try {
+    const [o, b] = await Promise.all([api('GET', `orders?${q}`), api('GET', 'baselines')]);
+    orders = o.orders;
+    baselines = new Map(b.baselines.filter((x) => !x.deleted).map((x) => [x.period, x]));
+    render();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function render() {
+  const p = period(pIndex);
+  const cur = Math.floor((Date.now() - ANCHOR) / SPAN);
+  $('pLabel').textContent = `${md(p.start)}–${md(p.end - DAY)}`;
+  $('pNow').textContent = pIndex === cur ? '（本期）' : '';
+  $('nextP').disabled = pIndex >= cur;
+  const s = summarize(orders);
+  const bl = baselines.get(p.id);
+  const n0 = bl ? bl.orders : 0;
+  const n = s.n + n0;
+  const okAll = s.ok + (bl ? (n0 * bl.onTimePct) / 100 : 0);
+  const overAll = s.over + (bl ? (n0 * bl.overrunPct) / 100 : 0);
+  const incomeAll = s.income + (bl && bl.income != null ? bl.income : 0);
+  const onTimeRate = n ? okAll / n : null, overRate = n ? overAll / n : null;
+  $('pStats').replaceChildren(
+    h('div', {}, h('span', {}, '單數'), h('b', {}, `${n}`), h('span', {}, bl ? `App ${s.n}＋補登 ${n0}` : `夾單 ${s.stacked}`)),
+    h('div', {}, h('span', {}, '準時率'), h('b', { class: onTimeRate == null ? '' : onTimeRate >= 0.5 ? 'ok' : onTimeRate >= 0.4 ? 'warn' : 'late' }, pct(onTimeRate))),
+    h('div', {}, h('span', {}, '超時率'), h('b', { class: overRate == null ? '' : overRate <= 0.2 ? 'ok' : 'late' }, pct(overRate))),
+    h('div', {}, h('span', {}, '收入'), h('b', {}, money(incomeAll)), h('span', {}, s.guessed ? `含 ${s.guessed} 單估算` : '')),
+  );
+  $('pNote').textContent = `準時＝實際 ≤ 預估×${cfg.graceFactor}；沒填金額的單以 max(${cfg.minFare}, 預估×${cfg.rate}) 估算。`;
+  $('blView').textContent = bl
+    ? `${bl.orders} 單・準時 ${bl.onTimePct}%・超時 ${bl.overrunPct}%${bl.income != null ? `・收入 ${money(bl.income)}` : ''}`
+    : '這期沒有補登';
+  $('blForm').classList.add('hidden');
+  $('blEdit').classList.remove('hidden');
+  renderList();
+}
+
+function tagsOf(o) {
+  const src = { auto: '自動', import: '匯入', confirm: '補認', admin: '管理頁' }[o.source];
+  return [
+    o.stacked ? '夾單' : null,
+    src || null,
+    o.status === 'canceled' ? '已取消' : o.status === 'active' ? '進行中' : null,
+    o.deleted ? '已刪除' : null,
+    o.editedBy === 'admin' && o.source !== 'admin' ? '已修改' : null,
+  ].filter(Boolean);
+}
+
+function renderList() {
+  const groups = new Map();
+  for (const o of orders) {
+    const k = dateKey(o.acceptedAt);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(o);
+  }
+  const out = [];
+  for (const [k, list] of [...groups.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1))) {
+    const s = summarize(list);
+    const d = new Date(`${k}T00:00:00Z`);
+    out.push(h('h3', {},
+      h('span', {}, `${k.slice(5).replace('-', '/')}（${WEEK[d.getUTCDay()]}）`),
+      h('span', {}, `${s.n} 單・準時 ${pct(s.n ? s.ok / s.n : null)}・超時 ${pct(s.n ? s.over / s.n : null)}・${money(s.income)}`)));
+    for (const o of list.sort((a, b) => b.acceptedAt - a.acceptedAt)) out.push(orderRow(o));
+  }
+  if (!out.length) out.push(h('div', { class: 'card dim' }, '這期沒有訂單'));
+  $('list').replaceChildren(...out);
+}
+
+function orderRow(o) {
+  const act = actualMin(o);
+  const done = o.status === 'delivered' && act != null;
+  const ok = done && onTime(o);
+  const el = h('div', { class: `order${o.deleted ? ' deleted' : ''}` },
+    h('div', { class: 'main', onclick: () => { openId = openId === o.id ? null : o.id; renderList(); } },
+      h('div', {},
+        h('div', { class: 't' }, `${hm(o.acceptedAt)} → ${o.deliveredAt != null ? hm(o.deliveredAt) : '—'}`,
+          done ? h('span', { class: `badge ${ok ? 'ok' : 'late'}` }, ok ? '準' : '超') : null),
+        h('div', { class: 'sub' }, `預估 ${o.estimateMin} 分${act != null ? `・實際 ${act} 分` : ''}`),
+        h('div', {}, tagsOf(o).map((t) => h('span', { class: 'tag' }, t)), o.note ? h('span', { class: 'tag' }, `📝 ${o.note}`) : null)),
+      h('div', { class: 'amt' }, o.amount != null ? money(o.amount) : h('span', { class: 'dim' }, `≈${money(estPay(o))}`))));
+  if (openId === o.id) el.append(editForm(o));
+  return el;
+}
+
+function fieldsForm(o, onSave, extraButtons) {
+  const acc = h('input', { type: 'datetime-local', value: toInput(o.acceptedAt) });
+  const est = h('input', { type: 'number', inputmode: 'decimal', min: '1', max: '180', step: '1', value: String(o.estimateMin) });
+  const st = h('select', {},
+    h('option', { value: 'delivered' }, '已送達'), h('option', { value: 'active' }, '進行中'), h('option', { value: 'canceled' }, '已取消'));
+  st.value = o.status;
+  const del = h('input', { type: 'datetime-local', value: toInput(o.deliveredAt) });
+  const amt = h('input', { type: 'number', inputmode: 'decimal', min: '0', step: '0.01', placeholder: '可空', value: o.amount != null ? String(o.amount) : '' });
+  const stk = h('input', { type: 'checkbox' });
+  stk.checked = !!o.stacked;
+  const note = h('input', { type: 'text', maxlength: '100', value: o.note || '', placeholder: '可空' });
+  const err = h('div', { class: 'err' });
+  const save = async () => {
+    err.textContent = '';
+    const acceptedAt = fromInput(acc.value);
+    const deliveredAt = del.value ? fromInput(del.value) : null;
+    const estimateMin = Number(est.value);
+    if (acceptedAt == null) return (err.textContent = '接單時間要填');
+    if (!(estimateMin >= 1 && estimateMin <= 180)) return (err.textContent = '預估分鐘 1~180');
+    if (st.value === 'delivered' && deliveredAt == null) return (err.textContent = '已送達要填送達時間');
+    if (deliveredAt != null && deliveredAt < acceptedAt) return (err.textContent = '送達不能早於接單');
+    const amount = amt.value.trim() === '' ? null : Number(amt.value);
+    if (amount != null && !(amount >= 0)) return (err.textContent = '金額格式不對');
+    try {
+      await onSave({ acceptedAt, estimateMin, status: st.value, deliveredAt: st.value === 'active' ? null : deliveredAt, amount, stacked: stk.checked, note: note.value });
+    } catch (e) {
+      err.textContent = e.message;
+    }
+  };
+  return h('div', { class: 'edit' },
+    h('label', { class: 'f' }, '接單', acc),
+    h('label', { class: 'f' }, '預估分', est),
+    h('label', { class: 'f' }, '狀態', st),
+    h('label', { class: 'f' }, '送達', del),
+    h('label', { class: 'f' }, '金額 $', amt),
+    h('label', { class: 'f' }, '夾單', stk),
+    h('label', { class: 'f' }, '備註', note),
+    err,
+    h('div', { class: 'row' }, h('button', { class: 'pink grow', onclick: save }, '儲存'), extraButtons));
+}
+
+function editForm(o) {
+  const replace = (next) => {
+    orders = orders.map((x) => (x.id === next.id ? next : x)).filter((x) => $('showDel').checked || !x.deleted);
+    openId = null;
+    render();
+  };
+  const buttons = [
+    h('button', { class: 'grow', onclick: () => { openId = null; renderList(); } }, '取消'),
+    o.deleted
+      ? h('button', { onclick: async () => { try { replace((await api('POST', `orders/${encodeURIComponent(o.id)}/restore`)).order); toast('已還原'); } catch (e) { toast(e.message); } } }, '還原')
+      : h('button', { class: 'danger', onclick: async () => {
+          if (!confirm(`刪除 ${md(o.acceptedAt)} ${hm(o.acceptedAt)} 這筆？（可在「顯示已刪除」還原）`)) return;
+          try { replace((await api('DELETE', `orders/${encodeURIComponent(o.id)}`)).order); toast('已刪除'); } catch (e) { toast(e.message); }
+        } }, '刪除'),
+  ];
+  return fieldsForm(o, async (f) => {
+    replace((await api('PUT', `orders/${encodeURIComponent(o.id)}`, f)).order);
+    toast('已儲存（App 下次同步會更新）');
+  }, buttons);
+}
+
+function openNew() {
+  const box = $('newForm');
+  if (!box.classList.contains('hidden')) return box.classList.add('hidden');
+  const now = Date.now();
+  const o = { acceptedAt: now - 20 * 60e3, estimateMin: 18, status: 'delivered', deliveredAt: now, amount: null, stacked: false, note: '' };
+  box.replaceChildren(h('h2', {}, '新增一筆'), fieldsForm(o, async (f) => {
+    const r = await api('POST', 'orders', f);
+    box.classList.add('hidden');
+    pIndex = Math.floor((r.order.acceptedAt - ANCHOR) / SPAN);
+    toast('已新增');
+    await load();
+  }, [h('button', { class: 'grow', onclick: () => box.classList.add('hidden') }, '取消')]));
+  box.classList.remove('hidden');
+}
+
+function editBaseline() {
+  const bl = baselines.get(period(pIndex).id);
+  $('blOrders').value = bl ? bl.orders : '';
+  $('blOnTime').value = bl ? bl.onTimePct : '';
+  $('blOverrun').value = bl ? bl.overrunPct : '';
+  $('blIncome').value = bl && bl.income != null ? bl.income : '';
+  $('blDelete').disabled = !bl;
+  $('blForm').classList.remove('hidden');
+  $('blEdit').classList.add('hidden');
+}
+async function saveBaseline() {
+  const n = Number($('blOrders').value), a = Number($('blOnTime').value || 0), b = Number($('blOverrun').value || 0);
+  const inc = $('blIncome').value.trim() === '' ? null : Number($('blIncome').value);
+  if (!(Number.isInteger(n) && n >= 0 && n <= 2000) || !(a >= 0 && a <= 100) || !(b >= 0 && b <= 100) || (inc != null && !(inc >= 0))) {
+    return toast('格式不對：單數 0~2000、百分比 0~100');
+  }
+  try {
+    await api('PUT', `baselines/${period(pIndex).id}`, { orders: n, onTimePct: a, overrunPct: b, income: inc });
+    toast('補登已儲存');
+    await load();
+  } catch (e) { toast(e.message); }
+}
+async function deleteBaseline() {
+  if (!confirm('刪除這期的補登？')) return;
+  try { await api('DELETE', `baselines/${period(pIndex).id}`); toast('補登已刪除'); await load(); } catch (e) { toast(e.message); }
+}
+
+$('loginBtn').addEventListener('click', login);
+$('pw').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+$('logoutBtn').addEventListener('click', async () => { try { await api('POST', 'logout'); } catch { /* 照樣登出 */ } showLogin(); });
+$('prevP').addEventListener('click', () => { pIndex--; openId = null; load(); });
+$('nextP').addEventListener('click', () => { pIndex++; openId = null; load(); });
+$('showDel').addEventListener('change', load);
+$('addBtn').addEventListener('click', openNew);
+$('csvBtn').addEventListener('click', () => {
+  const p = period(pIndex);
+  location.href = `${BASE}api/admin/export.csv?from=${dateKey(p.start)}&to=${dateKey(p.end - DAY)}${$('showDel').checked ? '&deleted=1' : ''}`;
+});
+$('blEdit').addEventListener('click', editBaseline);
+$('blCancel').addEventListener('click', () => { $('blForm').classList.add('hidden'); $('blEdit').classList.remove('hidden'); });
+$('blSave').addEventListener('click', saveBaseline);
+$('blDelete').addEventListener('click', deleteBaseline);
+$('syncShow').addEventListener('click', () => {
+  const shown = $('syncShow').textContent === '隱藏';
+  $('syncCode').textContent = shown ? '••••-••••-' + syncCodeText.slice(-4) : syncCodeText;
+  $('syncShow').textContent = shown ? '顯示' : '隱藏';
+});
+$('syncReset').addEventListener('click', async () => {
+  if (!confirm('重設同步碼？舊碼立即失效，App 要輸入新碼才能同步。')) return;
+  try {
+    syncCodeText = (await api('POST', 'sync-code/reset')).syncCode;
+    $('syncCode').textContent = syncCodeText;
+    $('syncShow').textContent = '隱藏';
+    toast('已重設，請到 App 輸入新碼');
+  } catch (e) { toast(e.message); }
+});
+boot();
+</script>
+</body>
+</html>

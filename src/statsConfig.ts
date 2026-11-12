@@ -5,6 +5,8 @@ import Constants from 'expo-constants';
 import { validateConfig } from './remoteConfig';
 import { waitSecFor } from './unconfirmedOffers';
 import { DEFAULT_PAY, type PayParams } from './earnings';
+import { notifyLocalChange } from './store';
+import { parseBaselineSlot, stampBaseline, type BaselineSlot } from './sync';
 import {
   BASELINE_STORAGE_KEY,
   DEFAULT_GOALS,
@@ -104,7 +106,25 @@ export async function loadBaseline(periodId: string): Promise<Baseline | null> {
   }
 }
 
-export async function saveBaseline(b: Baseline | null): Promise<void> {
-  if (!b) await AsyncStorage.removeItem(BASELINE_STORAGE_KEY);
-  else await AsyncStorage.setItem(BASELINE_STORAGE_KEY, JSON.stringify(b));
+/**
+ * 存補登（雲端同步：蓋上 updatedAt；清除＝寫刪除標記，讓刪除也同步得到伺服器）。
+ * 回傳存進去的補登（含 updatedAt）。
+ */
+export async function saveBaseline(b: Baseline | null, periodId: string): Promise<Baseline | null> {
+  const slot = stampBaseline(b, await loadBaselineSlot(), periodId, Date.now());
+  await saveBaselineSlot(slot);
+  notifyLocalChange();
+  return b ? (slot as Baseline) : null;
+}
+
+/** 雲端同步用：本機補登槽原樣（含刪除標記） */
+export async function loadBaselineSlot(): Promise<BaselineSlot | null> {
+  try {
+    return parseBaselineSlot(await AsyncStorage.getItem(BASELINE_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
+export async function saveBaselineSlot(slot: BaselineSlot): Promise<void> {
+  await AsyncStorage.setItem(BASELINE_STORAGE_KEY, JSON.stringify(slot));
 }

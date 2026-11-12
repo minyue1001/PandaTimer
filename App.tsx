@@ -25,6 +25,7 @@ import { DEFAULT_GOALS, DEFAULT_STATS, goalProgress, periodAndToday, periodOf, t
 import { DEFAULT_PAY, periodAndTodayEarnings, type PayParams } from './src/earnings';
 import { fetchRemoteParams, loadBaseline, loadCachedOfferWaitSec, loadCachedPayParams, loadCachedStatsParams, loadGoals } from './src/statsConfig';
 import { subscribe } from './src/store';
+import { useCloudSync } from './src/syncClient';
 import {
   confirmAcceptedAt,
   EMPTY_STATE,
@@ -74,6 +75,9 @@ function Main() {
   const [armedAt, setArmedAt] = useState<number | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ota = useOtaUpdate();
+  // 訂單雲端同步（設定頁配對；啟動/回前景/變動後 5 秒/前景每 2 分鐘自動同步）
+  const cloud = useCloudSync();
+  const baselineRev = cloud.status.baselineRev;
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -190,7 +194,7 @@ function Main() {
     return () => {
       alive = false;
     };
-  }, [periodId]);
+  }, [periodId, baselineRev]); // baselineRev：雲端同步收到管理頁改的補登
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -436,6 +440,7 @@ function Main() {
             laSupported={laSupported}
             ota={ota}
             onStopDetect={onStopDetect}
+            cloud={cloud}
           />
         </View>
         {toast && (

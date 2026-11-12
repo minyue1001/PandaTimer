@@ -9,12 +9,15 @@
 #         systemd 用 EnvironmentFile 讀；回報資料寫 /opt/pandatimer-updates/telemetry（ReadWritePaths）
 #       → v0.6：遠端設定 /opt/pandatimer-updates/config.json **不存在才**用 server/config.default.json 建立（已存在不覆蓋；
 #         之後改設定用 scripts/push-config.sh）
+#       → 訂單雲端同步：資料庫目錄 /opt/pandatimer-updates/data（owner pandatimer、ReadWritePaths）；管理密碼與初始同步碼
+#         （本機 ~/.config/pandatimer/admin-password、sync-code，600；**不存在才產生**，已存在不覆蓋）一併寫進 server.env。
+#         遠端 node 必須能 require('node:sqlite')（Node ≥22.13）。同步碼之後以管理頁顯示/重設的為準（存在資料庫）。
 #       → nginx 在 listen 443 的 wheat.yueshengift.xyz server 區塊插入 location ^~ /pandatimer/
-#       → 驗證既有站台狀態碼不變、服務都 active、/api/telemetry 金鑰錯回 401／讀取金鑰回 200；
+#       → 驗證既有站台狀態碼不變、服務都 active、/api/telemetry 金鑰錯回 401／讀取金鑰回 200、/admin 200、/api/sync 無碼 401；
 #         任一失敗自動回滾（還原 nginx；重跑時換回上一版程式＋server.env＋unit 並重啟，換版前就失敗則線上服務保持原狀，
 #         首次部署則停用服務）。
 # 可用環境變數覆寫：PANDATIMER_REMOTE（預設 wheat-new）、REMOTE_NODE_BIN（遠端 node 絕對路徑）、PANDATIMER_KEY、
-#   PANDATIMER_TELEMETRY_WRITE_KEY / PANDATIMER_TELEMETRY_READ_KEY（金鑰檔路徑）
+#   PANDATIMER_TELEMETRY_WRITE_KEY / PANDATIMER_TELEMETRY_READ_KEY / PANDATIMER_ADMIN_PASSWORD / PANDATIMER_SYNC_CODE（檔案路徑）
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,6 +34,8 @@ BACKUP_DIR="${BACKUP_DIR:-/root/nginx-backup}"
 LOCAL_KEY="${PANDATIMER_KEY:-$HOME/.config/pandatimer/keys/private-key.pem}"
 WRITE_KEY_FILE="${PANDATIMER_TELEMETRY_WRITE_KEY:-$HOME/.config/pandatimer/telemetry-write-key}"
 READ_KEY_FILE="${PANDATIMER_TELEMETRY_READ_KEY:-$HOME/.config/pandatimer/telemetry-read-key}"
+ADMIN_PW_FILE="${PANDATIMER_ADMIN_PASSWORD:-$HOME/.config/pandatimer/admin-password}"
+SYNC_CODE_FILE="${PANDATIMER_SYNC_CODE:-$HOME/.config/pandatimer/sync-code}"
 REMOTE_NODE_BIN="${REMOTE_NODE_BIN:-}"
 TS="$(date +%Y%m%d-%H%M%S)"
 
@@ -40,7 +45,7 @@ for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
     --print-remote-lib) PRINT_LIB=1 ;;   # 除錯用：印出送到遠端執行的腳本
-    -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "未知參數：$a" >&2; exit 2 ;;
   esac
 done
@@ -72,6 +77,9 @@ resolve_node() {
   NODE_VER="$("$NODE_BIN" -v </dev/null)"
   local major="${NODE_VER#v}"; major="${major%%.*}"
   (( major >= 18 )) || die "遠端 node $NODE_VER < 18，請先升級（本腳本不自動安裝）。"
+  # 訂單資料庫用內建 node:sqlite（Node ≥22.13 免旗標）
+  "$NODE_BIN" --no-warnings -e 'require("node:sqlite")' </dev/null >/dev/null 2>&1 \
+    || die "遠端 node $NODE_VER 沒有 node:sqlite（需要 Node ≥22.13），請先升級（本腳本不自動安裝）。"
 }
 
 nginx_real() {
@@ -232,10 +240,13 @@ cmd_install() {
   install -d -m 755 -o pandatimer -g pandatimer "$BASE/updates"
   install -d -m 700 -o pandatimer -g pandatimer "$BASE/keys"
   install -d -m 750 -o pandatimer -g pandatimer "$BASE/telemetry"
+  install -d -m 750 -o pandatimer -g pandatimer "$BASE/data"
   [[ -f "$BASE/server.incoming/index.mjs" ]] || die "找不到剛上傳的 $BASE/server.incoming/index.mjs"
   [[ -s "$BASE/server.env.new" ]] || die "找不到剛上傳的 $BASE/server.env.new"
   grep -q '^TELEMETRY_WRITE_KEY=..*' "$BASE/server.env.new" && grep -q '^TELEMETRY_READ_KEY=..*' "$BASE/server.env.new" \
     || die "server.env.new 缺 TELEMETRY_WRITE_KEY / TELEMETRY_READ_KEY"
+  grep -q '^ADMIN_PASSWORD=..*' "$BASE/server.env.new" && grep -q '^SYNC_CODE=..*' "$BASE/server.env.new" \
+    || die "server.env.new 缺 ADMIN_PASSWORD / SYNC_CODE"
   "$NODE_BIN" --check "$BASE/server.incoming/index.mjs"
   # 換版前留一份「上一版」（程式、server.env、unit），回滾時換回來；.last-swap 記這次部署的時間戳
   # （.last-swap 必須在動到任何東西「之前」寫：回滾靠它分辨「換版前就失敗＝線上未動」與「已換版」）
@@ -282,6 +293,7 @@ Environment=PRIVATE_KEY_PATH=$BASE/keys/private-key.pem
 Environment=PUBLIC_URL=$PUBLIC_URL
 Environment=TELEMETRY_DIR=$BASE/telemetry
 Environment=CONFIG_PATH=$BASE/config.json
+Environment=DATA_DIR=$BASE/data
 EnvironmentFile=$BASE/server.env
 ExecStart=$NODE_BIN $BASE/server/index.mjs
 Restart=on-failure
@@ -290,7 +302,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$BASE/telemetry
+ReadWritePaths=$BASE/telemetry $BASE/data
 
 [Install]
 WantedBy=multi-user.target
@@ -324,6 +336,9 @@ UNIT
     -H 'content-type: application/json' --data '{"ev":"deploy-check"}' "http://127.0.0.1:$PORT/api/telemetry" </dev/null || true)"
   [[ "$tc" == "401" ]] || die "127.0.0.1:$PORT/api/telemetry 金鑰錯應回 401，實際 $tc（server.env 沒被讀到？）"
   say "• /api/telemetry 已啟用（錯誤金鑰 → 401）"
+  tc="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:$PORT/api/sync" </dev/null || true)"
+  [[ "$tc" == "401" ]] || die "127.0.0.1:$PORT/api/sync 沒帶同步碼應回 401，實際 $tc（503＝資料庫 $BASE/data 開不了，看 journalctl -u $SVC）"
+  say "• /api/sync 已啟用（資料庫 $BASE/data/orders.db，無同步碼 → 401）"
 }
 
 # 回滾用：這次部署（.last-swap == $1）換過版 → 換回上一版程式／server.env／unit 並重啟；健康就印 @@restored ok
@@ -419,6 +434,9 @@ cmd_verify() {
   printf 'x-pt-read: %s\n' "$(sed -n 's/^TELEMETRY_READ_KEY=//p' "$BASE/server.env" | head -1)" > "$hf"
   printf '@@tele_read %s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -H @"$hf" "https://$DOMAIN/pandatimer/api/telemetry?limit=1" </dev/null || true)"
   rm -f "$hf"
+  # 訂單雲端同步：管理頁 200、/api/sync 沒帶同步碼 401（經 nginx）
+  printf '@@admin %s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$DOMAIN/pandatimer/admin" </dev/null || true)"
+  printf '@@sync_nocode %s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST "https://$DOMAIN/pandatimer/api/sync" </dev/null || true)"
 }
 
 case "$CMD" in
@@ -474,11 +492,12 @@ trap on_exit EXIT
 # ---------------------------------------------------------------- 1. 本機檢查
 echo "== 1/5 本機檢查"
 cd "$REPO"
-[[ -f "$REPO/server/index.mjs" && -f "$REPO/server/certs/certificate.pem" && -f "$REPO/server/config.default.json" ]] \
-  || fail "缺 server/index.mjs、server/certs/certificate.pem 或 server/config.default.json"
+[[ -f "$REPO/server/index.mjs" && -f "$REPO/server/orders.mjs" && -f "$REPO/server/admin.html" && -f "$REPO/server/certs/certificate.pem" && -f "$REPO/server/config.default.json" ]] \
+  || fail "缺 server/index.mjs、orders.mjs、admin.html、certs/certificate.pem 或 config.default.json"
 node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(!c||typeof c.version!=="string") process.exit(1)' "$REPO/server/config.default.json" \
   || fail "server/config.default.json 不是合法 JSON 或缺 version"
 node --check "$REPO/server/index.mjs" || fail "server/index.mjs 語法錯誤"
+node --check "$REPO/server/orders.mjs" || fail "server/orders.mjs 語法錯誤"
 [[ -f "$LOCAL_KEY" ]] || fail "找不到私鑰 $LOCAL_KEY"
 [[ "$(stat -c %a "$LOCAL_KEY")" == "600" ]] || fail "私鑰權限應為 600：$LOCAL_KEY"
 # 私鑰與憑證必須成對
@@ -496,9 +515,30 @@ READ_KEY="$(tr -d '\n' < "$READ_KEY_FILE")"
 [[ "$WRITE_KEY" != "$READ_KEY" ]] || fail "寫入金鑰與讀取金鑰不可相同"
 APP_KEY="$(node -p "require('$REPO/app.json').expo.extra?.telemetryKey ?? ''")"
 [[ "$APP_KEY" == "$WRITE_KEY" ]] || fail "app.json 的 extra.telemetryKey 與 $WRITE_KEY_FILE 不一致（App 送的回報會被拒）"
-( umask 077; printf 'TELEMETRY_WRITE_KEY=%s\nTELEMETRY_READ_KEY=%s\n' "$WRITE_KEY" "$READ_KEY" > "$ENV_FILE" )
-unset WRITE_KEY READ_KEY APP_KEY
-echo "• 回報金鑰 600、格式 OK、寫入金鑰與 app.json 一致"
+# 訂單雲端同步：管理密碼與初始同步碼（本機檔，600）。不存在才產生（冪等，已存在不覆蓋）；dry-run 不產生。
+gen_password() { node -e 'process.stdout.write(require("crypto").randomBytes(18).toString("base64url"))'; }
+gen_sync_code() { node -e 'const a="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let s="";for(const x of require("crypto").randomBytes(12))s+=a[x&31];process.stdout.write(s)'; }
+ensure_secret() { # $1 檔案 $2 產生函式 $3 名稱
+  [[ -f "$1" ]] && return 0
+  if (( DRY_RUN )); then echo "• （dry-run）$3 $1 不存在，正式部署時會產生"; return 1; fi
+  install -d -m 700 "$(dirname "$1")"
+  ( umask 077; "$2" > "$1.tmp" ) && mv -f "$1.tmp" "$1" && chmod 600 "$1"
+  echo "• 已產生$3 → $1（600）"
+}
+ADMIN_PW="dry-run-placeholder"; SYNC_SEED="DRYRUNPLACEHOLDER"
+if ensure_secret "$ADMIN_PW_FILE" gen_password "管理密碼"; then
+  [[ "$(stat -c %a "$ADMIN_PW_FILE")" == "600" ]] || fail "管理密碼檔權限應為 600：$ADMIN_PW_FILE"
+  ADMIN_PW="$(tr -d '\n' < "$ADMIN_PW_FILE")"
+  [[ "$ADMIN_PW" =~ ^[A-Za-z0-9_-]{16,128}$ ]] || fail "管理密碼格式不對（英數 _ -，16~128 字）：$ADMIN_PW_FILE"
+fi
+if ensure_secret "$SYNC_CODE_FILE" gen_sync_code "初始同步碼"; then
+  [[ "$(stat -c %a "$SYNC_CODE_FILE")" == "600" ]] || fail "同步碼檔權限應為 600：$SYNC_CODE_FILE"
+  SYNC_SEED="$(tr -d '\n' < "$SYNC_CODE_FILE")"
+  [[ "$SYNC_SEED" =~ ^[A-Za-z0-9-]{8,40}$ ]] || fail "同步碼格式不對：$SYNC_CODE_FILE"
+fi
+( umask 077; printf 'TELEMETRY_WRITE_KEY=%s\nTELEMETRY_READ_KEY=%s\nADMIN_PASSWORD=%s\nSYNC_CODE=%s\n' "$WRITE_KEY" "$READ_KEY" "$ADMIN_PW" "$SYNC_SEED" > "$ENV_FILE" )
+unset WRITE_KEY READ_KEY APP_KEY ADMIN_PW SYNC_SEED
+echo "• 回報金鑰 600、格式 OK、寫入金鑰與 app.json 一致；管理密碼／初始同步碼 600"
 
 # ---------------------------------------------------------------- 2. 遠端前置檢查（唯讀）
 echo "== 2/5 遠端前置檢查（唯讀，$REMOTE）"
@@ -515,16 +555,19 @@ if (( DRY_RUN )); then
   cat <<EOF
 
 == DRY RUN：以下動作「不會」執行，只是預告 ==
-  1. 打包 $REPO/server/{index.mjs,config.default.json,certs/certificate.pem,README.md} → $REMOTE:$BASE/server（舊版移到 server.prev）
+  1. 打包 $REPO/server/{index.mjs,orders.mjs,admin.html,config.default.json,certs/certificate.pem,README.md} → $REMOTE:$BASE/server（舊版移到 server.prev）
      遠端設定 $BASE/config.json 不存在才由 config.default.json 建立（已存在不動；改設定用 scripts/push-config.sh）
   2. 上傳私鑰 $LOCAL_KEY → $REMOTE:$BASE/keys/private-key.pem（600，owner pandatimer）
-     上傳回報金鑰（$WRITE_KEY_FILE、$READ_KEY_FILE）→ $REMOTE:$BASE/server.env（600，root）
-  3. 若無則建立系統帳號 pandatimer；$BASE/updates、$BASE/keys、$BASE/telemetry 給 pandatimer；上一版程式/server.env/unit 留作回滾
+     上傳回報金鑰（$WRITE_KEY_FILE、$READ_KEY_FILE）、管理密碼（$ADMIN_PW_FILE）、初始同步碼（$SYNC_CODE_FILE）
+       → $REMOTE:$BASE/server.env（600，root）；本機兩個檔不存在才產生
+  3. 若無則建立系統帳號 pandatimer；$BASE/updates、$BASE/keys、$BASE/telemetry、$BASE/data 給 pandatimer；上一版程式/server.env/unit 留作回滾
   4. 寫 $SYSTEMD_DIR/$SVC.service（User=pandatimer、127.0.0.1:$PORT、EnvironmentFile=$BASE/server.env、
-     ReadWritePaths=$BASE/telemetry、Restart=on-failure）→ enable + restart → 驗 /api/health、/api/telemetry 錯誤金鑰 401
+     ReadWritePaths=$BASE/telemetry $BASE/data、Restart=on-failure）→ enable + restart → 驗 /api/health、/api/telemetry 錯誤金鑰 401、
+     /api/sync 無同步碼 401
   5. nginx：$( [[ "$NGINX_STATE" == "already" ]] && echo "已含 /pandatimer/，不改" || echo "備份到 $BACKUP_DIR/$SITE_NAME.$TS → 插入上方 diff 的 location → nginx -t → reload（失敗即還原）" )
   6. 驗證：/、/wheat/、/wheat/admin/ 狀態碼與改前一致；$PUBLIC_URL/api/health = ok；
      manifest 經 nginx 回 noUpdateAvailable；/api/config 回 JSON；/api/telemetry 經 nginx：錯誤金鑰 401、讀取金鑰 200；
+     /pandatimer/admin 200、/pandatimer/api/sync 無同步碼 401；
      nginx / wheat-server@a / $SVC 皆 active；wheat-tw-tunnel 狀態不變
      任一失敗 → 還原 nginx；有上一版就換回並重啟，否則停用 $SVC；非零退出
 ✅ dry-run 完成（未改動任何東西）
@@ -535,7 +578,7 @@ fi
 # ---------------------------------------------------------------- 3. 上傳
 STAGE="upload"
 echo "== 3/5 上傳程式與私鑰"
-tar -C "$REPO/server" --owner=0 --group=0 -czf - index.mjs config.default.json certs/certificate.pem README.md \
+tar -C "$REPO/server" --owner=0 --group=0 -czf - index.mjs orders.mjs admin.html config.default.json certs/certificate.pem README.md \
   | "${SSH[@]}" "set -euo pipefail; install -d -m 755 $BASE; rm -rf $BASE/server.incoming; install -d -m 755 $BASE/server.incoming; tar -xzf - -C $BASE/server.incoming --no-same-owner"
 "${SSH[@]}" "set -euo pipefail; umask 077; install -d -m 700 $BASE/keys; cat > $BASE/keys/private-key.pem.new" < "$LOCAL_KEY"
 "${SSH[@]}" "set -euo pipefail; umask 077; cat > $BASE/server.env.new" < "$ENV_FILE"
@@ -571,6 +614,9 @@ if grep -q '^@@config ok' "$POST_OUT"; then echo "• /api/config 經 nginx → 
 tb="$(awk '$1=="@@tele_bad"{print $2}' "$POST_OUT")"; tr_="$(awk '$1=="@@tele_read"{print $2}' "$POST_OUT")"
 if [[ "$tb" == "401" ]]; then echo "• /api/telemetry 錯誤金鑰 → 401 ✓"; else echo "• /api/telemetry 錯誤金鑰 → '$tb' ✗"; bad=1; fi
 if [[ "$tr_" == "200" ]]; then echo "• /api/telemetry 讀取金鑰 → 200 ✓"; else echo "• /api/telemetry 讀取金鑰 → '$tr_' ✗"; bad=1; fi
+ad="$(awk '$1=="@@admin"{print $2}' "$POST_OUT")"; sn="$(awk '$1=="@@sync_nocode"{print $2}' "$POST_OUT")"
+if [[ "$ad" == "200" ]]; then echo "• /pandatimer/admin → 200 ✓"; else echo "• /pandatimer/admin → '$ad' ✗"; bad=1; fi
+if [[ "$sn" == "401" ]]; then echo "• /api/sync 無同步碼 → 401 ✓"; else echo "• /api/sync 無同步碼 → '$sn' ✗"; bad=1; fi
 lh="$(curl -s --max-time 15 "$PUBLIC_URL/api/health" || true)"
 echo "• （本機視角，僅參考）$PUBLIC_URL/api/health = '${lh}'"
 (( bad == 0 )) || fail "改後驗證未通過"
@@ -578,3 +624,4 @@ echo "• （本機視角，僅參考）$PUBLIC_URL/api/health = '${lh}'"
 STAGE="done"
 echo ""
 echo "✅ 部署成功：$PUBLIC_URL/api/manifest（nginx 備份：$BACKUP_DIR/$SITE_NAME.$TS，若本次有改）"
+echo "• 管理頁：$PUBLIC_URL/admin（密碼：cat $ADMIN_PW_FILE）；登入後「App 同步碼」輸入到 App 設定 › 雲端同步"

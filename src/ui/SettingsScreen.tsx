@@ -1,9 +1,11 @@
-// 設定頁：目標三門檻 → 補登本期 → 偵測診斷 → App 版本/OTA → 使用說明與捷徑（折疊）
+// 設定頁：目標三門檻 → 補登本期 → 雲端同步 → 偵測診斷 → App 版本/OTA → 使用說明與捷徑（折疊）
 import { useState } from 'react';
 import { Alert, ScrollView, Text, TextInput, View } from 'react-native';
 import { beatAgeSec, countAutoToday, offerLine, telemetryLine, type DetectorStatus } from '../detector';
 import { OtaBox, type OtaState } from '../OtaBox';
 import { formatClock, type Order } from '../orders';
+import { formatTaipeiDateTime } from '../prune';
+import type { CloudSync } from '../syncClient';
 import { parsePercentInput, type Baseline, type Goals, type StatsParams } from '../stats';
 import { saveBaseline, saveGoals } from '../statsConfig';
 import { Btn, Collapsible, KV } from './common';
@@ -26,6 +28,7 @@ export type SettingsProps = {
   laSupported: boolean;
   ota: OtaState;
   onStopDetect: () => void;
+  cloud: CloudSync;
 };
 
 export function SettingsScreen(p: SettingsProps) {
@@ -34,6 +37,7 @@ export function SettingsScreen(p: SettingsProps) {
       <Text style={S.h1}>設定</Text>
       <GoalsCard goals={p.goals} onGoals={p.onGoals} statsParams={p.statsParams} />
       <BaselineCard baseline={p.baseline} onBaseline={p.onBaseline} periodId={p.periodId} periodLabel={p.periodLabel} />
+      <CloudSyncCard cloud={p.cloud} />
       <DiagCard det={p.det} now={p.now} orders={p.orders} laSupported={p.laSupported} onStopDetect={p.onStopDetect} />
       <View style={S.card}>
         <Text style={S.h2}>App 版本與更新</Text>
@@ -57,6 +61,7 @@ export function SettingsScreen(p: SettingsProps) {
         <Text style={S.text}>操作</Text>
         <Text style={S.small}>
           進行中卡片上半部長按＝刪除那筆；紀錄頁任一列長按＝單筆刪除；批次刪除在紀錄頁「管理紀錄」。
+          {'\n'}改時間/金額/補登：電腦或手機瀏覽器開 {ADMIN_URL} 直接編輯，App 會自動同步回來。
         </Text>
       </Collapsible>
     </ScrollView>
@@ -151,12 +156,12 @@ function BaselineCard({
         : null;
     onBaseline(next);
     setDraft(null);
-    void saveBaseline(next);
+    void saveBaseline(next, periodId);
   };
   const onClear = () => {
     onBaseline(null);
     setDraft(null);
-    void saveBaseline(null);
+    void saveBaseline(null, periodId);
   };
   return (
     <View style={S.card}>
@@ -237,6 +242,76 @@ function Field({
         placeholderTextColor={C.dim}
         selectTextOnFocus
       />
+    </View>
+  );
+}
+
+const ADMIN_URL = 'wheat.yueshengift.xyz/pandatimer/admin';
+
+function CloudSyncCard({ cloud }: { cloud: CloudSync }) {
+  const st = cloud.status;
+  const [code, setCode] = useState<string | null>(null); // null＝不在輸入中
+  const [busy, setBusy] = useState(false);
+  const editing = !st.paired || code != null;
+  const onPair = () => {
+    if (busy) return;
+    setBusy(true);
+    void cloud
+      .pair(code ?? '')
+      .then((r) => {
+        if (r.ok) {
+          setCode(null);
+          Alert.alert('配對成功', `已同步：${r.message}`);
+        } else Alert.alert('配對失敗', r.message);
+      })
+      .finally(() => setBusy(false));
+  };
+  const onUnpair = () => {
+    Alert.alert('解除配對？', '這台手機不再自動同步（紀錄、伺服器資料都不會刪）。', [
+      { text: '不要', style: 'cancel' },
+      { text: '解除', style: 'destructive', onPress: () => void cloud.unpair() },
+    ]);
+  };
+  const stateText = st.running ? '同步中…' : st.lastOk === true ? '正常' : st.lastOk === false ? '上次失敗' : '尚未同步';
+  return (
+    <View style={S.card}>
+      <Text style={S.h2}>雲端同步</Text>
+      {st.paired && (
+        <>
+          <KV k="狀態" v={stateText} color={st.lastOk === false && !st.running ? C.red : st.lastOk ? C.green : undefined} />
+          <KV k="最後成功" v={st.lastOkAt ? formatTaipeiDateTime(st.lastOkAt) : '還沒有'} />
+          {!!st.lastResult && <KV k="上次結果" v={st.lastResult} color={st.lastOk === false ? C.red : undefined} />}
+          <KV k="待上傳" v={st.pending == null ? '—' : `${st.pending} 筆`} color={st.pending ? C.yellow : undefined} />
+          <KV k="同步碼" v={`••••-••••-${st.codeTail ?? '????'}`} />
+          <Btn title={st.running ? '同步中…' : '立即同步'} disabled={st.running} onPress={() => void cloud.syncNow()} />
+        </>
+      )}
+      {editing ? (
+        <>
+          <Text style={S.small}>
+            {st.paired ? '輸入新的同步碼（管理頁重設過的話）：' : `到管理頁 ${ADMIN_URL} 登入，看「App 同步碼」，輸入到這裡。配對後本機紀錄會全部上傳，之後自動同步（開 App、回到 App、改了紀錄 5 秒後、每 2 分鐘）。`}
+          </Text>
+          <TextInput
+            style={S.input}
+            value={code ?? ''}
+            onChangeText={setCode}
+            placeholder="XXXX-XXXX-XXXX"
+            placeholderTextColor={C.dim}
+            autoCapitalize="characters"
+            autoCorrect={false}
+            keyboardAppearance="dark"
+          />
+          <View style={S.row}>
+            <Btn style={{ flex: 1 }} small title={busy ? '配對中…' : '配對並同步'} disabled={busy} onPress={onPair} />
+            {st.paired && <Btn style={{ flex: 1 }} small kind="ghost" title="取消" onPress={() => setCode(null)} />}
+          </View>
+        </>
+      ) : (
+        <View style={S.row}>
+          <Btn style={{ flex: 1 }} small kind="ghost" title="更換同步碼" onPress={() => setCode('')} />
+          <Btn style={{ flex: 1 }} small kind="danger" title="解除配對" onPress={onUnpair} />
+        </View>
+      )}
     </View>
   );
 }

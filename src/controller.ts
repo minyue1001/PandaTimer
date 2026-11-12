@@ -5,7 +5,8 @@ import { cancelReminders, scheduleReminders } from './notify';
 import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, parseDeepLink, type Order } from './orders';
 import { addTombstones, applyPrune, dropTombstonedEvents, planPrune, type PruneCriteria, type PrunePlan } from './prune';
 import { planImport, type ImportPlan, type ImportRow } from './importLink';
-import { getOrders, loadTombstones, mutate, saveTombstones, subscribe } from './store';
+import { getOrders, loadSyncCode, loadSyncState, loadTombstones, mutate, subscribe, updateTombstones } from './store';
+import { unsyncedTombstoneIds } from './sync';
 
 export type Feedback = (msg: string) => void;
 
@@ -144,7 +145,10 @@ export async function pruneOrders(c: PruneCriteria): Promise<PrunePlan> {
   const plan = planPrune(await getOrders(), c);
   if (!plan.count) return plan;
   const now = Date.now();
-  await saveTombstones(addTombstones(await loadTombstones(), plan.ids, now));
+  // 雲端同步已配對：還沒上傳的刪除墓碑不過期（保留到同步完成）
+  const paired = !!(await loadSyncCode());
+  const syncState = await loadSyncState();
+  await updateTombstones((t) => ({ tombs: addTombstones(t, plan.ids, now, unsyncedTombstoneIds(t, syncState, paired)) }));
   await drainFromNative().catch(() => undefined);
   // drain 之後才算最終要刪的 active（drain 可能剛併進新單；新單不在 plan.ids 內，不受影響）
   const removed = await mutate<Order[]>((list) => ({
@@ -152,17 +156,25 @@ export async function pruneOrders(c: PruneCriteria): Promise<PrunePlan> {
     result: list.filter((o) => plan.ids.includes(o.id)),
   }));
   const gone = (removed ?? []).filter((o) => o.status === 'active');
-  // 同一張卡只收一次（afterFinish 會依鏡像切到剩下的單）
+  await cleanupEnded(gone);
+  return { ...plan, active: gone, activeCount: gone.length };
+}
+
+/**
+ * 已不再進行中的單收尾（刪除、或雲端同步收到伺服器把進行中單改成已送達/取消/刪除）：
+ * 結束動態島（偵測卡走 afterFinish 切下一單／回待命）、取消提醒；同一張卡只收一次。
+ * 呼叫前紀錄必須已經改好（subscribe 會先把「不含這些單」的鏡像寫回原生）。
+ */
+export async function cleanupEnded(ended: readonly Order[]): Promise<void> {
   const seen = new Set<string>();
   await Promise.all(
-    gone.map((o) => {
+    ended.map((o) => {
       const key = o.activityId;
       const first = !key || !seen.has(key);
       if (key) seen.add(key);
       return first ? cleanup(o) : cancelReminders(o.notifIds);
     }),
   );
-  return { ...plan, active: gone, activeCount: gone.length };
 }
 
 /**

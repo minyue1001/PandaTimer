@@ -7,7 +7,7 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const TAIPEI_OFFSET = 8 * HOUR;
 
-/** 墓碑保留 7 天（原生佇列裡的舊事件不會留得比這更久） */
+/** 墓碑保留 7 天（原生佇列裡的舊事件不會留得比這更久）；雲端同步已配對時，沒上傳的墓碑保留到同步完成 */
 export const TOMBSTONE_TTL_MS = 7 * DAY;
 
 /** id → 刪除時間 (ms) */
@@ -58,17 +58,17 @@ export function applyPrune(orders: readonly Order[], ids: Iterable<string>): Ord
   return orders.filter((o) => !drop.has(o.id));
 }
 
-/** 加墓碑並順便清掉過期的 */
-export function addTombstones(t: Tombstones, ids: Iterable<string>, now: number): Tombstones {
-  const next = pruneTombstones(t, now);
+/** 加墓碑並順便清掉過期的（pinned＝還沒同步到雲端的墓碑，不過期） */
+export function addTombstones(t: Tombstones, ids: Iterable<string>, now: number, pinned?: ReadonlySet<string>): Tombstones {
+  const next = pruneTombstones(t, now, pinned);
   for (const id of ids) next[id] = now;
   return next;
 }
 
-export function pruneTombstones(t: Tombstones, now: number): Tombstones {
+export function pruneTombstones(t: Tombstones, now: number, pinned?: ReadonlySet<string>): Tombstones {
   const out: Tombstones = {};
   for (const [id, at] of Object.entries(t)) {
-    if (typeof at === 'number' && Number.isFinite(at) && now - at < TOMBSTONE_TTL_MS) out[id] = at;
+    if (typeof at === 'number' && Number.isFinite(at) && (now - at < TOMBSTONE_TTL_MS || pinned?.has(id))) out[id] = at;
   }
   return out;
 }
