@@ -47,12 +47,13 @@ test('detectPill：armed＋心跳新鮮 → 🟢 偵測中（心跳秒數、保�
   assert.match(low.detail, /省電中/);
 });
 
-test('detectPill：邀請判定中 → 🟡 等你接單（180 秒後過期回 🟢）', () => {
+test('detectPill：邀請判定中 → 🟡 ✓ 可以按接受（180 秒後過期回 🟢）', () => {
   const now = 2_000_000;
   const base = { armed: true, keepAlive: '定位中', lastBeatAt: now - 3_000, offerPendingMinutes: 27 };
   const w = detectPill(status({ ...base, offerPendingAt: now - 8_000 }), now);
   assert.deepEqual([w.kind, w.tone], ['waiting', 'yellow']);
-  assert.equal(w.detail, '偵測到邀請 27 分・8 秒前');
+  assert.equal(w.title, '✓ 可以按接受');
+  assert.equal(w.detail, '已偵測到邀請 27 分・8 秒前');
   assert.equal(detectPill(status({ ...base, offerPendingAt: now - 181_000 }), now).kind, 'running');
 });
 
@@ -236,4 +237,16 @@ test('parseTab / shouldJumpHome：邊緣觸發切回首頁', () => {
   assert.equal(shouldJumpHome(null, a('stopped')), true);
   assert.equal(shouldJumpHome(null, a('idle', 3)), false);
   assert.equal(shouldJumpHome(a('idle'), a('starting')), false);
+});
+
+test('v1.0 detectorStatus 省電/記憶體欄位：extension 模式/記憶體＋App 電量；膠囊與診斷文字', async () => {
+  const { powerLine } = await import('../src/ui/logic.ts');
+  const st = status({ armed: true, lowPower: false, thermal: 1, saver: false, batt: 63, charging: true, extMode: 'away', memMB: 31, peakMB: 44, extAt: 1234 });
+  assert.deepEqual(st.power, { lowPower: false, thermal: 1, saver: false, memMB: 31, peakMB: 44, extMode: 'away', extAt: 1234, batt: 63, charging: true });
+  assert.equal(powerLine(st.power), '正常・放慢辨識（非外送畫面）・溫度等級 1・電量 63%（充電中）・偵測記憶體 31/44MB');
+  assert.equal(powerLine({ saver: true, peakMB: 40 }), '省電倍率中・偵測記憶體峰值 40MB');
+  assert.equal('extMode' in status({ armed: true, thermal: 0, extMode: 'x' }).power, false);
+  const now = 1_000_000;
+  const p = detectPill(status({ armed: true, keepAlive: '定位中', lastBeatAt: now - 5_000, saver: true, extMode: 'away' }), now);
+  assert.equal(p.detail, '心跳 5 秒前・定位中・省電中・放慢辨識');
 });

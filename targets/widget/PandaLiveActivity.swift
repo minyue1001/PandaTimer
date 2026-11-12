@@ -22,9 +22,23 @@ private func statusColor(_ context: ActivityViewContext<PandaTimerAttributes>) -
   context.isStale ? Color.red : Color.orange
 }
 
-/// v0.3 螢幕廣播偵測：mode == "standby"（偵測中）或 "stopped"（偵測已停止）時顯示偵測卡；其餘（nil/"countdown"）照舊倒數
+/// v0.3 螢幕廣播偵測：mode == "standby"（偵測中）或 "stopped"（偵測已停止）時顯示偵測卡；其餘（nil/"countdown"）照舊倒數。
+/// v1.0 "offer"（偵測到邀請）過期（isStale＝偵測後 60 秒）也畫成偵測中。
 private func isDetectorCard(_ state: PandaTimerAttributes.ContentState) -> Bool {
-  state.mode == "standby" || state.mode == "stopped"
+  state.mode == "standby" || state.mode == "stopped" || state.mode == "offer"
+}
+
+private let offerYellow = Color(red: 1, green: 214 / 255, blue: 10 / 255)
+
+/// v1.0：偵測到邀請（mode "offer"、還沒過期）→ 整張卡改成「✓ 已偵測 N 分邀請」
+private func showsOffer(_ context: ActivityViewContext<PandaTimerAttributes>) -> Bool {
+  context.state.mode == "offer" && context.state.offerMin != nil && !context.isStale
+}
+
+/// 「$77.59・可以按接受」（金額沒有就只有後半）＝src/offerIsland.ts offerTexts().subtitle
+private func offerSubtitle(_ state: PandaTimerAttributes.ContentState) -> String {
+  let amount = state.offerAmount.map { String(format: "$%.2f・", $0) } ?? ""
+  return amount + "可以按接受"
 }
 
 private func detectorTitle(_ state: PandaTimerAttributes.ContentState) -> String {
@@ -45,7 +59,11 @@ struct PandaLiveActivity: Widget {
             .foregroundStyle(Color.white)
         }
         DynamicIslandExpandedRegion(.trailing) {
-          if isDetectorCard(context.state) {
+          if showsOffer(context) {
+            Text("邀請")
+              .font(.headline)
+              .foregroundStyle(offerYellow)
+          } else if isDetectorCard(context.state) {
             HeartbeatText(state: context.state)
               .font(.headline)
               .foregroundStyle(Color.white)
@@ -56,7 +74,9 @@ struct PandaLiveActivity: Widget {
           }
         }
         DynamicIslandExpandedRegion(.bottom) {
-          if isDetectorCard(context.state) {
+          if showsOffer(context) {
+            OfferDetail(state: context.state, large: true)
+          } else if isDetectorCard(context.state) {
             HStack(alignment: .center) {
               DetectorDetail(state: context.state)
               if context.state.mode == "standby" {
@@ -78,13 +98,19 @@ struct PandaLiveActivity: Widget {
                 DeliverButton(activityId: context.activityID)
               }
               OthersText(state: context.state)
+              OfferBadge(state: context.state)
             }
           }
         }
       } compactLeading: {
         Text("🐼")
       } compactTrailing: {
-        if isDetectorCard(context.state) {
+        if showsOffer(context) {
+          Text("\(context.state.offerMin ?? 0)分✓")
+            .font(.system(.body, design: .rounded).bold())
+            .monospacedDigit()
+            .foregroundStyle(offerYellow)
+        } else if isDetectorCard(context.state) {
           Text(context.state.mode == "stopped" ? "停止" : "偵測")
             .foregroundStyle(context.state.mode == "stopped" ? Color.gray : Color.green)
         } else {
@@ -95,7 +121,14 @@ struct PandaLiveActivity: Widget {
             .foregroundStyle(statusColor(context))
         }
       } minimal: {
-        Text("🐼")
+        if showsOffer(context) {
+          Text("\(context.state.offerMin ?? 0)")
+            .font(.system(.body, design: .rounded).bold())
+            .monospacedDigit()
+            .foregroundStyle(offerYellow)
+        } else {
+          Text("🐼")
+        }
       }
       .keylineTint(pandaPink)
     }
@@ -106,7 +139,14 @@ struct LockScreenView: View {
   let context: ActivityViewContext<PandaTimerAttributes>
 
   var body: some View {
-    if isDetectorCard(context.state) {
+    if showsOffer(context) {
+      HStack(alignment: .center, spacing: 12) {
+        Text("🐼")
+          .font(.system(size: 40))
+        OfferDetail(state: context.state, large: true)
+      }
+      .padding(16)
+    } else if isDetectorCard(context.state) {
       VStack(alignment: .leading, spacing: 6) {
         HStack {
           Text(detectorTitle(context.state))
@@ -142,6 +182,7 @@ struct LockScreenView: View {
           .font(.subheadline)
           .foregroundStyle(Color.white.opacity(0.8))
         OthersText(state: context.state)
+        OfferBadge(state: context.state)
         if let diag = context.state.diag {
           Text(diag)
             .font(.caption2)
@@ -203,6 +244,48 @@ struct OthersText: View {
         .font(.caption.bold())
         .foregroundStyle(Color.yellow)
         .lineLimit(1)
+    }
+  }
+}
+
+/// v1.0 偵測到邀請：大字「✓ 已偵測 19 分邀請」、次行「$77.59・可以按接受」、小字偵測時間（動態島展開與鎖定畫面共用）
+struct OfferDetail: View {
+  let state: PandaTimerAttributes.ContentState
+  let large: Bool
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text("✓ 已偵測 \(state.offerMin ?? 0) 分邀請")
+        .font(large ? .title2.bold() : .headline.bold())
+        .foregroundStyle(offerYellow)
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+      Text(offerSubtitle(state))
+        .font(.headline)
+        .foregroundStyle(Color.white)
+        .lineLimit(1)
+      if let at = state.offerAt {
+        Text("偵測於 \(at, format: .dateTime.hour().minute().second())")
+          .font(.caption2)
+          .monospacedDigit()
+          .foregroundStyle(Color.white.opacity(0.6))
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+}
+
+/// v1.0 倒數中又偵測到邀請：不蓋掉倒數，只在下方加一行黃字「＋偵測到 19 分邀請・$77.59 可以按接受」
+struct OfferBadge: View {
+  let state: PandaTimerAttributes.ContentState
+
+  var body: some View {
+    if state.mode == "countdown" || state.mode == nil, let m = state.offerMin {
+      Text("＋偵測到 \(m) 分邀請・" + offerSubtitle(state))
+        .font(.caption.bold())
+        .foregroundStyle(offerYellow)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
     }
   }
 }

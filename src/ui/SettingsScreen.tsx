@@ -9,7 +9,7 @@ import type { CloudSync } from '../syncClient';
 import { parsePercentInput, type Baseline, type Goals, type StatsParams } from '../stats';
 import { saveBaseline, saveGoals } from '../statsConfig';
 import { Btn, Collapsible, KV } from './common';
-import { BEAT_STALE_SEC, pctText } from './logic';
+import { BEAT_STALE_SEC, pctText, powerLine } from './logic';
 import { C, F, S } from './theme';
 
 const r1 = (x: number) => String(Math.round(x * 1000) / 10);
@@ -332,15 +332,7 @@ function DiagCard({
   const beatAge = beatAgeSec(det, now);
   const offer = offerLine(det, now);
   const pw = det?.power;
-  const powerText = pw
-    ? [
-        pw.saver ? '省電倍率中' : pw.lowPower ? '低電量模式' : '正常',
-        pw.thermal != null ? `溫度等級 ${pw.thermal}` : '',
-        pw.memMB != null ? `記憶體 ${Math.round(pw.memMB)}MB` : '',
-      ]
-        .filter(Boolean)
-        .join('・')
-    : '此原生版本沒有提供（看動態島偵測卡上的「省電中」）';
+  const powerText = pw ? powerLine(pw) : '此原生版本沒有提供（看動態島偵測卡上的「省電中」）';
   return (
     <View style={S.card}>
       <Text style={S.h2}>偵測診斷</Text>

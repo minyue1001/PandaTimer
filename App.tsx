@@ -31,6 +31,7 @@ import {
   EMPTY_STATE,
   FALLBACK_WAIT_SEC,
   matchOrder,
+  clearOffer,
   OFFERS_STORAGE_KEY,
   parseOfferState,
   recordOffer,
@@ -129,7 +130,12 @@ function Main() {
         if (alive) setOfferState((cur) => ({ ...cur })); // 觸發一次存檔
       });
     const off = LiveActivity.addDetectorListener((raw) => {
-      const ev = raw as { type: string; minutes?: number };
+      const ev = raw as { type: string; minutes?: number; reason?: unknown };
+      // v1.0：未接的原因（reject 不出卡；timeout/stopped 立刻出卡）；minutes 可能沒有（原生不知道是哪張）
+      if (ev.type === 'offerCleared') {
+        setOfferState((cur) => clearOffer(cur, typeof ev.minutes === 'number' ? ev.minutes : null, ev.reason));
+        return;
+      }
       if (typeof ev.minutes !== 'number') return;
       const at = Date.now();
       if (ev.type === 'offer') {

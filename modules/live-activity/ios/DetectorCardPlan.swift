@@ -77,13 +77,18 @@ enum DetectorCardPlan {
   /// 把卡套成 items 的樣子，回傳顯示中的主單（nil＝回待命或已結束）。
   /// items 空：偵測卡（heartbeat 有值或待命/已停止）→ 回 standby（已停止維持 stopped）；一般卡 → 結束。
   /// alert 非 nil → update(_:alertConfiguration:)（展開動態島＋響聲提示，強迫重繪）；心跳等一般更新不要帶。
+  /// v1.0：套用時一律清掉「偵測到邀請」（offerMin/offerAmount/offerAt）——新單＝邀請已接、送達/回待命＝邀請早已結束；
+  /// mode "offer" 視同待命（items 空 → standby）。
   @discardableResult
   static func apply(
     to activity: Activity<PandaTimerAttributes>, items: [Item], note: String?, alert: AlertConfiguration?
   ) async -> Item? {
     var state = activity.content.state
+    state.offerMin = nil
+    state.offerAmount = nil
+    state.offerAt = nil
     guard let main = items.first else {
-      if state.heartbeat != nil || state.mode == "standby" || state.mode == "stopped" {
+      if state.heartbeat != nil || state.mode == "standby" || state.mode == "stopped" || state.mode == "offer" {
         state.mode = state.mode == "stopped" ? "stopped" : "standby"
         state.others = nil
         if let note = note { state.diag = trimmed("\(note) · \(state.diag ?? "")") }

@@ -14,6 +14,9 @@
 // v0.8：com.pandatimer.offer.stacked（夾單；緊接在 accept.delay 之前送，App 2 秒內配對 → 訂單 stacked:true）、
 //   com.pandatimer.delivered.delay.<秒 0-60>（緊接在 delivered 之前送；實際送達＝收到 − 秒數）。
 //   註冊數量：517＋1＋61＝579 個（< 1000）。
+// v1.0：com.pandatimer.offer.cleared.<reject|timeout|stopped>（未接的原因；舊的不帶原因名稱仍註冊）、
+//   com.pandatimer.ext.mode.<away|normal>、com.pandatimer.ext.mem.<0-80>、com.pandatimer.ext.peak.<0-80>（extension 心跳後送，
+//   App 放進 detectorStatus）。註冊數量：579＋3＋2＋81＋81＝746 個（< 1000）。
 import type { Order } from './orders';
 
 export const ORDER_SIGNAL_PREFIX = 'com.pandatimer.order.';
@@ -33,12 +36,23 @@ export const MAX_ACCEPT_DELAY = 60;
 export const OFFER_STACKED = 'com.pandatimer.offer.stacked';
 export const DELIVERED_DELAY_PREFIX = 'com.pandatimer.delivered.delay.';
 export const MAX_DELIVERED_DELAY = 60;
+export const OFFER_CLEARED_PREFIX = 'com.pandatimer.offer.cleared.';
+export const OFFER_CLEAR_REASONS = ['reject', 'timeout', 'stopped'] as const;
+export type OfferClearReason = (typeof OFFER_CLEAR_REASONS)[number];
+export const EXT_MODE_AWAY = 'com.pandatimer.ext.mode.away';
+export const EXT_MODE_NORMAL = 'com.pandatimer.ext.mode.normal';
+export const EXT_MEM_PREFIX = 'com.pandatimer.ext.mem.';
+export const EXT_PEAK_PREFIX = 'com.pandatimer.ext.peak.';
+export const MAX_EXT_MB = 80;
 /** Darwin 通知註冊上限（系統沒有明文，保守取 1000） */
 export const MAX_SIGNAL_NAMES = 1000;
 
 export type DetectorSignal =
   | { kind: 'order'; minutes: number; seq: number }
-  | { kind: 'started' | 'stopped' | 'heartbeat' | 'drain' | 'offerCleared' | 'delivered' | 'offerStacked' }
+  | { kind: 'started' | 'stopped' | 'heartbeat' | 'drain' | 'delivered' | 'offerStacked' }
+  | { kind: 'offerCleared'; reason?: OfferClearReason }
+  | { kind: 'extMode'; away: boolean }
+  | { kind: 'extMem' | 'extPeak'; mb: number }
   | { kind: 'offerPending'; minutes: number }
   | { kind: 'acceptDelay'; seconds: number }
   | { kind: 'deliveredDelay'; seconds: number };
@@ -57,6 +71,16 @@ export function offerPendingName(minutes: number): string | null {
 export function acceptDelayName(seconds: number): string {
   const d = Math.min(MAX_ACCEPT_DELAY, Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0)));
   return `${ACCEPT_DELAY_PREFIX}${d}`;
+}
+
+export function offerClearedName(reason: OfferClearReason): string {
+  return `${OFFER_CLEARED_PREFIX}${reason}`;
+}
+
+/** extension 記憶體 → 訊號名稱（MB 四捨五入、0…80）＝SampleHandler PandaSignal.clampMB */
+export function extMemName(mb: number, peak = false): string {
+  const v = Number.isFinite(mb) ? Math.min(MAX_EXT_MB, Math.max(0, Math.round(mb))) : 0;
+  return `${peak ? EXT_PEAK_PREFIX : EXT_MEM_PREFIX}${v}`;
 }
 
 export function deliveredDelayName(seconds: number): string {
@@ -80,6 +104,18 @@ export function parseSignalName(name: unknown): DetectorSignal | null {
   if (name === OFFER_CLEARED) return { kind: 'offerCleared' };
   if (name === DELIVERED_SIGNAL) return { kind: 'delivered' };
   if (name === OFFER_STACKED) return { kind: 'offerStacked' };
+  if (name === EXT_MODE_AWAY) return { kind: 'extMode', away: true };
+  if (name === EXT_MODE_NORMAL) return { kind: 'extMode', away: false };
+  if (name.startsWith(OFFER_CLEARED_PREFIX)) {
+    const reason = name.slice(OFFER_CLEARED_PREFIX.length);
+    return (OFFER_CLEAR_REASONS as readonly string[]).includes(reason) ? { kind: 'offerCleared', reason: reason as OfferClearReason } : null;
+  }
+  for (const [prefix, kind] of [[EXT_MEM_PREFIX, 'extMem'], [EXT_PEAK_PREFIX, 'extPeak']] as const) {
+    if (name.startsWith(prefix)) {
+      const mb = plainInt(name.slice(prefix.length), 0, MAX_EXT_MB);
+      return mb == null ? null : { kind, mb };
+    }
+  }
   if (name.startsWith(DELIVERED_DELAY_PREFIX)) {
     const seconds = plainInt(name.slice(DELIVERED_DELAY_PREFIX.length), 0, MAX_DELIVERED_DELAY);
     return seconds == null ? null : { kind: 'deliveredDelay', seconds };
@@ -113,6 +149,10 @@ export function allSignalNames(): string[] {
   for (let d = 0; d <= MAX_ACCEPT_DELAY; d++) names.push(`${ACCEPT_DELAY_PREFIX}${d}`);
   names.push(OFFER_STACKED);
   for (let d = 0; d <= MAX_DELIVERED_DELAY; d++) names.push(`${DELIVERED_DELAY_PREFIX}${d}`);
+  for (const r of OFFER_CLEAR_REASONS) names.push(offerClearedName(r));
+  names.push(EXT_MODE_AWAY, EXT_MODE_NORMAL);
+  for (let m = 0; m <= MAX_EXT_MB; m++) names.push(`${EXT_MEM_PREFIX}${m}`);
+  for (let m = 0; m <= MAX_EXT_MB; m++) names.push(`${EXT_PEAK_PREFIX}${m}`);
   return names;
 }
 
@@ -200,10 +240,21 @@ export type DetectorStatus = {
   /** v0.8：偵測中卻收到廣播停止（使用者沒按停止偵測）的時間；重新開始後清掉 */
   stoppedUnexpectedAt: number | null;
   /**
-   * v0.10 預留（v0.9 原生 statusJSON 沒帶 → 欄位不存在）：低電量模式、thermalState(0~3)、省電倍率中、App 記憶體 MB。
-   * 原生哪天加進 statusJSON 就會自動顯示在首頁膠囊（省電中）與設定頁診斷；只有原生真的帶了才會有這個 key。
+   * 省電/記憶體（v0.9 原生 statusJSON 沒帶 → 欄位不存在；v1.0 起有）：低電量模式、thermalState(0~3)、省電倍率中（App 自己看，
+   * 規則同 extension）、電量/充電中（App）、extension 最近一次回報的 away/normal 模式與目前/峰值記憶體 MB（extAt＝回報時間）。
+   * 只有原生真的帶了才會有這個 key。
    */
-  power?: { lowPower?: boolean; thermal?: number; saver?: boolean; memMB?: number };
+  power?: {
+    lowPower?: boolean;
+    thermal?: number;
+    saver?: boolean;
+    memMB?: number;
+    peakMB?: number;
+    extMode?: 'away' | 'normal';
+    extAt?: number;
+    batt?: number;
+    charging?: boolean;
+  };
 };
 
 const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
@@ -224,6 +275,11 @@ export function parseDetectorStatus(raw: unknown): DetectorStatus | null {
   if (num(o.thermal) != null) power.thermal = o.thermal as number;
   if (typeof o.saver === 'boolean') power.saver = o.saver;
   if (num(o.memMB) != null) power.memMB = o.memMB as number;
+  if (num(o.peakMB) != null) power.peakMB = o.peakMB as number;
+  if (o.extMode === 'away' || o.extMode === 'normal') power.extMode = o.extMode;
+  if (num(o.extAt) != null) power.extAt = o.extAt as number;
+  if (num(o.batt) != null) power.batt = o.batt as number;
+  if (typeof o.charging === 'boolean') power.charging = o.charging;
   return {
     ...(Object.keys(power).length ? { power } : {}),
     armed: o.armed === true,

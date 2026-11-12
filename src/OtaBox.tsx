@@ -4,7 +4,7 @@ import { AppState, Pressable, Text, View } from 'react-native';
 import { Btn } from './ui/common';
 import { C, pressed, S } from './ui/theme';
 
-const APP_VERSION = '0.9'; // 與 app.json runtimeVersion 一致
+const APP_VERSION = '1.0'; // 與 app.json runtimeVersion 一致
 
 function fmt(d: Date | null | undefined): string {
   if (!d) return '—';

@@ -59,10 +59,10 @@ test('parseSignalName：狀態訊號與垃圾', () => {
   assert.equal(parseSignalName(5), null);
 });
 
-test('allSignalNames：v0.8 共 579 個（< 1000）、每個都解析得回來、無重複', () => {
+test('allSignalNames：v1.0 共 746 個（< 1000）、每個都解析得回來、無重複', () => {
   const names = allSignalNames();
-  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1 + 1 + 61);
-  assert.equal(names.length, 579);
+  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1 + 1 + 61 + 3 + 2 + 81 + 81);
+  assert.equal(names.length, 746);
   assert.ok(names.length < 1000);
   assert.equal(new Set(names).size, names.length);
   for (const n of names) assert.notEqual(parseSignalName(n), null, n);
@@ -163,7 +163,8 @@ test('v0.6：app.json 背景模式／定位說明／runtimeVersion 與 OtaBox �
   assert.deepEqual([...plist.UIBackgroundModes].sort(), ['audio', 'location']);
   assert.ok(plist.NSLocationWhenInUseUsageDescription.length > 5);
   assert.ok(plist.NSLocationAlwaysAndWhenInUseUsageDescription.length > 5);
-  assert.equal(app.runtimeVersion, '0.9');
+  assert.equal(app.runtimeVersion, '1.0');
+  assert.equal(app.userInterfaceStyle, 'dark'); // v1.0：系統 Alert/鍵盤也是暗色
   // v0.6 遠端回報：寫入金鑰在 extra（進 App 可接受），網址 https；讀取金鑰絕不進 repo
   assert.match(app.extra.telemetryKey, /^[A-Za-z0-9_-]{32,}$/);
   assert.match(app.extra.telemetryUrl, /^https:\/\/.+\/api\/telemetry$/);
@@ -219,10 +220,11 @@ test('v0.7：Swift 兩邊（extension 送、App 註冊/解析）的新訊號名�
   const read = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
   const hub = read('../modules/live-activity/ios/DetectorHub.swift');
   const ext = read('../targets/broadcast/SampleHandler.swift');
-  for (const s of ['com.pandatimer.offer.pending.', 'com.pandatimer.offer.cleared', 'com.pandatimer.accept.delay.', 'com.pandatimer.delivered']) {
+  for (const s of ['com.pandatimer.offer.pending.', 'com.pandatimer.offer.cleared.', 'com.pandatimer.accept.delay.', 'com.pandatimer.delivered']) {
     assert.ok(hub.includes(`"${s}"`), `DetectorHub 缺 ${s}`);
     assert.ok(ext.includes(`"${s}"`), `SampleHandler 缺 ${s}`);
   }
+  assert.ok(hub.includes('"com.pandatimer.offer.cleared"'), 'DetectorHub 仍註冊不帶原因的舊名稱');
   assert.ok(ext.includes('static let maxAcceptDelay = 60') && hub.includes('static let maxAcceptDelay = 60'));
   assert.ok(hub.includes('static let delayPairWindow: TimeInterval = 2'));
   // extension：延遲訊號一定在 order 訊號之前送
@@ -292,5 +294,46 @@ test('v0.8 Swift：新訊號名稱一致、送 order 前先送夾單與延遲、
   for (const s of ['override func broadcastPaused() {\n    detector.paused()', 'override func broadcastResumed() {\n    detector.resumed()',
     'self.telemetry.log("pause"', 'self.telemetry.log("resume"']) {
     assert.ok(ext.includes(s), s);
+  }
+});
+
+test('v1.0 offer.cleared.<原因>、ext.mode/mem/peak：編碼與解析、Swift 兩邊一致', async () => {
+  const d = await import('../src/detector.ts');
+  for (const r of ['reject', 'timeout', 'stopped']) {
+    assert.deepEqual(d.parseSignalName(d.offerClearedName(r)), { kind: 'offerCleared', reason: r });
+  }
+  assert.deepEqual(d.parseSignalName('com.pandatimer.offer.cleared'), { kind: 'offerCleared' });
+  for (const bad of ['com.pandatimer.offer.cleared.', 'com.pandatimer.offer.cleared.accept', 'com.pandatimer.offer.cleared.reject.1',
+    'com.pandatimer.ext.mem.81', 'com.pandatimer.ext.mem.07', 'com.pandatimer.ext.peak.', 'com.pandatimer.ext.mode.x']) {
+    assert.equal(d.parseSignalName(bad), null, bad);
+  }
+  assert.deepEqual(d.parseSignalName('com.pandatimer.ext.mode.away'), { kind: 'extMode', away: true });
+  assert.deepEqual(d.parseSignalName('com.pandatimer.ext.mode.normal'), { kind: 'extMode', away: false });
+  assert.deepEqual(d.parseSignalName(d.extMemName(31.4)), { kind: 'extMem', mb: 31 });
+  assert.deepEqual(d.parseSignalName(d.extMemName(120, true)), { kind: 'extPeak', mb: 80 });
+  assert.equal(d.extMemName(-3), 'com.pandatimer.ext.mem.0');
+  const fs = await import('node:fs');
+  const read = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const hub = read('../modules/live-activity/ios/DetectorHub.swift');
+  const ext = read('../targets/broadcast/SampleHandler.swift');
+  for (const s of ['com.pandatimer.offer.cleared.', 'com.pandatimer.ext.mode.away', 'com.pandatimer.ext.mode.normal', 'com.pandatimer.ext.mem.', 'com.pandatimer.ext.peak.']) {
+    assert.ok(hub.includes(`"${s}"`), `DetectorHub 缺 ${s}`);
+    assert.ok(ext.includes(`"${s}"`), `SampleHandler 缺 ${s}`);
+  }
+  assert.ok(hub.includes('static let offerClearReasons = ["reject", "timeout", "stopped"]'));
+  assert.ok(hub.includes('static let maxExtMB = 80') && ext.includes('static let maxExtMB = 80'));
+  for (const s of ['for r in offerClearReasons { names.append("\\(offerClearedPrefix)\\(r)") }',
+    'for m in 0...maxExtMB { names.append("\\(extMemPrefix)\\(m)") }', 'for m in 0...maxExtMB { names.append("\\(extPeakPrefix)\\(m)") }']) {
+    assert.ok(hub.includes(s), s);
+  }
+  // extension：未接一律帶原因送（不再送舊名稱）；心跳後送模式/記憶體
+  const body = ext.slice(ext.indexOf('private func decided('), ext.indexOf('/// 畫面分類或接單鈕狀態有變才記一筆'));
+  assert.ok(body.includes('PandaSignal.postOfferCleared(d.reason)'));
+  assert.ok(!/PandaSignal\.offerCleared\b/.test(ext));
+  const beat = ext.slice(ext.indexOf('private func heartbeat()'), ext.indexOf('// MARK: - 遠端設定（只在 workQueue）'));
+  assert.ok(beat.includes('PandaSignal.postExtState(away: awayNow, memMB: currentMB, peakMB: peakMB)'));
+  // statusJSON 帶 v1.0 省電/記憶體鍵（src/detector.ts parseDetectorStatus 讀的名字）
+  for (const k of ['lowPower', 'thermal', 'saver', 'batt', 'charging', 'extMode', 'memMB', 'peakMB', 'extAt']) {
+    assert.ok(hub.includes(`d["${k}"]`), `statusJSON 缺 ${k}`);
   }
 });

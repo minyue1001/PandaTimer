@@ -173,7 +173,7 @@ test('v0.7 offer 區塊：缺漏補預設、範圍、正則（不得命中空字
     assert.ok(problems.some((p) => p.startsWith(`offer.${k}`)), k);
   }
   const ok = validateConfig({ version: 'v07b', offer: { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單' } });
-  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單' });
+  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單', islandIndicator: true, alertSound: 'default' });
   assert.equal(DEFAULT_CONFIG.offer.ambiguousAs, 'accept');
   assert.equal(DEFAULT_CONFIG.offer.decideWindowSec, 25);
   // Swift：offerRegex 擋空字串命中、choice 列舉
@@ -181,4 +181,21 @@ test('v0.7 offer 區塊：缺漏補預設、範圍、正則（不得命中空字
   assert.ok(rc.includes('static func offerRegex(') && rc.includes('r.firstMatch(in: "", options: [], range: NSRange(location: 0, length: 0)) == nil'));
   assert.ok(rc.includes('static func choice('));
   assert.ok(read('../targets/broadcast/OfferTracker.swift').includes('RemoteConfig.choice(o["ambiguousAs"], ["accept", "reject"], ambiguousAs)'));
+});
+
+test('v1.0 offer.islandIndicator / offer.alertSound：預設、驗證、Swift 同規則', () => {
+  assert.equal(DEFAULT_CONFIG.offer.islandIndicator, true);
+  assert.equal(DEFAULT_CONFIG.offer.alertSound, 'default');
+  const ok = validateConfig({ version: 'v10', offer: { islandIndicator: false, alertSound: 'none' } });
+  assert.equal(ok.config.offer.islandIndicator, false);
+  assert.equal(ok.config.offer.alertSound, 'none');
+  const bad = validateConfig({ version: 'v10b', offer: { islandIndicator: 'yes', alertSound: 'loud' } });
+  assert.equal(bad.config.offer.islandIndicator, true);
+  assert.equal(bad.config.offer.alertSound, 'default');
+  assert.ok(bad.problems.some((p) => p.startsWith('offer.islandIndicator')));
+  assert.ok(bad.problems.some((p) => p.startsWith('offer.alertSound')));
+  const rc = read('../modules/live-activity/ios/RemoteConfig.swift');
+  for (const s of ['var islandIndicator = true', 'var alertSound = "default"',
+    'out.islandIndicator = bool(o["islandIndicator"], out.islandIndicator)',
+    'out.alertSound = choice(o["alertSound"], ["default", "none"], out.alertSound)']) assert.ok(rc.includes(s), s);
 });

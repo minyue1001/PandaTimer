@@ -1,6 +1,8 @@
 // 未確認邀請（純函式）：收到原生 offerPending 後，若在 decideWindowSec+10 秒內沒有同分鐘的 order 事件入帳，
 // 就列為「未確認邀請」讓人工補救（偵測中斷、或模糊判定被當成拒單時，使用者其實有接）。
 // 狀態存 AsyncStorage（key OFFERS_STORAGE_KEY），App 被殺掉重開仍在；超過 30 分鐘自動消失；最多保留最近 3 張。
+// v1.0 原生 offerCleared 帶原因（clearOffer）：reject（命中拒單詞/邀請換成另一張）＝明確沒接 → 不出卡（已出的也收掉）；
+//   timeout/stopped（看不出結果、偵測停止）→ 立刻出卡；完全沒收到結果（訊號遺失、extension 被系統殺掉）→ 照舊等窗後出卡。
 
 export const OFFERS_STORAGE_KEY = 'pandatimer.unconfirmedOffers.v1';
 export const DEFAULT_DECIDE_WINDOW_SEC = 25;
@@ -45,6 +47,23 @@ export function matchOrder(s: OfferState, min: number): OfferState {
     pending: s.pending.filter((e) => e.id !== target.id),
     unconfirmed: s.unconfirmed.filter((e) => e.id !== target.id),
   };
+}
+
+/**
+ * v1.0 收到原生 offerCleared（reason：reject | timeout | stopped；舊原生沒帶 → 不處理，交給 tick）。
+ * 對象：同分鐘最新的一張（pending 優先，其次 unconfirmed）；min 不知道（null）→ 最新的 pending。
+ */
+export function clearOffer(s: OfferState, min: number | null | undefined, reason: unknown): OfferState {
+  if (reason !== 'reject' && reason !== 'timeout' && reason !== 'stopped') return s;
+  const newest = (list: OfferEntry[]) => list.reduce<OfferEntry | null>((a, b) => (a == null || b.at > a.at ? b : a), null);
+  const ok = (e: OfferEntry) => min == null || e.min === min;
+  const fromPending = newest(s.pending.filter(ok));
+  const target = fromPending ?? (min == null ? null : newest(s.unconfirmed.filter(ok)));
+  if (!target) return s;
+  const pending = s.pending.filter((e) => e.id !== target.id);
+  if (reason === 'reject') return { pending, unconfirmed: s.unconfirmed.filter((e) => e.id !== target.id) };
+  if (!fromPending) return s; // 已經是未確認卡
+  return { pending, unconfirmed: [target, ...s.unconfirmed].sort(byAtDesc).slice(0, MAX_UNCONFIRMED) };
 }
 
 /** 使用者按「沒接」或「有接」之後移除 */

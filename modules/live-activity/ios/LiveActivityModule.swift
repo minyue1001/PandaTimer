@@ -113,7 +113,7 @@ public class LiveActivityModule: Module {
       guard #available(iOS 16.2, *) else { return "[]" }
       let list: [[String: Any]] = Activity<PandaTimerAttributes>.activities.map { activity -> [String: Any] in
         let state = activity.content.state
-        let detector = state.heartbeat != nil || state.mode == "standby" || state.mode == "stopped"
+        let detector = state.heartbeat != nil || state.mode == "standby" || state.mode == "stopped" || state.mode == "offer"
         return ["id": activity.id, "mode": state.mode ?? "countdown", "detector": detector]
       }
       guard let data = try? JSONSerialization.data(withJSONObject: list, options: []),
@@ -133,12 +133,17 @@ public class LiveActivityModule: Module {
       let now = Date()
       let existing = Activity<PandaTimerAttributes>.activities.first { activity in
         let state = activity.content.state
-        return activity.activityState == .active
-          && (state.mode == "standby" || state.mode == "stopped" || state.heartbeat != nil)
+        // v1.0：mode "offer" 的 staleDate＝偵測＋60 秒 → 過期後 activityState 是 .stale，也要沿用（不然會多開一張）
+        return (activity.activityState == .active || activity.activityState == .stale)
+          && (state.mode == "standby" || state.mode == "stopped" || state.mode == "offer" || state.heartbeat != nil)
       }
       if let activity = existing {
         var state = activity.content.state
-        if state.mode == "stopped" { state.mode = "standby" }
+        if state.mode == "stopped" || state.mode == "offer" { state.mode = "standby" }
+        // v1.0：重新開始偵測 → 舊的「已偵測邀請」一律清掉
+        state.offerMin = nil
+        state.offerAmount = nil
+        state.offerAt = nil
         state.heartbeat = now
         state.diag = "App 已就緒，等待廣播…"
         let staleDate = state.mode == "countdown" ? activity.content.staleDate : nil

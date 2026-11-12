@@ -15,7 +15,8 @@ struct PandaTimerAttributes: ActivityAttributes {
     var deadline: Date
     /// 預估分鐘數
     var estimateMinutes: Int
-    /// nil 或 "countdown"＝倒數；"standby"＝螢幕廣播偵測待命；"stopped"＝偵測已停止
+    /// nil 或 "countdown"＝倒數；"standby"＝螢幕廣播偵測待命；"stopped"＝偵測已停止；
+    /// v1.0 "offer"＝偵測到邀請（動態島顯示「✓ 已偵測 N 分邀請・可以按接受」）
     var mode: String? = nil
     /// 偵測程式（螢幕廣播 extension）最後一次回報的時間；有值＝這張卡由偵測程式管理
     var heartbeat: Date? = nil
@@ -23,6 +24,11 @@ struct PandaTimerAttributes: ActivityAttributes {
     var diag: String? = nil
     /// v0.6 多單：卡片倒數顯示最早截止那單，其餘寫在這裡，例如「另 2 單：18:42、18:55 截止」
     var others: String? = nil
+    /// v1.0 偵測到的邀請（分鐘、金額、偵測時間）：mode == "offer" 時是卡片主體；倒數中則只在副標顯示「＋偵測到 N 分邀請」。
+    /// 判定接單/未接/逾 60 秒 → 清回 nil
+    var offerMin: Int? = nil
+    var offerAmount: Double? = nil
+    var offerAt: Date? = nil
   }
 
   /// 接單時間

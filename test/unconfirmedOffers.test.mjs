@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  confirmAcceptedAt, EMPTY_STATE, matchOrder, parseOfferState, recordOffer, removeEntry, tick, waitSecFor,
+  clearOffer, confirmAcceptedAt, EMPTY_STATE, matchOrder, parseOfferState, recordOffer, removeEntry, tick, waitSecFor,
 } from '../src/unconfirmedOffers.ts';
 
 const T0 = 1_000_000_000_000;
@@ -72,4 +72,31 @@ test('removeEntry、confirmAcceptedAt、壞資料', () => {
   assert.deepEqual(parseOfferState('{bad'), { pending: [], unconfirmed: [] });
   assert.deepEqual(parseOfferState({ pending: [{ id: 1 }, null], unconfirmed: 'x' }), { pending: [], unconfirmed: [] });
   assert.deepEqual(parseOfferState(null), { pending: [], unconfirmed: [] });
+});
+
+test('v1.0 clearOffer：reject 不出卡（含已出的卡）；timeout/stopped 立刻出卡；沒原因交給 tick', () => {
+  let s = recordOffer(EMPTY_STATE, 19, T0, 'a');
+  // 明確拒單 → 移除，之後 tick 也不會變未確認
+  const r = clearOffer(s, 19, 'reject');
+  assert.deepEqual(r, { pending: [], unconfirmed: [] });
+  assert.equal(tick(r, T0 + 60 * SEC, 35).unconfirmed.length, 0);
+  // 逾時看不出來 / 偵測停止 → 不等窗，立刻出卡
+  for (const reason of ['timeout', 'stopped']) {
+    const t = clearOffer(s, 19, reason);
+    assert.deepEqual(t.unconfirmed.map((e) => e.id), ['a'], reason);
+    assert.equal(t.pending.length, 0);
+  }
+  // 舊原生沒帶原因 / 亂寫 → 不動（照舊等窗）
+  assert.equal(clearOffer(s, 19, undefined), s);
+  assert.equal(clearOffer(s, 19, 'maybe'), s);
+  // 分鐘不符 → 不動；分鐘不知道 → 最新的 pending
+  assert.equal(clearOffer(s, 20, 'reject'), s);
+  s = recordOffer(s, 25, T0 + 5 * SEC, 'b');
+  assert.deepEqual(clearOffer(s, null, 'reject').pending.map((e) => e.id), ['a']);
+  // 窗過了才收到拒單（使用者看很久）→ 已出的卡也收掉
+  const late = tick(recordOffer(EMPTY_STATE, 19, T0, 'a'), T0 + 40 * SEC, 35);
+  assert.equal(late.unconfirmed.length, 1);
+  assert.equal(clearOffer(late, 19, 'reject').unconfirmed.length, 0);
+  // 已是未確認卡又收到 timeout → 不重複
+  assert.equal(clearOffer(late, 19, 'timeout'), late);
 });

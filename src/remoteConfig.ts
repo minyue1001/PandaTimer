@@ -11,6 +11,7 @@ import { DEFAULT_PAY, type PayParams } from './earnings.ts';
 import { DEFAULT_DELIVERY, type DeliverySettings } from './deliveryDetector.ts';
 import { DEFAULT_GREEN, type GreenTriggerSettings } from './frameTrigger.ts';
 import { DEFAULT_AWAY, DEFAULT_POWER, type AwaySettings, type PowerSettings } from './powerSaver.ts';
+import { ALERT_SOUNDS, DEFAULT_OFFER_ISLAND, type AlertSound, type OfferIslandSettings } from './offerIsland.ts';
 
 /** v0.7 extension OCR 記憶體保護；v0.8 每 rebuildEvery 次 OCR 重建 VNRecognizeTextRequest、englishToo=false 只用 zh-Hant */
 export type OcrSettings = { memSkipMB: number; memHighMB: number; rebuildEvery: number; englishToo: boolean };
@@ -59,8 +60,8 @@ export type RemoteConfig = {
   detector: DetectorSettings;
   telemetry: TelemetrySettings;
   app: AppSettings;
-  /** v0.7 接單判定（OfferTracker）；v0.6 App 不認得這個區塊，忽略即可 */
-  offer: OfferSettings;
+  /** v0.7 接單判定（OfferTracker）；v0.6 App 不認得這個區塊，忽略即可。v1.0 加 App 端 islandIndicator/alertSound（src/offerIsland.ts） */
+  offer: OfferSettings & OfferIslandSettings;
   /** v0.7 統計算法參數（JS 讀；彈性線倍數、單筆超時比例上限） */
   stats: StatsParams;
   /** v0.8 收入（含補錢）算法參數（JS 讀） */
@@ -103,7 +104,7 @@ export const DEFAULT_CONFIG: Readonly<RemoteConfig> = Object.freeze({
   detector: { ...DEFAULT_DETECTOR, greenTrigger: { ...DEFAULT_GREEN } },
   telemetry: { keywords: UI_KEYWORDS.map((r) => [...r]), flushSeconds: 60, batchSize: 10 },
   app: { beatTimeoutSeconds: 150, cardRefreshSeconds: 300 },
-  offer: { ...DEFAULT_OFFER },
+  offer: { ...DEFAULT_OFFER, ...DEFAULT_OFFER_ISLAND },
   stats: { ...DEFAULT_STATS },
   pay: { ...DEFAULT_PAY },
   delivery: { ...DEFAULT_DELIVERY },
@@ -171,6 +172,7 @@ export const RANGES: Record<string, [number, number, boolean]> = {
 /** 布林欄位 */
 const BOOL_FIELDS = new Set([
   'delivery.enabled', 'pay.assumeStarredLate', 'ocr.englishToo', 'detector.greenTrigger.enabled', 'away.enabled', 'power.onLowPower',
+  'offer.islandIndicator',
 ]);
 
 /** 正則欄位：要編得過，且（需要的）至少 1 個捕捉群組 */
@@ -258,6 +260,9 @@ function checkFields(prefix: string, sec: Record<string, unknown>, target: Recor
       } else if (path === 'keepAlive.locationAccuracy') {
         if (LOCATION_ACCURACIES.includes(v as LocationAccuracy)) target[key] = v;
         else problems.push(`${path} 要是 ${LOCATION_ACCURACIES.map((x) => `"${x}"`).join('/')} → 用預設`);
+      } else if (path === 'offer.alertSound') {
+        if (ALERT_SOUNDS.includes(v as AlertSound)) target[key] = v;
+        else problems.push(`${path} 要是 ${ALERT_SOUNDS.map((x) => `"${x}"`).join('/')} → 用預設`);
       } else if (path === 'offer.ambiguousAs') {
         if (v === 'accept' || v === 'reject') target[key] = v;
         else problems.push(`${path} 要是 "accept" 或 "reject" → 用預設`);

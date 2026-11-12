@@ -243,7 +243,9 @@
     "acceptedKeywords": "前往取餐|抵達(?:店家|餐廳)|抵达(?:店家|餐厅)|確認取餐|确认取餐|已抵達|已抵达|取餐|導航|导航|訂單詳情|订单详情|聯絡店家|联络店家|联系店家|即將準備完成|即将准备完成|準備完成|准备完成|筆訂單|笔订单|取餐體驗|取餐体验",
     "rejectedKeywords": "已拒絕|已拒绝|訂單已取消|订单已取消|逾時|逾时|已過期|已过期|上線中|上线中",
     "ambiguousAs": "accept",
-    "stackedKeywords": "夾單|夹单"
+    "stackedKeywords": "夾單|夹单",
+    "islandIndicator": true,
+    "alertSound": "default"
   },
   "stats": {
     "graceFactor": 1.05,

@@ -336,6 +336,22 @@ final class RemoteConfig {
     return out
   }
 
+  /// v1.0 App：偵測到邀請時動態島/鎖定畫面立即顯示「✓ 已偵測 N 分邀請・可以按接受」（offer 區塊；預設＝src/remoteConfig.ts
+  /// DEFAULT_OFFER_ISLAND）。islandIndicator=false → 不改卡片；alertSound "default"|"none"
+  /// （⚠️ ActivityKit 沒有官方靜音選項：none 用 .named("") 試，查無檔名時系統可能退回預設聲音，以實機為準）
+  struct OfferIslandSettings {
+    var islandIndicator = true
+    var alertSound = "default"
+  }
+
+  static func offerIsland(_ root: [String: Any]) -> OfferIslandSettings {
+    let o = section(root, "offer")
+    var out = OfferIslandSettings()
+    out.islandIndicator = bool(o["islandIndicator"], out.islandIndicator)
+    out.alertSound = choice(o["alertSound"], ["default", "none"], out.alertSound)
+    return out
+  }
+
   /// 多久重抓一次（預設 600 秒）
   static func refreshSeconds(_ root: [String: Any]) -> TimeInterval {
     Double(int(section(root, "detector")["configRefreshSeconds"], 60, 86400, 600))

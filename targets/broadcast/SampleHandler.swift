@@ -77,7 +77,14 @@ enum PandaSignal {
   static let orderPrefix = "com.pandatimer.order."
   /// v0.7：邀請出現（App 顯示「偵測到邀請 N 分，等你接單…」）／判定未接
   static let offerPendingPrefix = "com.pandatimer.offer.pending."
-  static let offerCleared = "com.pandatimer.offer.cleared"
+  /// v1.0：判定未接改送 com.pandatimer.offer.cleared.<reject|timeout|stopped>（App 只在 timeout/stopped 問「你有接嗎？」）
+  static let offerClearedPrefix = "com.pandatimer.offer.cleared."
+  /// v1.0 extension 狀態給 App（detectorStatus → 首頁膠囊/設定頁診斷）：心跳後與 away 進出時送
+  static let extModeAway = "com.pandatimer.ext.mode.away"
+  static let extModeNormal = "com.pandatimer.ext.mode.normal"
+  static let extMemPrefix = "com.pandatimer.ext.mem."
+  static let extPeakPrefix = "com.pandatimer.ext.peak."
+  static let maxExtMB = 80
   /// v0.7：接單訊號前先送「從按下接受到現在的秒數」（0…60），App 在 2 秒內配對 → acceptedAt＝收到時間 − 秒數
   static let acceptDelayPrefix = "com.pandatimer.accept.delay."
   static let maxAcceptDelay = 60
@@ -114,6 +121,32 @@ enum PandaSignal {
 
   static func postDeliveredDelay(_ seconds: Int) {
     post("\(deliveredDelayPrefix)\(min(60, max(0, seconds)))")
+  }
+
+  /// v1.0：OfferTracker 的判定原因 → cleared 原因（＝src/offerIsland.ts clearedReasonFor）。
+  /// rejected（命中拒單詞）/replaced（邀請直接換成另一張）＝reject；stopped＝stopped；timeout/superseded（看不出來）＝timeout
+  static func clearedReason(_ reason: String) -> String {
+    switch reason {
+    case "rejected", "replaced": return "reject"
+    case "stopped": return "stopped"
+    default: return "timeout"
+    }
+  }
+
+  static func postOfferCleared(_ reason: String) {
+    post("\(offerClearedPrefix)\(clearedReason(reason))")
+  }
+
+  /// v1.0：away/normal、目前與峰值記憶體（MB 四捨五入，0…80，超過記 80）
+  static func postExtState(away: Bool, memMB: Double, peakMB: Double) {
+    post(away ? extModeAway : extModeNormal)
+    post("\(extMemPrefix)\(clampMB(memMB))")
+    post("\(extPeakPrefix)\(clampMB(peakMB))")
+  }
+
+  static func clampMB(_ mb: Double) -> Int {
+    guard mb.isFinite else { return 0 }
+    return min(maxExtMB, max(0, Int(mb.rounded())))
   }
 }
 
@@ -373,6 +406,11 @@ final class BroadcastDetector {
     PandaSignal.post(PandaSignal.heartbeat)
     sampleMemory()
     refreshPower()
+    // v1.0：away/normal＋目前/峰值記憶體給 App（detectorStatus → 首頁膠囊、設定頁診斷）
+    lock.lock()
+    let awayNow = awayTracker.away
+    lock.unlock()
+    PandaSignal.postExtState(away: awayNow, memMB: currentMB, peakMB: peakMB)
     let text = diag()
     RunRecord.save(diag: text, finished: false)
     telemetry.log("beat", statsFields().merging(powerFields(reset: true)) { $1 })
@@ -455,6 +493,8 @@ final class BroadcastDetector {
 
   private func logMode(_ c: AwayTracker.Change, trig: String) {
     telemetry.log("mode", ["mode": c.away ? "away" : "normal", "reason": c.reason, "trig": trig])
+    // v1.0：模式一變就告訴 App（記憶體等心跳再送）
+    PandaSignal.post(c.away ? PandaSignal.extModeAway : PandaSignal.extModeNormal)
   }
 
   /// 心跳/停止回報的省電量測欄位；reset＝心跳（區間值歸零）
@@ -777,7 +817,7 @@ final class BroadcastDetector {
     }
     let amountText = d.offer.amount.map { String(format: "%.2f 元・", $0) } ?? ""
     guard d.accepted, let acceptedAt = d.acceptedAt else {
-      PandaSignal.post(PandaSignal.offerCleared)
+      PandaSignal.postOfferCleared(d.reason)
       Task.detached {
         await Notifier.post("未接單：\(minutes) 分鐘", "\(amountText)\(reasonText)，不開倒數", passive: true)
       }

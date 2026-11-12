@@ -42,6 +42,16 @@ import UserNotifications
 //   - beat/arm/disarm/sig 帶 batt/charging/thermal/lowPower（DevicePower；UIDevice 只在主執行緒讀，快取）。
 //   - 低電量模式或過熱（power 設定，同 extension 規則）→ 偵測卡診斷字加「省電中」。
 //   - 定位保活精度/距離過濾走遠端設定 keepAlive（預設 hundred/50＝v0.5~0.8 行為）。
+// v1.0 偵測當下就看得到（使用者回饋：動態島看不出偵測成功，要回 App 看到「等待」才敢按接受）：
+//   - offer.pending.<分> → 偵測卡立即 update 成 mode "offer"（✓ 已偵測 N 分邀請・$金額・可以按接受）＋alertConfiguration
+//     （強制展開＋重繪；聲音 offer.alertSound）；卡片正在倒數其他單 → 不蓋倒數，只寫 offerMin/offerAmount/offerAt
+//     （widget 在倒數下方顯示「＋偵測到 N 分邀請」）＋同樣的 alert。offer.islandIndicator=false → 不動卡片。
+//   - offer.cleared.<reject|timeout|stopped> → 卡片回 standby（倒數中只清掉邀請行）；order → 照舊轉倒數（apply 清邀請欄位）；
+//     60 秒沒結果也自動清（staleDate＝偵測＋60 秒，widget isStale 時畫回偵測中）。JS 事件 offerCleared 帶 reason/minutes。
+//   - 偵測卡的 update 一律走 enqueueCard 串行（邀請顯示/清除、心跳、停止不會亂序）。
+//   - extension 心跳後送 ext.mode.<away|normal>、ext.mem.<MB>、ext.peak.<MB>（0…80）→ statusJSON 帶 extMode/memMB/peakMB/extAt，
+//     加上 App 自己的 lowPower/thermal/saver/batt/charging（首頁膠囊「省電中」、設定頁診斷）。
+//   註冊：579＋3（cleared 原因）＋2＋81＋81＝746 個（< 1000）。
 final class DetectorHub {
   static let shared = DetectorHub()
 
@@ -54,6 +64,17 @@ final class DetectorHub {
   static let seqMod = 4
   static let offerPendingPrefix = "com.pandatimer.offer.pending."
   static let offerClearedName = "com.pandatimer.offer.cleared"
+  /// v1.0：offer.cleared.<原因>（＝src/detector.ts OFFER_CLEAR_REASONS；不帶原因的舊名稱仍註冊，原因＝nil）
+  static let offerClearedPrefix = "com.pandatimer.offer.cleared."
+  static let offerClearReasons = ["reject", "timeout", "stopped"]
+  /// v1.0 extension 狀態（心跳後送）
+  static let extModeAwayName = "com.pandatimer.ext.mode.away"
+  static let extModeNormalName = "com.pandatimer.ext.mode.normal"
+  static let extMemPrefix = "com.pandatimer.ext.mem."
+  static let extPeakPrefix = "com.pandatimer.ext.peak."
+  static let maxExtMB = 80
+  /// v1.0：偵測卡「已偵測邀請」最多顯示幾秒（沒收到 cleared/order 也自動回待命）＝src/offerIsland.ts OFFER_ISLAND_SECONDS
+  static let offerIslandSeconds: TimeInterval = 60
   static let deliveredName = "com.pandatimer.delivered"
   static let acceptDelayPrefix = "com.pandatimer.accept.delay."
   static let maxAcceptDelay = 60
@@ -74,11 +95,15 @@ final class DetectorHub {
     case heartbeat
     case drain
     case offerPending(Int)
-    case offerCleared
+    /// v1.0：原因 reject / timeout / stopped；舊名稱（不帶原因）→ nil
+    case offerCleared(String?)
     case acceptDelay(Int)
     case delivered
     case offerStacked
     case deliveredDelay(Int)
+    case extMode(away: Bool)
+    case extMem(Int)
+    case extPeak(Int)
   }
 
   /// 純數字、無前導 0（"0" 本身可以）、在 lo…hi 之間
@@ -95,10 +120,22 @@ final class DetectorHub {
     case stoppedName: return .stopped
     case heartbeatName: return .heartbeat
     case drainName: return .drain
-    case offerClearedName: return .offerCleared
+    case offerClearedName: return .offerCleared(nil)
     case deliveredName: return .delivered
     case offerStackedName: return .offerStacked
+    case extModeAwayName: return .extMode(away: true)
+    case extModeNormalName: return .extMode(away: false)
     default: break
+    }
+    if name.hasPrefix(offerClearedPrefix) {
+      let reason = String(name.dropFirst(offerClearedPrefix.count))
+      return offerClearReasons.contains(reason) ? .offerCleared(reason) : nil
+    }
+    if name.hasPrefix(extMemPrefix) {
+      return plainInt(String(name.dropFirst(extMemPrefix.count)), 0, maxExtMB).map { Signal.extMem($0) }
+    }
+    if name.hasPrefix(extPeakPrefix) {
+      return plainInt(String(name.dropFirst(extPeakPrefix.count)), 0, maxExtMB).map { Signal.extPeak($0) }
     }
     if name.hasPrefix(deliveredDelayPrefix) {
       return plainInt(String(name.dropFirst(deliveredDelayPrefix.count)), 0, maxDeliveredDelay).map {
@@ -135,6 +172,11 @@ final class DetectorHub {
     for d in 0...maxAcceptDelay { names.append("\(acceptDelayPrefix)\(d)") }
     names.append(offerStackedName)
     for d in 0...maxDeliveredDelay { names.append("\(deliveredDelayPrefix)\(d)") }
+    for r in offerClearReasons { names.append("\(offerClearedPrefix)\(r)") }
+    names.append(extModeAwayName)
+    names.append(extModeNormalName)
+    for m in 0...maxExtMB { names.append("\(extMemPrefix)\(m)") }
+    for m in 0...maxExtMB { names.append("\(extPeakPrefix)\(m)") }
     return names
   }
 
@@ -191,6 +233,14 @@ final class DetectorHub {
   private var lastCardPushAt: Date?
   private var cardSkips = 0
   private var power = RemoteConfig.PowerSettings()
+  /// v1.0：偵測卡上顯示中的邀請（偵測時間；nil＝沒有）、偵測卡 update 串行鏈
+  private var offerShownAt: Date?
+  private var cardTail: Task<Void, Never>?
+  /// v1.0：extension 最近一次回報的模式/記憶體（Darwin ext.*）
+  private var extAway: Bool?
+  private var extMemMB: Int?
+  private var extPeakMB: Int?
+  private var extAt: Date?
 
   // MARK: - 對外（由 LiveActivityModule 呼叫）
 
@@ -307,6 +357,7 @@ final class DetectorHub {
     queue.sync {
       self.armed = false
       self.stoppedUnexpectedAt = nil
+      self.offerShownAt = nil
       self.keepAlive.stop()
       self.stopWatchdog()
       self.telemetry.log("disarm", self.appFields().merging(DevicePower.fields()) { $1 })
@@ -315,6 +366,7 @@ final class DetectorHub {
       var state = activity.content.state
       if state.mode == "countdown" && !DetectorCardPlan.items(cardId: activity.id).isEmpty {
         state.heartbeat = nil
+        Self.clearOfferFields(&state)
         state.diag = "偵測已停止（這張倒數保留）"
         await activity.update(ActivityContent(state: state, staleDate: state.deadline))
       } else {
@@ -357,6 +409,19 @@ final class DetectorHub {
       }
       if !offerNote.isEmpty { d["offerNote"] = offerNote }
       if let at = stoppedUnexpectedAt { d["stoppedUnexpectedAt"] = Self.ms(at) }
+      // v1.0 省電/記憶體（src/detector.ts parseDetectorStatus → power）：低電量/溫度/省電倍率＝App 自己看（同一支手機、
+      // 同一套 power 規則＝extension 的判定）；電量＝DevicePower 快取；模式/記憶體＝extension 心跳後的 ext.* 訊號
+      let saver = RemoteConfig.deviceSaver(power)
+      d["lowPower"] = saver.lowPower
+      d["thermal"] = saver.thermal
+      d["saver"] = saver.saver
+      let dev = DevicePower.fields()
+      if let b = dev["batt"] { d["batt"] = b }
+      if let c = dev["charging"] { d["charging"] = c }
+      if let away = extAway { d["extMode"] = away ? "away" : "normal" }
+      if let m = extMemMB { d["memMB"] = m }
+      if let m = extPeakMB { d["peakMB"] = m }
+      if let at = extAt { d["extAt"] = Self.ms(at) }
       return d
     }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
@@ -371,6 +436,7 @@ final class DetectorHub {
   func appBecameActive() {
     queue.async {
       self.appState = "fg"
+      DevicePower.refresh()
       self.telemetry.log("fg", self.appFields())
       self.refreshConfig(force: false)
       self.keepAlive.ensure()
@@ -472,12 +538,21 @@ final class DetectorHub {
       offerNote = ""
       telemetry.log("sig", appFields().merging(["note": "offerPending", "min": minutes]) { $1 })
       emit(["type": "offer", "minutes": minutes])
-    case .offerCleared:
+      showOffer(minutes, at: now)
+    case .offerCleared(let reason):
       let minutes = offerPendingMinutes
       clearOffer()
-      offerNote = "未接單" + (minutes.map { " \($0) 分" } ?? "") + "（\(Self.hms(now))）"
-      telemetry.log("sig", appFields().merging(["note": "offerCleared"]) { $1 })
-      emit(["type": "offerCleared"])
+      offerNote = "未接單" + (minutes.map { " \($0) 分" } ?? "") + "（\(Self.hms(now))"
+        + (reason.map { "・\(Self.clearReasonText($0))" } ?? "") + "）"
+      var fields = appFields().merging(["note": "offerCleared"]) { $1 }
+      if let r = reason { fields["reason"] = r }
+      if let m = minutes { fields["min"] = m }
+      telemetry.log("sig", fields)
+      var body: [String: Any?] = ["type": "offerCleared"]
+      if let r = reason { body["reason"] = r }
+      if let m = minutes { body["minutes"] = m }
+      emit(body)
+      hideOffer(match: nil, note: "未接單" + (minutes.map { " \($0) 分" } ?? "") + " \(Self.hms(now))")
     case .acceptDelay(let seconds):
       pendingDelay = (seconds: seconds, at: now)
     case .offerStacked:
@@ -486,7 +561,132 @@ final class DetectorHub {
       pendingDeliveredDelay = (seconds: seconds, at: now)
     case .delivered:
       handleDelivered(at: now)
+    case .extMode(let away):
+      extAway = away
+      extAt = now
+    case .extMem(let mb):
+      extMemMB = mb
+      extAt = now
+    case .extPeak(let mb):
+      extPeakMB = mb
+      extAt = now
     }
+  }
+
+  static func clearReasonText(_ reason: String) -> String {
+    switch reason {
+    case "reject": return "拒單"
+    case "stopped": return "偵測停止"
+    default: return "逾時"
+    }
+  }
+
+  // MARK: - v1.0 偵測到邀請 → 動態島（只在 queue 上呼叫）
+
+  /// 平台確切報酬（元）＝src/orders.ts exactFare：max(45, floor(分×245/60＋0.01))；用整數分計算
+  static func offerFare(_ minutes: Int) -> Double {
+    let cents = minutes * 24500 / 60 + 1
+    return Double(max(4500, cents)) / 100
+  }
+
+  static func offerAlertTitle(_ minutes: Int) -> String { "已偵測 \(minutes) 分邀請" }
+  static let offerAlertBody = "可以按接受訂單"
+  static let offerAlertBodyCounting = "可以按接受訂單・倒數照常進行"
+
+  /// 偵測卡 update 串成一條（前一個做完才做下一個）
+  private func enqueueCard(_ work: @escaping () async -> Void) {
+    let previous = cardTail
+    cardTail = Task {
+      await previous?.value
+      await work()
+    }
+  }
+
+  /// 卡片待命 → mode "offer"；卡片倒數中 → 不蓋倒數、只寫邀請欄位。都帶 alertConfiguration（展開＋重繪）。
+  private func showOffer(_ minutes: Int, at: Date) {
+    let island = RemoteConfig.offerIsland(remote.snapshot())
+    guard island.islandIndicator else { return }
+    let amount = Self.offerFare(minutes)
+    let beat = lastBeat ?? at
+    let diag = diagText(note: "偵測到邀請 \(minutes) 分 \(Self.hms(at))")
+    let silent = island.alertSound == "none"
+    let baseFields = appFields()
+    offerShownAt = at
+    queue.asyncAfter(deadline: .now() + Self.offerIslandSeconds) { [weak self] in
+      guard let self = self, self.offerShownAt == at else { return }
+      self.offerShownAt = nil
+      self.hideOffer(match: at, note: "邀請 \(Int(Self.offerIslandSeconds)) 秒沒有結果")
+    }
+    enqueueCard {
+      guard let card = Self.detectorCard() else {
+        self.queue.async {
+          self.telemetry.log(
+            "sig", baseFields.merging(["note": "offerIsland", "min": minutes, "island": "✗", "islandErr": "noCard"]) { $1 })
+        }
+        return
+      }
+      var state = card.content.state
+      let counting = state.mode == "countdown"
+      state.offerMin = minutes
+      state.offerAmount = amount
+      state.offerAt = at
+      state.heartbeat = beat
+      var staleDate = card.content.staleDate
+      if !counting {
+        state.mode = "offer"
+        state.diag = diag
+        // 沒收到結果也會在 60 秒後過期：widget 看 isStale 畫回「偵測中」（背景 update 不一定重繪的保險）
+        staleDate = at.addingTimeInterval(Self.offerIslandSeconds)
+      }
+      // ⚠️ ActivityKit 沒有官方「靜音」：.named("") 找不到檔案時系統可能照樣用預設聲音（實機確認）
+      let sound: AlertConfiguration.AlertSound = silent ? .named("") : .default
+      let alert = AlertConfiguration(
+        title: LocalizedStringResource(stringLiteral: Self.offerAlertTitle(minutes)),
+        body: LocalizedStringResource(stringLiteral: counting ? Self.offerAlertBodyCounting : Self.offerAlertBody),
+        sound: sound)
+      await card.update(ActivityContent(state: state, staleDate: staleDate), alertConfiguration: alert)
+      let shown = card.content.state.offerAt.map { abs($0.timeIntervalSince(at)) < 1 } ?? false
+      let ok = card.activityState == .active && shown
+      self.queue.async {
+        self.lastCardPushAt = Date()
+        var fields = baseFields
+        fields["note"] = "offerIsland"
+        fields["min"] = minutes
+        fields["island"] = ok ? "✓" : "✗"
+        if !ok { fields["islandErr"] = "state:\(card.activityState)" }
+        if counting { fields["orders"] = DetectorCardPlan.items(cardId: card.id).count }
+        self.telemetry.log("sig", fields)
+      }
+    }
+  }
+
+  /// 清掉卡上的邀請：mode "offer" → standby（倒數中只清邀請欄位）。match 非 nil → 只清偵測時間相同的那張
+  private func hideOffer(match: Date?, note: String?) {
+    if match == nil { offerShownAt = nil }
+    let beat = lastBeat
+    let text = note.map { diagText(note: $0) }
+    enqueueCard {
+      guard let card = Self.detectorCard() else { return }
+      var state = card.content.state
+      guard let shown = state.offerAt ?? (state.mode == "offer" ? Date.distantPast : nil) else { return }
+      if let m = match, abs(shown.timeIntervalSince(m)) >= 1 { return }
+      Self.clearOfferFields(&state)
+      var staleDate = card.content.staleDate
+      if state.mode == "offer" {
+        state.mode = "standby"
+        staleDate = nil
+        if let t = text { state.diag = t }
+      }
+      if let b = beat { state.heartbeat = b }
+      await card.update(ActivityContent(state: state, staleDate: staleDate))
+      self.queue.async { self.lastCardPushAt = Date() }
+    }
+  }
+
+  static func clearOfferFields(_ state: inout PandaTimerAttributes.ContentState) {
+    state.offerMin = nil
+    state.offerAmount = nil
+    state.offerAt = nil
   }
 
   /// v0.8 只在 queue 上：near 前後 2 秒內收到的夾單訊號（取走就清掉；過期的也清掉）
@@ -561,9 +761,11 @@ final class DetectorHub {
     }
   }
 
+  /// 只清 App 端的邀請狀態（卡片：order → placeOrder 的 apply 清；cleared → hideOffer；started/stopped → pushCard 自癒）
   private func clearOffer() {
     offerPendingMinutes = nil
     offerPendingAt = nil
+    offerShownAt = nil
   }
 
   /// 只在 queue 上：取走 near 前後 delayPairWindow 秒內收到的延遲訊號（取走就清掉；過期的也清掉）
@@ -799,12 +1001,12 @@ final class DetectorHub {
   static func isDetectorCard(_ activity: Activity<PandaTimerAttributes>) -> Bool {
     guard activity.activityState != .ended && activity.activityState != .dismissed else { return false }
     let state = activity.content.state
-    return state.mode == "standby" || state.mode == "stopped" || state.heartbeat != nil
+    return state.mode == "standby" || state.mode == "stopped" || state.mode == "offer" || state.heartbeat != nil
   }
 
   static func detectorCard() -> Activity<PandaTimerAttributes>? {
     let all = Activity<PandaTimerAttributes>.activities.filter(isDetectorCard)
-    return all.first { $0.content.state.mode == "standby" }
+    return all.first { $0.content.state.mode == "standby" || $0.content.state.mode == "offer" }
       ?? all.first { $0.content.state.mode == "countdown" }
       ?? all.first { $0.content.state.mode == "stopped" }
       ?? all.first
@@ -818,25 +1020,33 @@ final class DetectorHub {
     let beat = lastBeat ?? Date()
     let now = Date()
     let due = !throttle || lastCardPushAt.map { now.timeIntervalSince($0) >= cardRefresh } ?? true
-    Task {
+    let offerAt = offerShownAt
+    enqueueCard {
       guard let activity = Self.detectorCard() else { return }
       let current = activity.content
       var state = current.state
       let counting = state.mode == "countdown" && state.deadline > Date()
+      // v1.0 自癒：卡上的邀請不是 App 目前顯示中的那張（已結案、停止、重新開始、App 重開）→ 清掉
+      let offerLive = state.offerAt.map { at in offerAt.map { abs($0.timeIntervalSince(at)) < 1 } ?? false } ?? false
+      if stopping || !offerLive {
+        Self.clearOfferFields(&state)
+        if state.mode == "offer" { state.mode = "standby" }
+      }
       if stopping {
         if !counting { state.mode = "stopped" }
       } else if state.mode == "stopped" {
         state.mode = "standby"
       }
-      if !due && state.mode == current.state.mode
+      if !due && state.mode == current.state.mode && state.offerAt == current.state.offerAt
         && Self.stableDiag(current.state.diag) == Self.stableDiag(text)
       {
         self.queue.async { self.cardSkips += 1 }
         return
       }
       state.heartbeat = beat
-      state.diag = text
-      let staleDate = state.mode == "countdown" ? current.staleDate : nil
+      // 邀請顯示中：診斷字留著「偵測到邀請」那行，只更新心跳
+      if state.mode != "offer" { state.diag = text }
+      let staleDate = state.mode == "countdown" || state.mode == "offer" ? current.staleDate : nil
       self.queue.async { self.lastCardPushAt = Date() }
       await activity.update(ActivityContent(state: state, staleDate: staleDate))
     }

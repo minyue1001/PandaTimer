@@ -69,7 +69,8 @@ export function detectPill(det: DetectorStatus | null, now: number, armedAt: num
     const age = Math.max(0, Math.round((now - det.offerPendingAt) / 1000));
     if (age <= OFFER_PENDING_STALE_SEC) {
       const m = det.offerPendingMinutes != null ? ` ${det.offerPendingMinutes} 分` : '';
-      return { kind: 'waiting', tone: 'yellow', title: '等你接單', detail: `偵測到邀請${m}・${age} 秒前`, action: null, canStop: true };
+      // v1.0（使用者回饋：要看到「偵測成功」才敢按接受）→ 標題直接說可以按
+      return { kind: 'waiting', tone: 'yellow', title: '✓ 可以按接受', detail: `已偵測到邀請${m}・${age} 秒前`, action: null, canStop: true };
     }
   }
   const age = beatAgeSec(det, now);
@@ -97,7 +98,31 @@ export function detectPill(det: DetectorStatus | null, now: number, armedAt: num
   }
   const parts = [`心跳 ${age} 秒前`, det.keepAlive || '保活未知'];
   if (det.power?.saver || det.power?.lowPower) parts.push('省電中');
+  // v1.0：extension 在 away 模式（畫面上不是 pandarider → 放慢辨識）
+  if (det.power?.extMode === 'away') parts.push('放慢辨識');
   return { kind: 'running', tone: 'green', title: '偵測中', detail: parts.join('・'), action: null, canStop: true };
+}
+
+/**
+ * v1.0 設定頁診斷「省電/記憶體」：省電倍率中/低電量模式/正常・偵測放慢（away）・溫度等級・電量・偵測記憶體 目前/峰值MB
+ * （記憶體是 extension 最近一次心跳回報的值）
+ */
+export function powerLine(pw: NonNullable<DetectorStatus['power']>): string {
+  const mem =
+    pw.memMB != null
+      ? `偵測記憶體 ${Math.round(pw.memMB)}${pw.peakMB != null ? `/${Math.round(pw.peakMB)}` : ''}MB`
+      : pw.peakMB != null
+        ? `偵測記憶體峰值 ${Math.round(pw.peakMB)}MB`
+        : '';
+  return [
+    pw.saver ? '省電倍率中' : pw.lowPower ? '低電量模式' : '正常',
+    pw.extMode === 'away' ? '放慢辨識（非外送畫面）' : '',
+    pw.thermal != null ? `溫度等級 ${pw.thermal}` : '',
+    pw.batt != null ? `電量 ${Math.round(pw.batt)}%${pw.charging ? '（充電中）' : ''}` : '',
+    mem,
+  ]
+    .filter(Boolean)
+    .join('・');
 }
 
 // ── 本期成績的行動提示 ──

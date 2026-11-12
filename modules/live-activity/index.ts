@@ -22,8 +22,10 @@ type LiveActivityNative = {
 
 /** v0.4 原生 DetectorHub 送來的事件（extension 的 Darwin 訊號，或 App Intents 要求 drain） */
 export type DetectorEvent = {
-  type: 'order' | 'started' | 'stopped' | 'heartbeat' | 'drain' | 'beatTimeout' | 'restored';
+  type: 'order' | 'started' | 'stopped' | 'heartbeat' | 'drain' | 'beatTimeout' | 'restored' | 'offer' | 'offerCleared';
   minutes?: number;
+  /** v1.0 offerCleared：reject / timeout / stopped（舊原生沒帶） */
+  reason?: string;
   how?: string;
   /** v0.5：更新後回讀結果（動態島：已更新✓／疑似被系統擋✗） */
   check?: string;
