@@ -245,7 +245,8 @@
     "ambiguousAs": "accept",
     "stackedKeywords": "夾單|夹单",
     "islandIndicator": true,
-    "alertSound": "default"
+    "alertSound": "default",
+    "suspectBelowMinutes": 3
   },
   "stats": {
     "graceFactor": 1.05,
@@ -261,7 +262,13 @@
     "minOrderAgeSec": 120,
     "completedKeywords": "訂單完成|订单完成|完成訂單|完成订单|訂單已完成|订单已完成|已送達|已送达|送達完成|送达完成|確認送達|确认送达|完成送達|完成送达",
     "finalKeywords": "訂單完成|订单完成|訂單已完成|订单已完成",
-    "pendingSec": 30
+    "pendingSec": 30,
+    "mode": "disappear",
+    "dialogKeywords": "是否已送達|是否已送达|確認已送達|确认已送达",
+    "numberScan": true,
+    "numberScanTop": 0.05,
+    "numberScanBottom": 0.6,
+    "bindWindowSec": 300
   },
   "ocr": {
     "memSkipMB": 36,

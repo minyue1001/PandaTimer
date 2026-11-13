@@ -1,6 +1,6 @@
 import { AppState, Linking } from 'react-native';
 import * as LiveActivity from '../modules/live-activity';
-import { activeMirror, applyNativeEvents, orphanActivityIds, parseNativeEvents } from './nativeEvents';
+import { activeMirror, applyNativeEvents, orphanActivityIds, parseNativeEvents, stackMark } from './nativeEvents';
 import { cancelReminders, scheduleReminders } from './notify';
 import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, exactFare, parseDeepLink, type Order } from './orders';
 import { addTombstones, applyPrune, dropTombstonedEvents, planPrune, type PruneCriteria, type PrunePlan } from './prune';
@@ -45,7 +45,8 @@ export async function startOrder(
     amount: exactFare(estimateMin),
     ...(opts?.source ? { source: opts.source } : {}),
   };
-  await mutate((list) => ({ orders: [order, ...list] }));
+  // v1.1 疊單：手上已有其他進行中單 → stacked＋stackKind 'carry'（統計「不含夾單」一併排除）
+  await mutate((list) => ({ orders: [{ ...order, ...stackMark({}, list.some((o) => o.status === 'active')) }, ...list] }));
 
   const activityPromise = (async () => {
     if (!LiveActivity.isSupported()) return undefined;

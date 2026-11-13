@@ -125,7 +125,12 @@ test('v0.8：原生 start 事件的 stacked 帶進訂單；非 true 一律忽略
   ]);
   assert.equal(ev[0].stacked, true);
   assert.equal(ev[1].stacked, undefined);
+  // 各自單獨套用（沒有其他進行中單）：s1 夾單、s2 不標
+  assert.equal(applyNativeEvents([], [ev[0]])[0].stacked, true);
+  assert.equal(applyNativeEvents([], [ev[0]])[0].stackKind, 'offer');
+  assert.equal('stacked' in applyNativeEvents([], [ev[1]])[0], false);
+  // v1.1：s1 還在進行中時接 s2 → 疊單（carry）
   const list = applyNativeEvents([], ev);
   assert.equal(list.find((o) => o.id === 's1').stacked, true);
-  assert.equal('stacked' in list.find((o) => o.id === 's2'), false);
+  assert.deepEqual([list.find((o) => o.id === 's2').stacked, list.find((o) => o.id === 's2').stackKind], [true, 'carry']);
 });

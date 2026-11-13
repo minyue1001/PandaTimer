@@ -199,7 +199,8 @@ test('Swift 與 TS 同規則：RemoteConfig 預設/範圍、AwayTracker、PowerT
     'changeEnabled: timing.changeEnabled', 'modeChange = awayTracker.observeGreen()',
     'let busyWithOffer = tracker.isActive || deliveryEdge.deadline != nil',
     'awayTracker.observeOcr(panda: panda, offerActive: busyWithOffer, s.away)',
-    'let analyzed = ScreenInfo.analyzeWithPresence(ocrText, rules: s.rules, awayKeywords: s.away.keywords)',
+    // v1.1：原文改交給 OrderNumbers.analyze（內部仍呼叫 analyzeWithPresence＋號碼摘要）
+    'let analyzed = OrderNumbers.analyze(ocrText, rules: s.rules, awayKeywords: s.away.keywords, delivery: s.delivery)',
     'NSProcessInfoPowerStateDidChange', 'ProcessInfo.thermalStateDidChangeNotification',
     'telemetry.log("beat", statsFields().merging(powerFields(reset: true)) { $1 })',
   ]) {
@@ -207,6 +208,8 @@ test('Swift 與 TS 同規則：RemoteConfig 預設/範圍、AwayTracker、PowerT
   }
   assert.ok(read('../targets/broadcast/OrderDetector.swift').includes(
     'firstOfferMatch(compact(raw), awayKeywords, fallback: RemoteConfig.AwaySettings.defaultKeywords) != nil'));
+  assert.ok(read('../targets/broadcast/OrderNumbers.swift').includes(
+    'let analyzed = ScreenInfo.analyzeWithPresence(raw, rules: rules, awayKeywords: awayKeywords)'));
   // extension 不碰 UIKit（電量只在 App 量）
   assert.ok(!/^import UIKit/m.test(ext));
 });

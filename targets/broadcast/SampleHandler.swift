@@ -33,6 +33,14 @@ import Vision
 //     看到特徵詞或綠色觸發立刻回正常（AwayTracker；切換時 telemetry "mode"）。
 //   - 低電量模式或 thermalState ≥ power.thermalLevel → 所有間隔 ×power.saverFactor（PowerTiming；切換時 telemetry "power"）。
 //   - beat 多帶 ocrMin（每分鐘 OCR 次數）/probes（本區間取樣次數）/mode/awaySec/saver/lowPower/thermal。
+// v1.1 以「#單號」配對送達（規則＝src/orderNumbers.ts＋src/deliveryDetector.ts DeliveryWatch，以 TS 測試為準；Swift 在 OrderNumbers.swift）：
+//   - 接單訊號送出 → OrderNumberBook 記 seq；之後接單後/取餐畫面抓到的「#單號」綁給最近一張還沒綁號的 seq。
+//   - delivery.mode "disappear"：送達確認對話框/按鈕（dialogKeywords）消失才送（時間＝第一次消失），對話框上的單號對到 seq →
+//     先送 delivered.delay.<秒> 再送 delivered.seq.<seq mod 4>（App 結那張）；對不到 → 照舊 delivered（App 退回截止最早）。
+//     同一單號 1 小時內只送一次。"appear"＝v0.8 DeliveryEdge（退路）。
+//   - 單號的問句在畫面上半部（主 OCR 只看下半部）→ 綁號中/對話框沒讀到號碼時，同一幀另 OCR 上方 numberScanTop~Bottom。
+//   - 單號只在 extension 記憶體，**不上傳**（telemetry 只有 matched/result）。
+//   - OfferTracker 誤讀防護：分鐘 < offer.suspectBelowMinutes 且同畫面有接單後字樣 → 不送 offer.pending（telemetry offer_suspect）。
 //
 // 省記憶體（v0.4 實測峰值 43MB → v0.5 目標 ≤36MB；jetsam 約 50MB）：
 //  - 不用 CIContext：直接讀 pixel buffer 的亮度平面（420f 的 Y），只取畫面下方 50%，
@@ -94,6 +102,8 @@ enum PandaSignal {
   static let deliveredDelayPrefix = "com.pandatimer.delivered.delay."
   /// v0.8：夾單（在 accept.delay 之前送；App 2 秒內配對 → 訂單 stacked）
   static let offerStacked = "com.pandatimer.offer.stacked"
+  /// v1.1：送達對話框上的單號對到接單 seq → com.pandatimer.delivered.seq.<seq mod 4>（取代 delivered；之前照樣先送 delivered.delay）
+  static let deliveredSeqPrefix = "com.pandatimer.delivered.seq."
 
   static func post(_ name: String) {
     CFNotificationCenterPostNotification(
@@ -121,6 +131,10 @@ enum PandaSignal {
 
   static func postDeliveredDelay(_ seconds: Int) {
     post("\(deliveredDelayPrefix)\(min(60, max(0, seconds)))")
+  }
+
+  static func postDeliveredSeq(_ seq: Int) {
+    post("\(deliveredSeqPrefix)\(((seq % seqMod) + seqMod) % seqMod)")
   }
 
   /// v1.0：OfferTracker 的判定原因 → cleared 原因（＝src/offerIsland.ts clearedReasonFor）。
@@ -252,6 +266,8 @@ final class BroadcastDetector {
   private var offerActiveFlag = false
   private var lastSawAcceptFlag = false
   private var lastPlanSame = false
+  /// v1.1：下一次 OCR 要不要同時切一張畫面上方的小圖（補掃單號；workQueue 寫、取樣時讀）
+  private var wantUpperFlag = false
   /// 本次心跳區間：綠色比例最大值、各觸發原因次數
   private var greenMax: Double = 0
   private var greenTriggers = 0
@@ -291,6 +307,12 @@ final class BroadcastDetector {
   private var dupCount = 0
   /// v0.7 自動送達邊緣觸發、記憶體保護
   private let deliveryEdge = DeliveryEdge()
+  /// v1.1 單號 ↔ 接單 seq、送達對話框消失偵測（OrderNumbers.swift）；最近一次對話框單號（appear 模式用）、上方補掃時間/次數
+  private let book = OrderNumberBook()
+  private let watch = DeliveryWatch()
+  private var lastDialogNo: (no: String, at: Date)?
+  private var lastUpperAt: Date?
+  private var upperScans = 0
   private var deliveredCount = 0
   private var memSkips = 0
   private var lastMemSkipLog: Date?
@@ -362,6 +384,8 @@ final class BroadcastDetector {
       // v0.8：只看到送達確認對話框、還在等「訂單完成」→ 照對話框時間送出（首日停止常緊接在送達對話框之後）
       if self.currentSettings().delivery.enabled {
         self.handleDelivery(self.deliveryEdge.finish(Date()), info: nil)
+        // v1.1：對話框剛消失、還在確認 → 送；按鈕還在（沒按）→ 不送
+        self.handleWatch(self.watch.finish(Date()), info: nil)
       }
     }
     PandaSignal.post(PandaSignal.stopped)
@@ -453,6 +477,7 @@ final class BroadcastDetector {
     tracker.settings = next.offer
     tracker.dedupeSeconds = next.dedupeWindow
     deliveryEdge.pendingSec = TimeInterval(next.delivery.pendingSec)
+    book.bindWindow = TimeInterval(next.delivery.bindWindowSec)
     ocr.configure(englishToo: next.ocrGuard.englishToo, rebuildEvery: next.ocrGuard.rebuildEvery)
     if old.heartbeatInterval != next.heartbeatInterval, let timer = heartbeatTimer {
       timer.schedule(
@@ -615,6 +640,7 @@ final class BroadcastDetector {
     lastOcrHash = p.hash
     lastOcrAt = now
     trigCounts[why, default: 0] += 1
+    let wantUpper = wantUpperFlag && s.delivery.enabled && s.delivery.numberScan
     lock.unlock()
 
     // 在回呼內就把畫面縮成小灰階圖，不把 ReplayKit 的 pixel buffer 帶到別的執行緒
@@ -631,10 +657,21 @@ final class BroadcastDetector {
       lock.unlock()
       return
     }
+    // v1.1：綁號中/送達畫面 → 同一幀另切上方一段（單號問句「(#7318) 是否已送達?」在上半部）；真的要用才 OCR
+    var upper: GrayFrame?
+    if wantUpper {
+      autoreleasepool {
+        upper = GrayFrame.make(
+          sampleBuffer, bottomFraction: s.bottomFraction, maxLongEdge: s.maxLongEdge,
+          band: (top: s.delivery.numberScanTop, bottom: s.delivery.numberScanBottom)
+        ).0
+      }
+    }
+    let upperFrame = upper  // 逃逸閉包只帶 let（同 frame）
 
     workQueue.async {
       autoreleasepool {
-        self.runOCR(frame, why: why)
+        self.runOCR(frame, upper: upperFrame, why: why)
       }
       self.lock.lock()
       self.busy = false
@@ -642,7 +679,7 @@ final class BroadcastDetector {
     }
   }
 
-  private func runOCR(_ frame: GrayFrame, why: String) {
+  private func runOCR(_ frame: GrayFrame, upper: GrayFrame?, why: String) {
     // OCR 原文只活在這個函式內：立刻轉成結構化摘要（ScreenInfo），之後只用摘要（隱私鐵律：原文不上傳、不保存）
     let s = currentSettings()
     // v0.7 記憶體保護：目前已偏高就跳過這一幀（Vision 辨識當下會再往上衝十幾 MB；jetsam 約 50MB）
@@ -665,15 +702,18 @@ final class BroadcastDetector {
     let info: ScreenInfo.Summary
     // v0.9：畫面上有沒有 pandarider（特徵詞或接單鈕）；原文同樣不離開這裡
     var panda = false
+    // v1.1：單號摘要（號碼只在記憶體，不上傳）
+    var scan = OrderNumbers.Scan.empty
     do {
       guard let image = frame.cgImage() else {
         ocrErrors += 1
         return
       }
       let ocrText = try ocr.recognize(image, orientation: frame.orientation)
-      let analyzed = ScreenInfo.analyzeWithPresence(ocrText, rules: s.rules, awayKeywords: s.away.keywords)
+      let analyzed = OrderNumbers.analyze(ocrText, rules: s.rules, awayKeywords: s.away.keywords, delivery: s.delivery)
       info = analyzed.summary
       panda = analyzed.panda
+      scan = analyzed.scan
     } catch {
       ocrErrors += 1
       return
@@ -701,15 +741,52 @@ final class BroadcastDetector {
 
     // v0.7：邀請狀態機（不再「看到邀請就送訊號」；接單判定見 OfferTracker.swift）
     handleOffer(tracker.observe(Date(), OfferObservation(info)), info: info)
+    // v1.1 單號：需要時 OCR 上方補掃 → 接單後畫面綁號
+    let now = Date()
+    let bindable = !info.accept && !scan.dialog && !info.deliveredFinal && info.offerAccepted
+    if s.delivery.enabled, let up = upper {
+      let needDialogNo = scan.dialog && scan.dialogNo == nil && !watch.knowsNumber
+      let needBind = bindable && book.pendingBind(now) && (lastUpperAt.map { now.timeIntervalSince($0) >= 2 } ?? true)
+      // 對話框顯示中、下半部卻沒看到 → 上半部的問句也不在才算消失
+      let needConfirm = watch.active && !scan.dialog && s.delivery.mode != "appear"
+      if (needDialogNo || needBind || needConfirm) && !highMem && currentMB <= s.ocrGuard.memSkipMB, let image = up.cgImage() {
+        lastUpperAt = now
+        upperScans += 1
+        // 上方補掃的原文同樣只在這裡轉成號碼摘要（不保存、不上傳）
+        if let upperText = try? ocr.recognize(image, orientation: up.orientation) {
+          scan = OrderNumbers.merge(
+            scan,
+            OrderNumbers.scan(upperText, dialogPattern: s.delivery.dialogKeywords, finalPattern: s.delivery.finalKeywords))
+        }
+      }
+    }
+    book.see(now, scan.numbers)
+    if bindable, !scan.dialog, book.pendingBind(now), let b = book.bind(now, scan.numbers) {
+      telemetry.log("bind", ["seq": b.seq % PandaSignal.seqMod, "wait": b.waitSec, "note": "bound", "screen": info.screen])
+    }
+    if scan.dialog, let n = scan.dialogNo { lastDialogNo = (no: n, at: now) }
     // v0.7 自動送達（邊緣觸發＋60 秒不重送；v0.8 訂單完成優先、對話框待定；App 端挑單/互斥見 DetectorHub.AutoDelivery）
+    // v1.1 預設 disappear：對話框/按鈕消失才送（DeliveryWatch）；appear＝v0.8 行為
     if s.delivery.enabled {
-      handleDelivery(deliveryEdge.observe(Date(), hit: info.delivered, final: info.deliveredFinal), info: info)
+      if s.delivery.mode == "appear" {
+        handleDelivery(deliveryEdge.observe(Date(), hit: info.delivered, final: info.deliveredFinal), info: info)
+      } else {
+        handleWatch(
+          watch.observe(
+            now, dialog: scan.dialog, final: info.deliveredFinal || scan.finalHit, panda: panda, dialogNo: scan.dialogNo,
+            changed: why != "force", numbers: scan.numbers),
+          info: info)
+      }
     }
     scheduleDecisionTimer()
     // v0.8：疑似邀請（接單鈕/判定中/綠色 hold）的快速間隔在取樣時決定；這裡只決定一般/閒置
-    // v0.9：away 判定（邀請判定中、送達待定中都算在 pandarider）
-    let busyWithOffer = tracker.isActive || deliveryEdge.deadline != nil
+    // v0.9：away 判定（邀請判定中、送達待定中都算在 pandarider）；v1.1 送達對話框顯示中也算
+    let busyWithOffer = tracker.isActive || deliveryEdge.deadline != nil || watch.active
+    // v1.1：下一次 OCR 要不要順便切上方小圖（綁號中、送達對話框/送達頁）
+    let wantUpper = book.pendingBind(now) || watch.active || scan.dialog || info.delivered
+      || info.kw.contains("送達") || info.kw.contains("無法聯繫")
     lock.lock()
+    wantUpperFlag = wantUpper
     idleFlag = missStreak >= s.idleAfterMisses
     lastSawAcceptFlag = info.accept
     offerActiveFlag = tracker.isActive
@@ -729,13 +806,9 @@ final class BroadcastDetector {
     }
     switch action {
     case .send(let delay, let why):
-      deliveredCount += 1
-      PandaSignal.postDeliveredDelay(delay)
-      PandaSignal.post(PandaSignal.delivered)
-      fields["note"] = "signal"
-      fields["reason"] = why
-      fields["delay"] = delay
-      telemetry.log("delivered_seen", fields, urgent: true)
+      // v1.1：appear 模式也用 60 秒內對話框上讀到的單號配對
+      let no = lastDialogNo.flatMap { Date().timeIntervalSince($0.at) < 60 ? $0.no : nil }
+      sendDelivered(delay: delay, why: why, no: no, fields: fields)
     case .pending:
       fields["note"] = "pending"
       telemetry.log("delivered_seen", fields)
@@ -747,13 +820,69 @@ final class BroadcastDetector {
     }
   }
 
+  /// v1.1 disappear 模式（只在 workQueue）：visible＝對話框/按鈕出現（只回報）；send＝消失（按了確認）/訂單完成
+  private func handleWatch(_ action: DeliveryWatch.Action?, info: ScreenInfo.Summary?) {
+    guard let action = action else { return }
+    var fields: [String: Any] = [:]
+    if let i = info {
+      fields["kw"] = i.kw
+      fields["screen"] = i.screen
+    }
+    switch action {
+    case .send(let delay, let why, let no):
+      sendDelivered(delay: delay, why: why, no: no, fields: fields)
+    case .visible:
+      fields["note"] = "visible"
+      fields["matched"] = watch.knowsNumber
+      telemetry.log("delivered_seen", fields)
+    case .repeatSuppressed:
+      fields["note"] = "repeat"
+      telemetry.log("delivered_seen", fields)
+    }
+  }
+
+  /// v1.1 送出送達（只在 workQueue）：先送延遲；單號對到接單 seq → delivered.seq.<槽>，否則 delivered（App 退回截止最早）。
+  /// 同一單號 1 小時內不重送。telemetry 只送 matched/result，**不送單號**
+  private func sendDelivered(delay: Int, why: String, no: String?, fields base: [String: Any]) {
+    var fields = base
+    let now = Date()
+    let resolution = book.resolve(now, no)
+    fields["reason"] = why
+    fields["delay"] = delay
+    if case .repeated = resolution {
+      fields["note"] = "repeatNo"
+      fields["matched"] = false
+      telemetry.log("delivered_seen", fields)
+      return
+    }
+    deliveredCount += 1
+    PandaSignal.postDeliveredDelay(delay)
+    switch resolution {
+    case .seq(let seq, _):
+      PandaSignal.postDeliveredSeq(seq)
+      book.markSent(now, no: no, seq: seq)
+      fields["matched"] = true
+      fields["result"] = "seq"
+      fields["seq"] = seq % PandaSignal.seqMod
+    case .plain(let reason):
+      PandaSignal.post(PandaSignal.delivered)
+      book.markSent(now, no: no, seq: nil)
+      fields["matched"] = false
+      fields["result"] = reason
+    case .repeated:
+      break
+    }
+    fields["note"] = "signal"
+    telemetry.log("delivered_seen", fields, urgent: true)
+  }
+
   // MARK: - v0.7 邀請 → 接單判定（只在 workQueue）
 
   /// deciding 的視窗到期／v0.8 送達待定到期：畫面靜止時 ReplayKit 不送幀、OCR 不會跑 → 另排計時器推進狀態機
   private func scheduleDecisionTimer() {
     decisionTimer?.cancel()
     decisionTimer = nil
-    let deadlines = [tracker.deadline, deliveryEdge.deadline].compactMap { $0 }
+    let deadlines = [tracker.deadline, deliveryEdge.deadline, watch.deadline].compactMap { $0 }
     guard let deadline = deadlines.min() else { return }
     let item = DispatchWorkItem { [weak self] in
       guard let self = self else { return }
@@ -761,6 +890,7 @@ final class BroadcastDetector {
       self.handleOffer(self.tracker.tick(Date()), info: nil)
       if self.currentSettings().delivery.enabled {
         self.handleDelivery(self.deliveryEdge.tick(Date()), info: nil)
+        self.handleWatch(self.watch.tick(Date()), info: nil)
       }
       self.lock.lock()
       self.offerActiveFlag = self.tracker.isActive
@@ -790,6 +920,14 @@ final class BroadcastDetector {
         // 已接的同一組（分鐘數, 金額）dedupeSeconds 內又出現（例：逾時判接單後切回來邀請還在）
         dupCount += 1
         telemetry.log("dup", ["min": minutes, "amt": amount ?? 0, "dups": dupCount])
+      case .suspect(let minutes):
+        // v1.1：分鐘太小＋同畫面有接單後字樣 → 疑似誤讀，不送 offer.pending
+        var fields: [String: Any] = ["min": minutes, "note": "suspect", "trig": lastWhy]
+        if let i = info {
+          fields["kw"] = i.kw
+          fields["screen"] = i.screen
+        }
+        telemetry.log("offer_suspect", fields)
       case .decided(let decision):
         decided(decision)
       }
@@ -834,6 +972,8 @@ final class BroadcastDetector {
     if stacked { PandaSignal.post(PandaSignal.offerStacked) }  // v0.8：先夾單、再延遲、最後 order
     PandaSignal.postAcceptDelay(delay)
     let sent = PandaSignal.postOrder(minutes, seq: seq)
+    // v1.1：App 收得到這個 seq 才記（之後畫面上的 #單號綁給它）
+    if sent { book.accepted(seq: seq, at: acceptedAt) }
     let text2 = diag()
     var orderFields: [String: Any] = [
       "min": minutes, "seq": seq % PandaSignal.seqMod, "triggers": triggerCount, "kw": d.kw, "accept": true,
@@ -928,6 +1068,7 @@ final class BroadcastDetector {
     ]
     if triggerCount > 0, let m = lastTriggerMinutes { parts.append("觸發\(triggerCount)(\(m)分)") }
     if deliveredCount > 0 { parts.append("送達\(deliveredCount)") }
+    if upperScans > 0 { parts.append("補掃\(upperScans)") }
     if memSkips > 0 { parts.append("記憶體跳\(memSkips)") }
     lock.lock()
     let away = awayTracker.away
@@ -1272,10 +1413,11 @@ struct GrayFrame {
   let pixels: Data
   let orientation: CGImagePropertyOrientation
 
-  /// 失敗時回傳 (nil, 不支援的像素格式或 nil)
-  static func make(_ sampleBuffer: CMSampleBuffer, bottomFraction: Double, maxLongEdge: Int)
-    -> (GrayFrame?, OSType?)
-  {
+  /// 失敗時回傳 (nil, 不支援的像素格式或 nil)。
+  /// v1.1 band（比例，由上往下）：另切畫面上的一段（補掃單號）；只在直立（.up）時切，其他方向回 nil（主 OCR 已是整張）
+  static func make(
+    _ sampleBuffer: CMSampleBuffer, bottomFraction: Double, maxLongEdge: Int, band: (top: Double, bottom: Double)? = nil
+  ) -> (GrayFrame?, OSType?) {
     guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return (nil, nil) }
     var orientation = CGImagePropertyOrientation.up
     if let raw = CMGetAttachment(
@@ -1315,8 +1457,17 @@ struct GrayFrame {
     let src = raw.assumingMemoryBound(to: UInt8.self)
 
     // 直立（.up）：新單資訊卡在下半 → 只取下方 bottomFraction 的列；其他方向不裁，方向交給 Vision
-    let y0 = orientation == .up ? Int(Double(height) * (1 - bottomFraction)) : 0
-    let cropH = height - y0
+    if band != nil && orientation != .up { return (nil, nil) }
+    let y0: Int
+    let y1: Int
+    if let b = band {
+      y0 = min(height - 1, max(0, Int(Double(height) * b.top)))
+      y1 = max(y0 + 1, min(height, Int(Double(height) * b.bottom)))
+    } else {
+      y0 = orientation == .up ? Int(Double(height) * (1 - bottomFraction)) : 0
+      y1 = height
+    }
+    let cropH = y1 - y0
     // 非整數倍縮小：長邊剛好 ≤maxLongEdge（整數倍時 1398 列只能縮成 466，字太小）。
     // 每個輸出像素＝對應來源矩形（2–3 px 見方）的平均（盒狀濾波，等同面積平均，字邊不會鋸齒化）。
     let longEdge = max(width, cropH)

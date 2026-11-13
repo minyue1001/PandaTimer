@@ -17,6 +17,8 @@ import Foundation
 //   v0.7 實機修正：「同一張」＝分鐘相同且（金額相同或任一方沒抓到金額）；offered 期間後來才抓到金額 → 補齊，不算新單。
 //   廣播停止 → offered 當未接、deciding 依 ambiguousAs (stopped)。
 //   v0.8 夾單：同一張邀請任一次 OCR 看到「夾單」（offer.stackedKeywords）→ offer.stacked=true（之後不會變回 false）。
+//   v1.1 OCR 誤讀防護：分鐘 < suspectBelowMinutes（3）且同畫面命中接單後字樣（offerAccepted）、又不是目前這張 →
+//     不當新邀請（.suspect，不送 pending），當成「有接單鈕但分鐘還讀不出來」。0＝關閉。
 
 /// 遠端設定 "offer" 區塊（預設＝src/offerTracker.ts 的 DEFAULT_OFFER＝server/config.default.json；範圍同 RANGES）
 struct OfferSettings {
@@ -33,6 +35,8 @@ struct OfferSettings {
   var rejectedKeywords = OfferSettings.defaultRejectedKeywords
   var ambiguousAs = "accept"
   var stackedKeywords = OfferSettings.defaultStackedKeywords
+  /// v1.1 分鐘數小於這個值又同時有接單後字樣 → 疑似誤讀（0＝關閉）
+  var suspectBelowMinutes = 3
 
   init() {}
 
@@ -44,6 +48,7 @@ struct OfferSettings {
     rejectedKeywords = RemoteConfig.offerRegex(o["rejectedKeywords"], rejectedKeywords)
     ambiguousAs = RemoteConfig.choice(o["ambiguousAs"], ["accept", "reject"], ambiguousAs)
     stackedKeywords = RemoteConfig.offerRegex(o["stackedKeywords"], stackedKeywords)
+    suspectBelowMinutes = RemoteConfig.int(o["suspectBelowMinutes"], 0, 10, suspectBelowMinutes)
   }
 }
 
@@ -101,6 +106,8 @@ enum OfferEvent {
   case resumed(Offer, awaySec: Double)
   case dup(minutes: Int, amount: Double?)
   case decided(OfferDecision)
+  /// v1.1 疑似誤讀的邀請（不送 pending）
+  case suspect(minutes: Int)
 }
 
 final class OfferTracker {
@@ -163,7 +170,18 @@ final class OfferTracker {
     let s = settings
     if o.accept {
       idleMisses = 0
-      guard let minutes = o.minutes else {
+      let current: Offer?
+      switch state {
+      case .offered(let offer, _, _): current = offer
+      case .deciding(let offer, _, _): current = offer
+      case .idle: current = nil
+      }
+      var suspect = false
+      if let m = o.minutes, s.suspectBelowMinutes > 0, m < s.suspectBelowMinutes, o.offerAccepted {
+        suspect = !(current.map { Self.same($0.minutes, $0.amount, m, o.amount) } ?? false)
+      }
+      if suspect, let m = o.minutes { out.append(.suspect(minutes: m)) }
+      guard let minutes = o.minutes, !suspect else {
         // 有接單鈕但還挑不出分鐘數（動畫中）：offered 視為仍在畫面上；其他狀態等下一次 OCR
         if case .offered(let offer, _, _) = state {
           var seen = offer
@@ -171,7 +189,7 @@ final class OfferTracker {
           if o.stacked { seen.stacked = true }
           state = .offered(seen, misses: 0, firstMissAt: nil)
         }
-        return tick(now)
+        return out + tick(now)
       }
       switch state {
       case .offered(let offer, _, _):

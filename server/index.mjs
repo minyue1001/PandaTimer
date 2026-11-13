@@ -418,6 +418,8 @@ const FIELD_RULES = {
   dMB: N, green: N, trig: S, stacked: B, lockAge: N, locked: B,
   // v0.9 省電量測：電量%、充電中、溫度狀態 0~3、低電量模式；ext 每分鐘 OCR 次數/取樣次數/模式/away 秒數/省電倍率生效；app 動態島略過次數
   batt: N, charging: B, thermal: N, lowPower: B, ocrMin: N, probes: N, mode: S, awaySec: N, saver: B, cardSkip: N,
+  // v1.1：送達是否以單號配對到接單 seq（單號本身不上傳）、疊單種類 offer/carry
+  matched: B, stackKind: S,
 };
 const MAX_STR = 80;
 

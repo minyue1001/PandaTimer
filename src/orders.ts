@@ -21,8 +21,10 @@ export type Order = {
   notifIds?: string[];
   /** v0.4：'auto'＝螢幕廣播自動偵測開的單；v0.10 'confirm'＝未確認邀請按「有接」補開；v0.8 'import'＝deep link 匯入的補記單（其餘為手動/捷徑） */
   source?: 'auto' | 'import' | 'confirm' | 'admin';
-  /** v0.8：夾單（邀請畫面有「夾單」字樣，或匯入時標記） */
+  /** v0.8：夾單（邀請畫面有「夾單」字樣，或匯入時標記）；v1.1 也包含「疊單」（接單時手上已有其他進行中單） */
   stacked?: boolean;
+  /** v1.1 stacked 的來源：'offer'＝邀請畫面寫「夾單」；'carry'＝接單時已有其他進行中單（只存本機，不同步） */
+  stackKind?: 'offer' | 'carry';
   /** v0.8：匯入時帶的金額（元）與備註 */
   amount?: number;
   note?: string;

@@ -203,6 +203,15 @@ final class RemoteConfig {
     var completedKeywords = DeliverySettings.defaultCompletedKeywords
     var finalKeywords = DeliverySettings.defaultFinalKeywords
     var pendingSec = 30
+    /// v1.1：disappear＝對話框/按鈕消失才送（DeliveryWatch）；appear＝v0.8 出現就送（DeliveryEdge）
+    static let defaultDialogKeywords = "是否已送達|是否已送达|確認已送達|确认已送达"
+    var mode = "disappear"
+    var dialogKeywords = DeliverySettings.defaultDialogKeywords
+    /// v1.1：需要單號時另 OCR 畫面上方 numberScanTop~numberScanBottom（比例，由上往下）；接單後 bindWindowSec 秒內的新號碼可綁定
+    var numberScan = true
+    var numberScanTop = 0.05
+    var numberScanBottom = 0.6
+    var bindWindowSec = 300
   }
 
   static func delivery(_ root: [String: Any]) -> DeliverySettings {
@@ -213,6 +222,16 @@ final class RemoteConfig {
     out.completedKeywords = offerRegex(d["completedKeywords"], out.completedKeywords)
     out.finalKeywords = offerRegex(d["finalKeywords"], out.finalKeywords)
     out.pendingSec = int(d["pendingSec"], 0, 60, out.pendingSec)
+    out.mode = choice(d["mode"], ["disappear", "appear"], out.mode)
+    out.dialogKeywords = offerRegex(d["dialogKeywords"], out.dialogKeywords)
+    out.numberScan = bool(d["numberScan"], out.numberScan)
+    let top = number(d["numberScanTop"], 0, 0.9, out.numberScanTop)
+    let bottom = number(d["numberScanBottom"], 0.1, 1, out.numberScanBottom)
+    if top < bottom {
+      out.numberScanTop = top
+      out.numberScanBottom = bottom
+    }
+    out.bindWindowSec = int(d["bindWindowSec"], 30, 3600, out.bindWindowSec)
     return out
   }
 

@@ -52,6 +52,15 @@ import UserNotifications
 //   - extension 心跳後送 ext.mode.<away|normal>、ext.mem.<MB>、ext.peak.<MB>（0…80）→ statusJSON 帶 extMode/memMB/peakMB/extAt，
 //     加上 App 自己的 lowPower/thermal/saver/batt/charging（首頁膠囊「省電中」、設定頁診斷）。
 //   註冊：579＋3（cleared 原因）＋2＋81＋81＝746 個（< 1000）。
+// v1.1 以單號配對送達（extension 規則見 targets/broadcast/OrderNumbers.swift；App 規則＝src/detector.ts slotsAfterOrder/slotTarget、
+//   src/deliveryDetector.ts pickDeliveredOrder(matchedId)）：
+//   - 收到 order.<分>.<槽> → 記「槽 → 訂單 id」（seqOrders，UserDefaults 保存；漏掉的槽清掉；started 全清）。
+//   - com.pandatimer.delivered.seq.<槽>（在 delivered.delay 之後）→ 只結那張（不看 minOrderAge/手動互斥）；那張已不在進行中 →
+//     不結（matchedGone，不退回挑別張）；槽沒有對應 → 退回截止最早。telemetry delivered 帶 matched。
+//   - 疊單：接單時鏡像裡已有進行中單 → stacked＋stackKind "carry"（夾單字樣＝"offer"）。
+//   - 邀請動態島回讀：update 後**同一個 Activity 物件的 content 不會立刻變**（v1.0 一律 ✗ state:active 的原因；order 的 verifyCard
+//     是 1 秒後重新查才 ✓）→ 改成 0.25 秒一次重新查、最多 1.5 秒；期間 App 已收到結果（接單/未接）→ "-"＋islandErr resolved。
+//   註冊：746＋4（delivered.seq）＝750 個（< 1000）。
 final class DetectorHub {
   static let shared = DetectorHub()
 
@@ -83,6 +92,11 @@ final class DetectorHub {
   static let offerStackedName = "com.pandatimer.offer.stacked"
   static let deliveredDelayPrefix = "com.pandatimer.delivered.delay."
   static let maxDeliveredDelay = 60
+  /// v1.1：送達對到接單槽（＝src/detector.ts DELIVERED_SEQ_PREFIX）
+  static let deliveredSeqPrefix = "com.pandatimer.delivered.seq."
+  /// v1.1：「槽 → 訂單 id」保存鍵、有效時間（＝src/detector.ts SLOT_KEEP_MS）
+  static let seqOrdersKey = "pandatimer.native.seqOrders.v1"
+  static let seqKeepSeconds: TimeInterval = 4 * 3600
   /// 「偵測停止了」通知最短間隔（秒）＝src/detector.ts STOP_NOTICE_REPEAT_SEC
   static let stopNoticeRepeatSeconds: TimeInterval = 60
   /// 通知 userInfo 的 pandatimer 值：點了 JS 自動叫出廣播視窗（＝src/detector.ts REDETECT_TAG）
@@ -101,6 +115,7 @@ final class DetectorHub {
     case delivered
     case offerStacked
     case deliveredDelay(Int)
+    case deliveredSeq(Int)
     case extMode(away: Bool)
     case extMem(Int)
     case extPeak(Int)
@@ -136,6 +151,9 @@ final class DetectorHub {
     }
     if name.hasPrefix(extPeakPrefix) {
       return plainInt(String(name.dropFirst(extPeakPrefix.count)), 0, maxExtMB).map { Signal.extPeak($0) }
+    }
+    if name.hasPrefix(deliveredSeqPrefix) {
+      return plainInt(String(name.dropFirst(deliveredSeqPrefix.count)), 0, seqMod - 1).map { Signal.deliveredSeq($0) }
     }
     if name.hasPrefix(deliveredDelayPrefix) {
       return plainInt(String(name.dropFirst(deliveredDelayPrefix.count)), 0, maxDeliveredDelay).map {
@@ -177,6 +195,7 @@ final class DetectorHub {
     names.append(extModeNormalName)
     for m in 0...maxExtMB { names.append("\(extMemPrefix)\(m)") }
     for m in 0...maxExtMB { names.append("\(extPeakPrefix)\(m)") }
+    for s in 0..<seqMod { names.append("\(deliveredSeqPrefix)\(s)") }
     return names
   }
 
@@ -241,6 +260,8 @@ final class DetectorHub {
   private var extMemMB: Int?
   private var extPeakMB: Int?
   private var extAt: Date?
+  /// v1.1：order 訊號的槽 → 自動單 id（delivered.seq.<槽> 用）；nil＝還沒從 UserDefaults 載入
+  private var seqOrders: [Int: (id: String, at: Date)]?
 
   // MARK: - 對外（由 LiveActivityModule 呼叫）
 
@@ -476,6 +497,7 @@ final class DetectorHub {
       lastBeat = now
       beatAlerted = false
       lastSeq = nil  // extension 每次開始序號從 0 算
+      setSeqOrders([:])  // v1.1：槽 → 訂單的對應跟著作廢
       stoppedUnexpectedAt = nil
       clearOffer()
       if !armed {
@@ -560,7 +582,9 @@ final class DetectorHub {
     case .deliveredDelay(let seconds):
       pendingDeliveredDelay = (seconds: seconds, at: now)
     case .delivered:
-      handleDelivered(at: now)
+      handleDelivered(at: now, slot: nil)
+    case .deliveredSeq(let slot):
+      handleDelivered(at: now, slot: slot)
     case .extMode(let away):
       extAway = away
       extAt = now
@@ -645,19 +669,40 @@ final class DetectorHub {
         body: LocalizedStringResource(stringLiteral: counting ? Self.offerAlertBodyCounting : Self.offerAlertBody),
         sound: sound)
       await card.update(ActivityContent(state: state, staleDate: staleDate), alertConfiguration: alert)
-      let shown = card.content.state.offerAt.map { abs($0.timeIntervalSince(at)) < 1 } ?? false
-      let ok = card.activityState == .active && shown
-      self.queue.async {
-        self.lastCardPushAt = Date()
-        var fields = baseFields
-        fields["note"] = "offerIsland"
-        fields["min"] = minutes
-        fields["island"] = ok ? "✓" : "✗"
-        if !ok { fields["islandErr"] = "state:\(card.activityState)" }
-        if counting { fields["orders"] = DetectorCardPlan.items(cardId: card.id).count }
-        self.telemetry.log("sig", fields)
+      self.queue.async { self.lastCardPushAt = Date() }
+      let cardId = card.id
+      let orders = counting ? DetectorCardPlan.items(cardId: cardId).count : nil
+      // v1.1：update 後同一個物件的 content 不會立刻變（v1.0 一律 ✗）→ 另開 Task 每 0.25 秒重新查（不擋住卡片串行鏈）
+      Task {
+        let check = await Self.verifyOffer(cardId: cardId, at: at) { self.queue.sync { self.offerShownAt == at } }
+        self.queue.async {
+          var fields = baseFields.merging(check) { $1 }
+          fields["note"] = "offerIsland"
+          fields["min"] = minutes
+          if let n = orders { fields["orders"] = n }
+          self.telemetry.log("sig", fields)
+        }
       }
     }
+  }
+
+  /// v1.1 邀請顯示回讀：每 0.25 秒重新查卡（最多 1.5 秒）。卡上 offerAt＝這次偵測 → ✓；
+  /// 期間 App 已收到結果（still() 為 false：接單/未接/逾時清掉）→ "-"＋resolved；卡沒了/結束 → ✗；時間到 → ✗ notShown
+  static func verifyOffer(cardId: String, at: Date, still: @escaping () -> Bool) async -> [String: Any] {
+    var waited = 0.0
+    while waited < 1.5 {
+      try? await Task.sleep(nanoseconds: 250_000_000)
+      waited += 0.25
+      guard let a = Activity<PandaTimerAttributes>.activities.first(where: { $0.id == cardId }) else {
+        return ["island": "✗", "islandErr": "cardGone"]
+      }
+      if a.content.state.offerAt.map({ abs($0.timeIntervalSince(at)) < 1 }) ?? false {
+        return ["island": "✓", "wait": waited]
+      }
+      if a.activityState != .active { return ["island": "✗", "islandErr": "state:\(a.activityState)"] }
+      if !still() { return ["island": "-", "islandErr": "resolved", "wait": waited] }
+    }
+    return ["island": "✗", "islandErr": "notShown"]
   }
 
   /// 清掉卡上的邀請：mode "offer" → standby（倒數中只清邀請欄位）。match 非 nil → 只清偵測時間相同的那張
@@ -711,10 +756,58 @@ final class DetectorHub {
     return nil
   }
 
+  // MARK: - v1.1 槽 → 訂單 id（只在 queue 上；規則＝src/detector.ts slotsAfterOrder / slotTarget）
+
+  private func loadSeqOrders() -> [Int: (id: String, at: Date)] {
+    if let cached = seqOrders { return cached }
+    var out: [Int: (id: String, at: Date)] = [:]
+    if let dict = UserDefaults.standard.dictionary(forKey: Self.seqOrdersKey) {
+      for (k, v) in dict {
+        guard let slot = Int(k), slot >= 0, slot < Self.seqMod, let e = v as? [String: Any],
+              let id = e["id"] as? String, let at = (e["at"] as? NSNumber)?.doubleValue
+        else { continue }
+        out[slot] = (id: id, at: Date(timeIntervalSince1970: at / 1000))
+      }
+    }
+    seqOrders = out
+    return out
+  }
+
+  private func setSeqOrders(_ map: [Int: (id: String, at: Date)]) {
+    seqOrders = map
+    var dict: [String: Any] = [:]
+    for (slot, e) in map { dict[String(slot)] = ["id": e.id, "at": Self.ms(e.at)] }
+    UserDefaults.standard.set(dict, forKey: Self.seqOrdersKey)
+  }
+
+  /// 收到 order：漏掉的槽（gap）清掉、這個槽指向新單
+  private func noteSeqOrder(slot: Int, gap: Int, id: String, at: Date) {
+    var map = loadSeqOrders()
+    if gap > 0 {
+      for i in 1...min(gap, Self.seqMod - 1) { map.removeValue(forKey: (slot - i + Self.seqMod * 2) % Self.seqMod) }
+    }
+    map[slot] = (id: id, at: at)
+    setSeqOrders(map)
+  }
+
+  private func seqTarget(_ slot: Int, now: Date) -> String? {
+    guard let e = loadSeqOrders()[slot], now.timeIntervalSince(e.at) < Self.seqKeepSeconds else { return nil }
+    return e.id
+  }
+
   /// v0.7 自動送達（規則＝src/deliveryDetector.ts 的 pickDeliveredOrder）；v0.8 實際時間＝收到 − 延遲訊號
-  private func handleDelivered(at received: Date) {
+  /// v1.1 slot 非 nil＝delivered.seq.<槽>：槽對到的單 → 只結那張（matched）；對不到 → 原邏輯
+  private func handleDelivered(at received: Date, slot: Int?) {
     let settings = RemoteConfig.delivery(remote.snapshot())
-    let baseFields = appFields()
+    var baseFields = appFields()
+    let matchedId = slot.flatMap { seqTarget($0, now: received) }
+    baseFields["matched"] = matchedId != nil
+    if let s = slot { baseFields["seq"] = s }
+    if let s = slot, matchedId != nil {
+      var map = loadSeqOrders()
+      map.removeValue(forKey: s)
+      setSeqOrders(map)
+    }
     let paired = takeDeliveredDelay(near: received)
     Task {
       // 延遲訊號應該先到；沒到就再等最多 1 秒（Darwin 通知偶爾亂序）
@@ -727,7 +820,7 @@ final class DetectorHub {
       }
       let usedDelay = delay
       let now = received.addingTimeInterval(-Double(usedDelay ?? 0))
-      let outcome = AutoDelivery.finish(settings: settings, at: now, receivedAt: received)
+      let outcome = AutoDelivery.finish(settings: settings, at: now, receivedAt: received, matchedId: matchedId)
       guard case .finished(let order) = outcome else {
         if case .skipped(let reason) = outcome {
           self.queue.async {
@@ -754,9 +847,10 @@ final class DetectorHub {
         self.telemetry.log("delivered", fields, urgent: true)
         self.lastOrderHow = "已自動記錄送達：實際 \(actualText) 分／預估 \(order.estimateMin) 分"
       }
+      let how = matchedId != nil ? "依送達畫面的單號結對應那單" : "結截止最早那單"
       await DetectorNotify.post(
         title: "已自動記錄送達：實際 \(actualText) 分／預估 \(order.estimateMin) 分",
-        body: "看到送達/訂單完成畫面自動結單（送達時間 \(Self.hms(now))，結截止最早那單）。記錯了可在 App 最近紀錄查看",
+        body: "按下確認已送達後自動結單（送達時間 \(Self.hms(now))，\(how)）。記錯了可在 App 最近紀錄查看",
         passive: true)
     }
   }
@@ -798,6 +892,8 @@ final class DetectorHub {
     let diag = diagText(note: "自動新單 \(minutes) 分")
     let orderId = "\(Int64(Self.ms(now)))-a\(UUID().uuidString.prefix(4).lowercased())"
     let baseFields = appFields()
+    // v1.1：槽 → 這張單（送達對話框的單號對到這個槽時結它）
+    noteSeqOrder(slot: seq, gap: gap, id: orderId, at: now)
 
     Task {
       // App 曾被暫停 → 用 extension 那則「偵測到新單」通知裡的偵測時間（找不到就用收到訊號的時間）
@@ -841,8 +937,14 @@ final class DetectorHub {
         "notifIds": notifIds,
         "source": "auto",
       ]
-      let isStacked = stacked
-      if isStacked { order["stacked"] = true }
+      // v1.1 疊單：邀請寫「夾單」＝offer；接單時鏡像裡已有其他進行中單＝carry（統計「不含夾單」兩種都排除）
+      let othersActive = !NativeSync.readArray(NativeSync.activeKey).isEmpty
+      let stackKind: String? = stacked ? "offer" : (othersActive ? "carry" : nil)
+      let isStacked = stackKind != nil
+      if let k = stackKind {
+        order["stacked"] = true
+        order["stackKind"] = k
+      }
       let outcome = await Self.placeOrder(
         &order, minutes: minutes, acceptedAt: acceptedAt, deadline: deadline, beat: beat, diag: diag)
       let check = await Self.verifyCard(activityId: outcome.activityId, expect: outcome.expect)
@@ -859,13 +961,14 @@ final class DetectorHub {
         fields["orders"] = outcome.count
         if let d = delayField { fields["delay"] = d }
         if isStacked { fields["stacked"] = true }
+        if let k = stackKind { fields["stackKind"] = k }
         if let err = outcome.requestError { fields["reason"] = err }
         self.telemetry.log("order", fields, urgent: true)
         self.emit(["type": "order", "minutes": minutes, "how": how, "check": check.text])
       }
       let gapNote = gap > 0 ? "\n⚠️ 中間有 \(gap) 則新單訊號遺失（App 可能被暫停）" : ""
       await DetectorNotify.post(
-        title: "App 已記錄自動新單：\(minutes) 分" + (isStacked ? "（夾單）" : "")
+        title: "App 已記錄自動新單：\(minutes) 分" + (stackKind == "offer" ? "（夾單）" : stackKind == "carry" ? "（疊單）" : "")
           + (outcome.count > 1 ? "（進行中 \(outcome.count) 單）" : ""),
         body: "\(check.text)\n\(how)\(gapNote)\n動態島沒變的話：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」",
         passive: true)
@@ -1606,13 +1709,21 @@ enum AutoDelivery {
 
   /// disabled / manualRecent / noActive / tooNew；否則結「接單超過 minOrderAgeSec 秒」裡**截止最早**的那張（v0.8；
   /// 同截止取較早接單），寫 done 事件（at＝實際送達時間 date；互斥時間用 receivedAt）
-  static func finish(settings: RemoteConfig.DeliverySettings, at date: Date, receivedAt: Date) -> Outcome {
+  /// v1.1 matchedId（delivered.seq 對到的單）：只結那張，不看 minOrderAgeSec/手動互斥；已不在進行中 → matchedGone（不退回挑別張）
+  static func finish(
+    settings: RemoteConfig.DeliverySettings, at date: Date, receivedAt: Date, matchedId: String? = nil
+  ) -> Outcome {
     guard settings.enabled else { return .skipped("disabled") }
     let defaults = UserDefaults.standard
     objc_sync_enter(defaults)
     defer { objc_sync_exit(defaults) }
     let nowMs = (receivedAt.timeIntervalSince1970 * 1000).rounded()
     let atMs = (date.timeIntervalSince1970 * 1000).rounded()
+    if let want = matchedId {
+      var active = NativeSync.readArray(NativeSync.activeKey)
+      guard let i = active.firstIndex(where: { ($0["id"] as? String) == want }) else { return .skipped("matchedGone") }
+      return .finished(remove(at: i, from: &active, atMs: atMs, nowMs: nowMs))
+    }
     if let manual = (defaults.object(forKey: lastManualKey) as? NSNumber)?.doubleValue,
        nowMs - manual < manualGraceSeconds * 1000
     {
@@ -1635,19 +1746,26 @@ enum AutoDelivery {
       }
     }
     guard let i = index else { return .skipped("tooNew") }
+    return .finished(remove(at: i, from: &active, atMs: atMs, nowMs: nowMs))
+  }
+
+  /// 呼叫端持 objc_sync(UserDefaults.standard)：鏡像移除該單、寫 done 事件、記自動結單時間
+  private static func remove(at i: Int, from active: inout [[String: Any]], atMs: Double, nowMs: Double) -> Finished {
     let item = active.remove(at: i)
     NativeSync.writeArray(active, NativeSync.activeKey)
+    let accepted = (item["acceptedAt"] as? NSNumber)?.doubleValue ?? atMs
     let order = Finished(
-      id: item["id"] as? String ?? "", acceptedAt: best,
+      id: item["id"] as? String ?? "", acceptedAt: accepted,
       estimateMin: (item["estimateMin"] as? NSNumber)?.intValue ?? 0,
       activityId: item["activityId"] as? String, notifIds: (item["notifIds"] as? [String]) ?? [])
-    var event: [String: Any] = ["type": "done", "at": max(atMs, best), "orderId": order.id]
+    var event: [String: Any] = ["type": "done", "at": max(atMs, accepted), "orderId": order.id]
     if let aid = order.activityId { event["activityId"] = aid }
     var events = NativeSync.readArray(NativeSync.eventsKey)
     events.append(event)
     NativeSync.writeArray(events, NativeSync.eventsKey)
+    let defaults = UserDefaults.standard
     defaults.set(nowMs, forKey: lastAutoKey)
-    return .finished(order)
+    return order
   }
 }
 

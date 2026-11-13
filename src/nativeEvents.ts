@@ -19,8 +19,9 @@ export type NativeStartEvent = {
   activityId?: string;
   notifIds?: string[];
   source?: 'auto';
-  /** v0.8 夾單（DetectorHub 配對 com.pandatimer.offer.stacked） */
+  /** v0.8 夾單（DetectorHub 配對 com.pandatimer.offer.stacked）；v1.1 原生也會標疊單（stackKind 'carry'） */
   stacked?: boolean;
+  stackKind?: 'offer' | 'carry';
 };
 export type NativeDoneEvent = { type: 'done'; at: number; orderId?: string; activityId?: string };
 export type NativeEvent = NativeStartEvent | NativeDoneEvent;
@@ -46,6 +47,7 @@ export function parseNativeEvents(raw: unknown): NativeEvent[] {
         notifIds: Array.isArray(r.notifIds) ? r.notifIds.filter(isStr) : [],
         ...(r.source === 'auto' ? { source: 'auto' as const } : {}),
         ...(r.stacked === true ? { stacked: true } : {}),
+        ...(r.stackKind === 'offer' || r.stackKind === 'carry' ? { stackKind: r.stackKind } : {}),
       });
     } else if (r.type === 'done' && isNum(r.at)) {
       out.push({
@@ -75,12 +77,25 @@ function earliestDeadlineOnCard(list: Order[], activityId: string): Order | unde
   return best;
 }
 
+/**
+ * v1.1 疊單標記：接單時已有其他進行中單 → stacked:true＋stackKind 'carry'；邀請寫「夾單」→ 'offer'（優先）。
+ * 統計「不含夾單」兩種都排除。
+ */
+export function stackMark(
+  explicit: { stacked?: boolean; stackKind?: 'offer' | 'carry' },
+  othersActive: boolean,
+): { stacked?: true; stackKind?: 'offer' | 'carry' } {
+  if (explicit.stacked) return { stacked: true, stackKind: explicit.stackKind ?? 'offer' };
+  return othersActive ? { stacked: true, stackKind: 'carry' } : {};
+}
+
 /** 依序套用事件；回傳新陣列（新單放最前面，與 startOrder 一致） */
 export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order[] {
   let list = orders.slice();
   for (const ev of events) {
     if (ev.type === 'start') {
       if (list.some((o) => o.id === ev.id)) continue; // 重複事件
+      const othersActive = list.some((o) => o.status === 'active');
       list = [
         {
           id: ev.id,
@@ -92,7 +107,7 @@ export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order
           activityId: ev.activityId,
           notifIds: ev.notifIds ?? [],
           ...(ev.source ? { source: ev.source } : {}),
-          ...(ev.stacked ? { stacked: true } : {}),
+          ...stackMark(ev, othersActive),
         },
         ...list,
       ];

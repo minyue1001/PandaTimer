@@ -59,10 +59,10 @@ test('parseSignalName：狀態訊號與垃圾', () => {
   assert.equal(parseSignalName(5), null);
 });
 
-test('allSignalNames：v1.0 共 746 個（< 1000）、每個都解析得回來、無重複', () => {
+test('allSignalNames：v1.1 共 750 個（< 1000）、每個都解析得回來、無重複', () => {
   const names = allSignalNames();
-  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1 + 1 + 61 + 3 + 2 + 81 + 81);
-  assert.equal(names.length, 746);
+  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1 + 1 + 61 + 3 + 2 + 81 + 81 + 4);
+  assert.equal(names.length, 750);
   assert.ok(names.length < 1000);
   assert.equal(new Set(names).size, names.length);
   for (const n of names) assert.notEqual(parseSignalName(n), null, n);
@@ -163,7 +163,7 @@ test('v0.6：app.json 背景模式／定位說明／runtimeVersion 與 OtaBox �
   assert.deepEqual([...plist.UIBackgroundModes].sort(), ['audio', 'location']);
   assert.ok(plist.NSLocationWhenInUseUsageDescription.length > 5);
   assert.ok(plist.NSLocationAlwaysAndWhenInUseUsageDescription.length > 5);
-  assert.equal(app.runtimeVersion, '1.0');
+  assert.equal(app.runtimeVersion, '1.1');
   assert.equal(app.userInterfaceStyle, 'dark'); // v1.0：系統 Alert/鍵盤也是暗色
   // v0.6 遠端回報：寫入金鑰在 extra（進 App 可接受），網址 https；讀取金鑰絕不進 repo
   assert.match(app.extra.telemetryKey, /^[A-Za-z0-9_-]{32,}$/);
@@ -288,7 +288,7 @@ test('v0.8 Swift：新訊號名稱一致、送 order 前先送夾單與延遲、
   assert.ok(hub.includes('static let maxDeliveredDelay = 60'));
   for (const s of ['UIApplication.protectedDataWillBecomeUnavailableNotification', 'UIApplication.protectedDataDidBecomeAvailableNotification',
     'self.telemetry.log("lock"', 'self.telemetry.log("unlock"', 'static let stopNoticeRepeatSeconds: TimeInterval = 60',
-    'static let redetectTag = "redetect"', 'let unexpected = armed', 'if isStacked { order["stacked"] = true }']) {
+    'static let redetectTag = "redetect"', 'let unexpected = armed', 'let stackKind: String? = stacked ? "offer" : (othersActive ? "carry" : nil)']) {
     assert.ok(hub.includes(s), s);
   }
   for (const s of ['override func broadcastPaused() {\n    detector.paused()', 'override func broadcastResumed() {\n    detector.resumed()',

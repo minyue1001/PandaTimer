@@ -8,7 +8,7 @@ import { UI_KEYWORDS } from './screenInfo.ts';
 import { DEFAULT_OFFER, type OfferSettings } from './offerTracker.ts';
 import { DEFAULT_STATS, type StatsParams } from './stats.ts';
 import { DEFAULT_PAY, type PayParams } from './earnings.ts';
-import { DEFAULT_DELIVERY, type DeliverySettings } from './deliveryDetector.ts';
+import { DEFAULT_DELIVERY, DELIVERY_MODES, type DeliveryMode, type DeliverySettings } from './deliveryDetector.ts';
 import { DEFAULT_GREEN, type GreenTriggerSettings } from './frameTrigger.ts';
 import { DEFAULT_AWAY, DEFAULT_POWER, type AwaySettings, type PowerSettings } from './powerSaver.ts';
 import { ALERT_SOUNDS, DEFAULT_OFFER_ISLAND, type AlertSound, type OfferIslandSettings } from './offerIsland.ts';
@@ -152,12 +152,16 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'app.cardRefreshSeconds': [60, 1800, true],
   'offer.goneAfterMisses': [1, 20, true],
   'offer.decideWindowSec': [5, 60, true], // 延遲訊號只編 0~60 秒
+  'offer.suspectBelowMinutes': [0, 10, true], // v1.1 0＝關閉誤讀防護
   'stats.graceFactor': [1, 2, false],
   'stats.overrunCap': [0.1, 10, false],
   'pay.ratePerMinute': [0.1, 100, false],
   'pay.minFare': [0, 1000, false],
   'delivery.minOrderAgeSec': [0, 1800, true],
   'delivery.pendingSec': [0, 60, true], // 延遲訊號只編 0~60 秒
+  'delivery.numberScanTop': [0, 0.9, false], // v1.1 上方補掃範圍（比例，由上往下；交叉檢查 top < bottom）
+  'delivery.numberScanBottom': [0.1, 1, false],
+  'delivery.bindWindowSec': [30, 3600, true],
   'ocr.memSkipMB': [20, 60, false],
   'ocr.memHighMB': [25, 80, false],
   'ocr.rebuildEvery': [1, 1000, true],
@@ -172,7 +176,7 @@ export const RANGES: Record<string, [number, number, boolean]> = {
 /** 布林欄位 */
 const BOOL_FIELDS = new Set([
   'delivery.enabled', 'pay.assumeStarredLate', 'ocr.englishToo', 'detector.greenTrigger.enabled', 'away.enabled', 'power.onLowPower',
-  'offer.islandIndicator',
+  'offer.islandIndicator', 'delivery.numberScan',
 ]);
 
 /** 正則欄位：要編得過，且（需要的）至少 1 個捕捉群組 */
@@ -186,6 +190,7 @@ const REGEX_FIELDS: Record<string, { flags: string; groups: number }> = {
   'offer.stackedKeywords': { flags: '', groups: 0 },
   'delivery.completedKeywords': { flags: '', groups: 0 },
   'delivery.finalKeywords': { flags: '', groups: 0 },
+  'delivery.dialogKeywords': { flags: '', groups: 0 },
   'away.keywords': { flags: '', groups: 0 },
 };
 
@@ -226,6 +231,11 @@ export function validateConfig(raw: unknown): { config: RemoteConfig; problems: 
     out.picker.minAmount = DEFAULT_PICKER.minAmount;
     out.picker.maxAmount = DEFAULT_PICKER.maxAmount;
   }
+  if (out.delivery.numberScanTop >= out.delivery.numberScanBottom) {
+    problems.push('delivery.numberScanTop >= numberScanBottom → 兩個都用預設');
+    out.delivery.numberScanTop = DEFAULT_DELIVERY.numberScanTop;
+    out.delivery.numberScanBottom = DEFAULT_DELIVERY.numberScanBottom;
+  }
   return { config: out, problems };
 }
 
@@ -263,6 +273,9 @@ function checkFields(prefix: string, sec: Record<string, unknown>, target: Recor
       } else if (path === 'offer.alertSound') {
         if (ALERT_SOUNDS.includes(v as AlertSound)) target[key] = v;
         else problems.push(`${path} 要是 ${ALERT_SOUNDS.map((x) => `"${x}"`).join('/')} → 用預設`);
+      } else if (path === 'delivery.mode') {
+        if (DELIVERY_MODES.includes(v as DeliveryMode)) target[key] = v;
+        else problems.push(`${path} 要是 ${DELIVERY_MODES.map((x) => `"${x}"`).join('/')} → 用預設`);
       } else if (path === 'offer.ambiguousAs') {
         if (v === 'accept' || v === 'reject') target[key] = v;
         else problems.push(`${path} 要是 "accept" 或 "reject" → 用預設`);

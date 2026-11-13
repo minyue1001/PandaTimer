@@ -175,6 +175,8 @@ export function wireToOrder(w: WireOrder, local?: Order): Order {
     ...(local?.notifIds ? { notifIds: local.notifIds } : {}),
     ...(w.source !== 'manual' ? { source: w.source } : {}),
     ...(w.stacked ? { stacked: true } : {}),
+    // v1.1 stackKind 只存本機（伺服器只有 stacked）：仍標 stacked 就沿用本機的種類
+    ...(w.stacked && local?.stackKind ? { stackKind: local.stackKind } : {}),
     ...(w.amount != null ? { amount: w.amount } : {}),
     ...(w.note ? { note: w.note } : {}),
     updatedAt: w.updatedAt,

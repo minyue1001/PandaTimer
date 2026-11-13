@@ -4,7 +4,7 @@
     "slug": "panda-timer",
     "scheme": "pandatimer",
     "version": "1.0.0",
-    "runtimeVersion": "1.0",
+    "runtimeVersion": "1.1",
     "updates": {
       "url": "https://wheat.yueshengift.xyz/pandatimer/api/manifest",
       "enabled": true,

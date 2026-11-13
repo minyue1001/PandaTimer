@@ -17,6 +17,9 @@
 // v1.0：com.pandatimer.offer.cleared.<reject|timeout|stopped>（未接的原因；舊的不帶原因名稱仍註冊）、
 //   com.pandatimer.ext.mode.<away|normal>、com.pandatimer.ext.mem.<0-80>、com.pandatimer.ext.peak.<0-80>（extension 心跳後送，
 //   App 放進 detectorStatus）。註冊數量：579＋3＋2＋81＋81＝746 個（< 1000）。
+// v1.1：com.pandatimer.delivered.seq.<0-3>（送達對話框上的 #單號對到接單 seq → 槽＝seq mod 4，與 order 訊號一致；
+//   緊接在 delivered.delay 之後、取代 delivered）。order 改 mod 8 會變 90×8＝720 → 總數 1110 超過 1000，所以槽維持 mod 4
+//   （extension 在同槽已有更新的單時改送 delivered）。註冊數量：746＋4＝750 個。
 import type { Order } from './orders';
 
 export const ORDER_SIGNAL_PREFIX = 'com.pandatimer.order.';
@@ -44,6 +47,7 @@ export const EXT_MODE_NORMAL = 'com.pandatimer.ext.mode.normal';
 export const EXT_MEM_PREFIX = 'com.pandatimer.ext.mem.';
 export const EXT_PEAK_PREFIX = 'com.pandatimer.ext.peak.';
 export const MAX_EXT_MB = 80;
+export const DELIVERED_SEQ_PREFIX = 'com.pandatimer.delivered.seq.';
 /** Darwin 通知註冊上限（系統沒有明文，保守取 1000） */
 export const MAX_SIGNAL_NAMES = 1000;
 
@@ -55,7 +59,8 @@ export type DetectorSignal =
   | { kind: 'extMem' | 'extPeak'; mb: number }
   | { kind: 'offerPending'; minutes: number }
   | { kind: 'acceptDelay'; seconds: number }
-  | { kind: 'deliveredDelay'; seconds: number };
+  | { kind: 'deliveredDelay'; seconds: number }
+  | { kind: 'deliveredSeq'; slot: number };
 
 /** 純數字、無前導 0（"0" 本身可以）、1~2 位、在 lo…hi 之間（同 DetectorHub.plainInt） */
 function plainInt(text: string, lo: number, hi: number): number | null {
@@ -81,6 +86,12 @@ export function offerClearedName(reason: OfferClearReason): string {
 export function extMemName(mb: number, peak = false): string {
   const v = Number.isFinite(mb) ? Math.min(MAX_EXT_MB, Math.max(0, Math.round(mb))) : 0;
   return `${peak ? EXT_PEAK_PREFIX : EXT_MEM_PREFIX}${v}`;
+}
+
+/** v1.1 送達對到接單 seq → 名稱（槽＝seq mod 4） */
+export function deliveredSeqName(seq: number): string {
+  const s = ((Math.trunc(Number.isFinite(seq) ? seq : 0) % SIGNAL_SEQ_MOD) + SIGNAL_SEQ_MOD) % SIGNAL_SEQ_MOD;
+  return `${DELIVERED_SEQ_PREFIX}${s}`;
 }
 
 export function deliveredDelayName(seconds: number): string {
@@ -115,6 +126,10 @@ export function parseSignalName(name: unknown): DetectorSignal | null {
       const mb = plainInt(name.slice(prefix.length), 0, MAX_EXT_MB);
       return mb == null ? null : { kind, mb };
     }
+  }
+  if (name.startsWith(DELIVERED_SEQ_PREFIX)) {
+    const slot = plainInt(name.slice(DELIVERED_SEQ_PREFIX.length), 0, SIGNAL_SEQ_MOD - 1);
+    return slot == null ? null : { kind: 'deliveredSeq', slot };
   }
   if (name.startsWith(DELIVERED_DELAY_PREFIX)) {
     const seconds = plainInt(name.slice(DELIVERED_DELAY_PREFIX.length), 0, MAX_DELIVERED_DELAY);
@@ -153,6 +168,7 @@ export function allSignalNames(): string[] {
   names.push(EXT_MODE_AWAY, EXT_MODE_NORMAL);
   for (let m = 0; m <= MAX_EXT_MB; m++) names.push(`${EXT_MEM_PREFIX}${m}`);
   for (let m = 0; m <= MAX_EXT_MB; m++) names.push(`${EXT_PEAK_PREFIX}${m}`);
+  for (let s = 0; s < SIGNAL_SEQ_MOD; s++) names.push(`${DELIVERED_SEQ_PREFIX}${s}`);
   return names;
 }
 
@@ -200,6 +216,26 @@ export function restoreAcceptedAt(opts: {
   const d = opts.delay;
   if (d && Math.abs(d.at - opts.receivedAt) <= 2000) return opts.receivedAt - d.seconds * 1000;
   return opts.receivedAt;
+}
+
+/**
+ * v1.1 App 端「槽 → 訂單 id」（＝DetectorHub seqOrders）：收到 order.<分>.<槽> 記下；中間漏掉的槽（gap）先清掉
+ * （那些槽的新單 App 沒收到，舊對應已不可信）；broadcast.started → 全清（extension 序號從 0 重算）。時間：毫秒。
+ */
+export type SlotMap = Record<number, { id: string; at: number }>;
+export const SLOT_KEEP_MS = 4 * 3600_000;
+
+export function slotsAfterOrder(map: SlotMap, slot: number, gap: number, id: string, at: number): SlotMap {
+  const out: SlotMap = { ...map };
+  for (let i = 1; i <= Math.min(gap, SIGNAL_SEQ_MOD - 1); i++) delete out[(slot - i + SIGNAL_SEQ_MOD * 2) % SIGNAL_SEQ_MOD];
+  out[slot] = { id, at };
+  return out;
+}
+
+/** delivered.seq.<槽> → 訂單 id（太舊的不算）；沒有 → null（App 退回截止最早） */
+export function slotTarget(map: SlotMap, slot: number, now: number): string | null {
+  const e = map[slot];
+  return e && now - e.at < SLOT_KEEP_MS ? e.id : null;
 }
 
 /** 上一個序號 → 這次序號之間漏掉幾則（mod 4；第一則或不知道上一個 → 0） */

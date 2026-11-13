@@ -116,6 +116,9 @@ test('隱私：extension 的 OCR 原文只在 runOCR 內轉成摘要，telemetry
   // 原文只出現在「辨識 → ScreenInfo.analyze」兩行
   const uses = [...body.matchAll(/\bocrText\b/g)].length;
   assert.equal(uses, 2, 'ocrText 只能被宣告一次、交給 ScreenInfo.analyze 一次');
+  // v1.1 上方補掃的原文：宣告一次、交給 OrderNumbers.scan 一次（號碼只在記憶體）
+  assert.equal([...body.matchAll(/\bupperText\b/g)].length, 2);
+  assert.ok(body.includes('OrderNumbers.scan(upperText, dialogPattern: s.delivery.dialogKeywords, finalPattern: s.delivery.finalKeywords)'));
   for (const line of ext.split('\n').filter((l) => /telemetry\.log\(/.test(l))) {
     assert.ok(!/ocrText|recognize\(/.test(line), line);
   }

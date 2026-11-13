@@ -208,13 +208,13 @@ export function orderAmount(o: Pick<Order, 'amount' | 'estimateMin'>, p: PayPara
   return { value: fareFor(o.estimateMin, p), estimated: false };
 }
 
-/** 標籤：自動／匯入／夾單 */
-export function orderTags(o: Pick<Order, 'source' | 'stacked'>): string[] {
+/** 標籤：自動／匯入／夾單（v1.1 接單時已有進行中單＝疊單） */
+export function orderTags(o: Pick<Order, 'source' | 'stacked' | 'stackKind'>): string[] {
   const t: string[] = [];
   if (o.source === 'auto') t.push('自動');
   if (o.source === 'import') t.push('匯入');
   if (o.source === 'confirm') t.push('補認');
-  if (o.stacked) t.push('夾單');
+  if (o.stacked) t.push(o.stackKind === 'carry' ? '疊單' : '夾單');
   return t;
 }
 

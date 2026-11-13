@@ -16,6 +16,9 @@
 //   （v0.6 實機：第一次 OCR 金額沒抓到、25 秒後抓到 110.26 → 被當成兩單）。
 //   廣播停止 → offered 當未接、deciding 依 ambiguousAs (stopped)。
 //   v0.8 夾單：同一張邀請任一次 OCR 看到「夾單」（offer.stackedKeywords）→ offer.stacked=true（之後不會變回 false）。
+//   v1.1 OCR 誤讀防護（11/13 實機：新邀請滑入時畫面同時有取餐頁，分鐘讀成 1 → 送了 offer.pending.1）：
+//     分鐘 < suspectBelowMinutes（3）且同畫面命中接單後關鍵字（offerAccepted）→ 不當新邀請（suspect 事件，不送 pending），
+//     當成「有接單鈕但分鐘還讀不出來」（offered 仍算在畫面上）；是目前這張的同一張則照常。0＝關閉。
 import { amountKey } from './ocrPick.ts';
 import { DEFAULT_ACCEPTED_KEYWORDS, DEFAULT_REJECTED_KEYWORDS, DEFAULT_STACKED_KEYWORDS } from './screenInfo.ts';
 
@@ -29,6 +32,8 @@ export type OfferSettings = {
   ambiguousAs: Ambiguous;
   /** v0.8 邀請畫面上的夾單字樣（正則，去空白文字比對） */
   stackedKeywords: string;
+  /** v1.1 分鐘數小於這個值又同時有接單後字樣 → 疑似誤讀，不當新邀請（0＝關閉） */
+  suspectBelowMinutes: number;
 };
 
 export const DEFAULT_OFFER: Readonly<OfferSettings> = Object.freeze({
@@ -38,6 +43,7 @@ export const DEFAULT_OFFER: Readonly<OfferSettings> = Object.freeze({
   rejectedKeywords: DEFAULT_REJECTED_KEYWORDS,
   ambiguousAs: 'accept',
   stackedKeywords: DEFAULT_STACKED_KEYWORDS,
+  suspectBelowMinutes: 3,
 });
 
 /** 狀態機只吃這些（ScreenSummary 的子集合）；OCR 原文不進來 */
@@ -70,6 +76,8 @@ export type OfferEvent =
   | { type: 'seen'; offer: Offer }
   | { type: 'resumed'; offer: Offer; awaySec: number }
   | { type: 'dup'; minutes: number; amount: number | null }
+  /** v1.1 疑似誤讀的邀請（分鐘太小＋同畫面有接單後字樣）：不送 pending */
+  | { type: 'suspect'; minutes: number }
   | {
       type: 'decided';
       offer: Offer;
@@ -140,7 +148,12 @@ export class OfferTracker {
     if (o.accept) {
       this.idleMisses = 0;
       const st = this.state;
-      if (o.minutes == null) {
+      const current = st.kind === 'idle' ? null : st.offer;
+      const suspect =
+        o.minutes != null && s.suspectBelowMinutes > 0 && o.minutes < s.suspectBelowMinutes && o.offerAccepted &&
+        !(current && sameOffer(current.minutes, current.amount, o.minutes, o.amount));
+      if (suspect) out.push({ type: 'suspect', minutes: o.minutes as number });
+      if (o.minutes == null || suspect) {
         // 有接單鈕但還挑不出分鐘數（動畫中）：offered 視為仍在畫面上；其他狀態等下一次 OCR
         if (st.kind === 'offered') {
           st.offer.lastSeen = now;
@@ -150,7 +163,7 @@ export class OfferTracker {
         }
         return out.concat(this.tick(now));
       }
-      const minutes = o.minutes;
+      const minutes = o.minutes as number;
       const same = (x: { minutes: number; amount: number | null }) => sameOffer(x.minutes, x.amount, minutes, o.amount);
       if (st.kind === 'offered') {
         if (same(st.offer)) {

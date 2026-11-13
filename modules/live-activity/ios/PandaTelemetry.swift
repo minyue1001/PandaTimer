@@ -39,6 +39,8 @@ final class PandaTelemetry {
     // v0.9 省電量測：電量%/充電中/溫度狀態 0~3/低電量模式；ext 每分鐘 OCR 次數、取樣次數、模式 normal|away、
     //   本心跳區間 away 秒數、省電倍率生效中；app 心跳的動態島 update 略過次數
     "batt", "charging", "thermal", "lowPower", "ocrMin", "probes", "mode", "awaySec", "saver", "cardSkip",
+    // v1.1 送達有沒有以單號配對到接單（單號本身不上傳）、疊單種類 offer/carry
+    "matched", "stackKind",
   ]
 
   private let endpoint: URL?

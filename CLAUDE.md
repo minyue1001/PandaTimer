@@ -2,7 +2,7 @@
 
 foodpanda 外送員自用 iPhone App：接單時在動態島／鎖定畫面（Live Activity）顯示「預估送達」倒數，截止前 3 分與截止時本地通知，記錄每單預估/實際時間並算今日準時率、平均超出比例（foodpanda 超時率近似）。
 Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號** → GitHub Actions 編未簽章 .ipa → 免費 Apple ID 重簽側載到 iPhone 14 Pro Max（iOS 26）。
-**現況**：SideStore 被 Apple 擋（-80045）→ Windows **Sideloadly** USB 簽裝。CI 約 7 分鐘，取 IPA 一律 `bash scripts/fetch-ipa.sh [run-id]`（只留 `C:\Users\minyue\Downloads\PandaTimer\`、舊版自動刪、檔名 `PandaTimer-v<rv>-<sha7>.ipa`）。實機史：v0.3 extension 內 ActivityKit 不可用；v0.4 音訊保活下背景 update 無效；v0.5 定位保活可 update（要關螢幕再開才重繪）、只抓到第一單；v0.6 多單/遠端設定；v0.7 首日見下節；v0.8（runtime 0.8）已裝實機；v0.9（runtime 0.9：省電）。**v1.0（runtime 1.0：偵測到邀請當下動態島顯示，見「v1.0」節）寫好，尚未 CI/實機驗收**。
+**現況**：SideStore 被 Apple 擋（-80045）→ Windows **Sideloadly** USB 簽裝。CI 約 7 分鐘，取 IPA 一律 `bash scripts/fetch-ipa.sh [run-id]`（只留 `C:\Users\minyue\Downloads\PandaTimer\`、舊版自動刪、檔名 `PandaTimer-v<rv>-<sha7>.ipa`）。實機史：v0.3 extension 內 ActivityKit 不可用；v0.4 音訊保活下背景 update 無效；v0.5 定位保活可 update（要關螢幕再開才重繪）、只抓到第一單；v0.6 多單/遠端設定；v0.7 首日見下節；v0.8/v0.9 已裝實機；v1.0（runtime 1.0：邀請當下動態島顯示）已上線。**v1.1（runtime 1.1：#單號配對送達，見「v1.1」節）寫好，尚未 CI/實機驗收**。
 ## 目錄
 - `App.tsx` 只管狀態/原生與通知接線/分頁切換；畫面在 `src/ui/`（見「UI」節）；`src/orders.ts` 純邏輯；`src/store.ts` AsyncStorage（key `pandatimer.orders.v1`，`mutate()` 序列化）
 - `src/controller.ts` 開單/送達/取消、deep link、`initNativeBridge()`（原生同步）、孤兒 Live Activity 對帳
@@ -38,13 +38,13 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - **v0.7 接單後才倒數**（`targets/broadcast/OfferTracker.swift`＝`src/offerTracker.ts`，以 TS 測試為準）：邀請（接單鈕＋分鐘）→ `offered`（只送 `offer.pending.<分>`＋telemetry `offer_seen`）→ 連 `offer.goneAfterMisses` 次沒接單鈕＝`deciding(goneAt)` → `decideWindowSec` 內只命中 `acceptedKeywords`＝接單、只命中 `rejectedKeywords`＝未接（兩邊都中/都沒中＝繼續看）、到期依 `ambiguousAs`；同一張回來＝resumed、另一張＝前一張依 ambiguousAs；接過的（分鐘, 金額）90 秒內再出現＝dup。畫面靜止時靠 workQueue 計時器推進；停止廣播先結案再送 stopped。每次決策送 `offer_decided`（result/reason/wait/kw/hit）。同一張＝分鐘相同且金額相同或任一方沒抓到（後抓到的金額補進 offered，不算新單）。
 - **v0.7 自動送達**（`src/deliveryDetector.ts`＝extension `DeliveryEdge`＋App `AutoDelivery`）：命中 `delivery.completedKeywords`（非邀請畫面）邊緣觸發送 `com.pandatimer.delivered`（60 秒不重送，telemetry `delivered_seen`）→ App 結「接單 ≥minOrderAgeSec 的最早單」（鏡像/done 事件/取消提醒/偵測卡切單，同送達按鈕）。互斥：90 秒內有手動結單不自動結；自動結後 20 秒內送達按鈕/捷徑不結（UserDefaults `lastManualDoneAt/lastAutoDoneAt`）。
 - **v0.7 記憶體保護**：OCR 前 >`ocr.memSkipMB` 跳幀；辨識當下 >`memHighMB`(44) → 120 秒只認大字。公里：數字間全形句點當小數點、兩位整數 > 預估分鐘 → ÷10。v0.8 送達/挑單改動見下節。
-- 訊號（三處一致：DetectorHub.parse / PandaSignal / `src/detector.ts`）：`com.pandatimer.order.<1-90>.<序號 mod 4>`（序號跳號＝遺失，telemetry `gap`）、v0.7 `offer.pending.<1-90>`／`offer.cleared`／`accept.delay.<0-60>`（**接單先送 delay 再送 order**；App 2 秒內配對 → acceptedAt＝收到−delay＝goneAt；App 曾暫停則用通知 userInfo `detectedAt`＝goneAt）、`broadcast.started|stopped|heartbeat`、`drain`、`delivered`；v0.8 `offer.stacked`（在 accept.delay 前）、`delivered.delay.<0-60>`（在 delivered 前）；v1.0 `offer.cleared.<reject|timeout|stopped>`（舊不帶原因名稱仍註冊）、`ext.mode.<away|normal>`/`ext.mem.<0-80>`/`ext.peak.<0-80>`（ext 心跳後送）。註冊共 746 個（<1000）。
+- 訊號（三處一致：DetectorHub.parse / PandaSignal / `src/detector.ts`）：`com.pandatimer.order.<1-90>.<序號 mod 4>`（序號跳號＝遺失，telemetry `gap`）、v0.7 `offer.pending.<1-90>`／`offer.cleared`／`accept.delay.<0-60>`（**接單先送 delay 再送 order**；App 2 秒內配對 → acceptedAt＝收到−delay＝goneAt；App 曾暫停則用通知 userInfo `detectedAt`＝goneAt）、`broadcast.started|stopped|heartbeat`、`drain`、`delivered`；v0.8 `offer.stacked`（在 accept.delay 前）、`delivered.delay.<0-60>`（在 delivered 前）；v1.0 `offer.cleared.<reject|timeout|stopped>`（舊不帶原因名稱仍註冊）、`ext.mode.<away|normal>`/`ext.mem.<0-80>`/`ext.peak.<0-80>`（ext 心跳後送）；v1.1 `delivered.seq.<0-3>`（取代 delivered）。註冊共 750 個（<1000；order 改 mod 8 會變 1110，故槽維持 mod 4）。
 ## v0.8 偵測更快／停止補救／記憶體／夾單／送達（以 TS 測試為準）
 - 每 0.2 秒點取樣原始幀（`FrameProbe`：64×64 亮度雜湊＋下方 55% 96×160 色彩點，YUV 多讀 CbCr、不建圖）→ `OcrPlanner`：亮綠色比例 ≥ `greenTrigger.minRatio`（邊緣觸發）或「畫面變了 >changeMinBits 且已靜止」→ 立刻 OCR（距上次 ≥0.6 秒）；疑似邀請（綠色 hold 10 秒/判定中/有接單鈕）0.6 秒、閒置 1.5 秒；同畫面跳過（疑似邀請 2 秒、平時 10 秒強制）。
 - OCR 同時最多一個（busy）；每 `ocr.rebuildEvery`（30）次或 memHigh 時重建 request；只 zh-Hant（`ocr.englishToo` 可加回）；memSkip 36MB；beat 帶 `dMB`（OCR 前後差最大）/`green`/`trig`。
 - 停止：App 監聽鎖屏/解鎖（telemetry `lock`/`unlock`、stopped 帶 `locked/lockAge/reason`）；ext `pause`/`resume`、stop 帶最後畫面。偵測中（沒按停止偵測）收到 stopped → 通知「偵測停止了，點我重新開始」（userInfo `pandatimer=redetect`，60 秒不重複；心跳逾時通知也帶）→ JS 點擊自動走「開始偵測」叫出廣播視窗；偵測區顯示「⏹ 偵測已停止」。
-- 夾單：邀請命中 `offer.stackedKeywords` → 訂單 `stacked:true`；統計另列「不含夾單」（App 紀錄，不併補登）。
-- 送達：`delivery.finalKeywords`（訂單完成）優先；只看到確認對話框 → 待定 `pendingSec`（30）秒等訂單完成，否則以對話框時間（delay）結；廣播停止時待定照送。App 結**截止最早**的單。
+- 夾單：邀請命中 `offer.stackedKeywords` → `stacked:true`（v1.1 `stackKind:'offer'`；接單時已有進行中單＝`'carry'` 疊單，原生＋JS `stackMark`，stackKind 只存本機）；統計「不含夾單」兩者都排除。
+- 送達（v0.8，v1.1 起只在 `delivery.mode:"appear"`）：finalKeywords 優先；只看到對話框 → 待定 pendingSec 秒；App 結**截止最早**的單。
 - 匯入：`pandatimer://import?d=<base64url JSON>`（v1、≤200 筆、無時區＝台北、±90 秒同分鐘＝重複）→ 確認視窗 → `source:'import'` 已送達單，不開動態島/通知。
 - **v0.6 多單共用偵測卡**（背景開不了新卡）：每張自動單寫進鏡像時 `activityId=偵測卡 id`（不再搶走舊單的 activityId）→ `DetectorCardPlan` 依鏡像排序：倒數＝**最早截止**、`ContentState.others`＝「另 2 單：18:42、18:55 截止」。送達（動態島按鈕/App/捷徑）→ `afterFinish`：還有單就切下一單，沒有就回 standby（一般卡結束）。
 - 新單 → 排 2 則提醒 → 記錄（`source:'auto'`）→ 卡片 `update(_:alertConfiguration:)`（title「新單 N 分」、body 截止、sound default：強制展開＋重繪）；心跳 update 不帶 alert。1 秒後回讀（✓＝本程序狀態已改，不保證畫面；✗ 一定失敗）。App 曾被暫停 → 接單時間改用 extension 通知 userInfo 的 `detectedAt`（分鐘＋序號配對）。
@@ -60,19 +60,23 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - ContentState 加 `offerMin/offerAmount/offerAt`（Optional）、mode `"offer"`。`offer.pending` → DetectorHub `showOffer`：待命卡改 mode offer（compact「19分✓」黃、minimal「19」、展開/鎖定「✓ 已偵測 19 分邀請」「$77.59・可以按接受」「偵測於 HH:mm:ss」，staleDate＝+60 秒 → widget isStale 畫回偵測中）；**倒數中不蓋倒數**，只加黃字「＋偵測到 N 分邀請…」。都帶 alertConfiguration（「已偵測 N 分邀請／可以按接受訂單」）強制展開＋重繪。金額＝exactFare（Swift 整數分）。
 - cleared → `hideOffer`（offer→standby、倒數只清那行）；order → `DetectorCardPlan.apply` 一律清邀請欄位；60 秒無結果 asyncAfter 清；`pushCard` 自癒（卡上邀請≠App 顯示中那張就清）。偵測卡 update 全走 `enqueueCard` 串行。
 - 遠端 `offer.islandIndicator`(true)/`offer.alertSound`("default"|"none")。**ActivityKit 無官方靜音**：none 用 `.named("")`，系統可能退回預設聲音（論壇：查無檔名會 fallback），以實機為準；真要靜音得在主 App bundle 放靜音音檔。
+## v1.1 #單號配對送達（規則以 `src/orderNumbers.ts`＋`src/deliveryDetector.ts` DeliveryWatch＋`test/orderNumbers.test.mjs` 為準；Swift `targets/broadcast/OrderNumbers.swift`）
+- 11/13 三張疊單送達全配錯 → ext `OrderNumberBook`：接單訊號送出記 seq；接單後畫面（offerAccepted、非邀請/對話框）恰 1 個新 `#\d{1,5}`（接單後才首次出現）→ 綁給 bindWindowSec 內最新未綁 seq。單號只在 ext 記憶體，telemetry 只送 `matched`/`result`（伺服器 FIELD_RULES 加 matched/stackKind，**需重新部署**）。
+- `delivery.mode:"disappear"`（預設，DeliveryWatch）：`dialogKeywords`（是否已送達/確認已送達）出現只記；在 pandarider 畫面上連 2 次沒有、或畫面變了 1 次沒有且 1 秒內沒再出現＝按了確認 → delay＝第一次消失；按鈕一直在不送；不見了但同一單號還在畫面上（聊天/拍照/取消）也不算；「訂單完成」（含上方補掃）＝立即確認、60 秒內不重送。單號對到 seq 且槽沒被新單佔 → `delivered.delay`＋`delivered.seq.<seq mod 4>`，否則 delivered；同號 1 小時不重送。
+- 問句在畫面上半部：綁號中/對話框沒讀到號/對話框疑似消失時，同一幀另 OCR `numberScanTop~Bottom`（0.05~0.6），diag「補掃N」。App：`seqOrders`（UserDefaults `pandatimer.native.seqOrders.v1`，漏號的槽清掉、started 全清）→ 對到只結那張（不看 minOrderAge/手動互斥），那張已不在＝matchedGone 不退回。
+- `offer.suspectBelowMinutes`(3)：分鐘 <3 且同畫面有接單後字樣 → `offer_suspect`、不送 pending。邀請動態島回讀改 0.25 秒重查最多 1.5 秒（v1.0 讀同一物件 content 不會立刻變→一律 ✗）；App 已有結果＝`island=-` resolved。
 ## 遠端設定（v0.6：原生不能 OTA，參數改由伺服器下發）
 - **調偵測參數 → 改 `server/config.json`（記得改 `version`）跑 `bash scripts/push-config.sh`，不用重裝。** 公開 `GET /api/config`；內容：`picker`（分鐘/金額規則）、`detector`（接單鈕正則、去重秒數、OCR/裁切/雜湊/心跳；`goneAfterMisses` 只剩 v0.6 用）、`telemetry`（白名單、批次）、`app`（心跳逾時）、v0.7 `offer`（goneAfterMisses、decideWindowSec 5~60、accepted/rejectedKeywords 正則（去空白文字比對、不得命中空字串）、ambiguousAs accept|reject）、`stats`（JS 讀：graceFactor 1.05、overrunCap 1）、`delivery`（enabled、minOrderAgeSec 120、completedKeywords；v0.8 finalKeywords/pendingSec）、`ocr`（memSkipMB、memHighMB；v0.8 rebuildEvery/englishToo）；v0.8 `detector.fastOcrIntervalSeconds/changeMinBits/changeMinGapSeconds/probeIntervalSeconds/greenTrigger{…}`、`offer.stackedKeywords`、telemetry.keywords ≤60 列。伺服器以 config.default.json 補齊缺漏區塊。
 - extension：broadcastStarted 與每 `configRefreshSeconds`（600）抓；App（DetectorHub）：開始偵測、回前景（60 秒節流）、看門狗到期時抓。逾時 3 秒，失敗用各程序 UserDefaults 快取（`pandatimer.remoteConfig.v1`）或內建預設；**欄位缺漏/不合法 → 該欄位用預設**（範圍＝`src/remoteConfig.ts` RANGES，test 比對 Swift）。主 App 的「從截圖開始」用 `PickerConfig.cached()`。
-- 預設值四處一致：`server/config.default.json`＝`DEFAULT_CONFIG`（TS）＝Swift（`PickerConfig`、`DetectorSettings`、`RemoteConfig`）。version 寫進 telemetry（`cfg`）、偵測卡 diag、App「回報」那行。`picker.maxMinutes` 上限 90（App 只註冊 1~90 分訊號）。
-- 部署腳本只在遠端沒有 `config.json` 時用預設建立，不會蓋掉。
+- 預設值四處一致：`server/config.default.json`＝`DEFAULT_CONFIG`（TS）＝Swift（`PickerConfig`、`DetectorSettings`、`RemoteConfig`）。version 寫進 telemetry（`cfg`）、偵測卡 diag、App「回報」那行。`picker.maxMinutes` 上限 90（App 只註冊 1~90 分訊號）。部署腳本只在遠端沒有 `config.json` 時用預設建立，不會蓋掉。
 ## 遠端狀態回報（v0.6 telemetry，取代截圖回報）
 - **隱私鐵律：不得上傳 OCR 原文、地址、店名、顧客資訊。** 只送結構化欄位：時間、來源 ext/app、事件、幀/OCR 次數/記憶體、接單鈕、分鐘、金額、公里、**白名單 UI 關鍵字命中**（`ScreenInfo.keywords`＝`src/screenInfo.ts`＝server `TELEMETRY_KEYWORDS`，test 比對）、畫面分類、動態島回讀 ✓/✗、保活模式、定位授權、前景/背景、版本/OTA id。client 與 server 各擋一次欄位白名單（`allowedKeys`＝`FIELD_RULES`）。
 - 原生送（`PandaTelemetry`：10 筆或 60 秒（v0.9）一批、新單/錯誤立即送、失敗暫存 200 筆、每分鐘 ≤100 筆）；extension 讀所屬 App 的 Info.plist 拿金鑰/網址。JS 只顯示「回報：最後成功 HH:mm:ss」。
 - 查詢：`bash scripts/telemetry.sh [YYYY-MM-DD] [--since 10m] [--follow] [--raw]`（唯讀 GET，讀取金鑰 `~/.config/pandatimer/telemetry-read-key`）。事件：ext `start/beat/screen/order/dup/stop/crashPrev/config`；app `arm/disarm/sig/beat/order/restore/keep/beatTimeout/fg/bg/config`。伺服器白名單關鍵字＝內建 ∪ 遠端設定 `telemetry.keywords`。
 - 金鑰：寫入＝app.json `extra.telemetryKey`＝`~/.config/pandatimer/telemetry-write-key`；讀取只在本機與伺服器 `server.env`。換金鑰＝改兩個本機檔＋app.json → 部署＋重編 App。
 ## OTA 更新（expo-updates，自架伺服器見 `server/README.md`）
-- app.json：`runtimeVersion:"1.0"`（固定字串）、`updates.url=https://wheat.yueshengift.xyz/pandatimer/api/manifest`、code signing 憑證 `server/certs/certificate.pem`（keyid main, rsa-v1_5-sha256）；`src/OtaBox.tsx` 在 App 底部顯示版本/更新 id/時間，回前景自動檢查＋下載，**不自動 reload**，出現「有新版，點此套用」按鈕才 `reloadAsync()`（`__DEV__` 或未啟用時隱藏）。
-- 純 JS 改動 → `bash scripts/publish-update.sh 1.0`（`--list`；`--republish <ts>` 回滾；`--rollback-embedded`）。原生改動（Swift、plugin、原生套件、app.json 原生設定）→ 升 runtimeVersion（app.json＋OtaBox APP_VERSION＋發佈參數）＋CI 編 ipa＋Sideloadly 重裝。
+- app.json：`runtimeVersion:"1.1"`（固定字串）、`updates.url=https://wheat.yueshengift.xyz/pandatimer/api/manifest`、code signing 憑證 `server/certs/certificate.pem`（keyid main, rsa-v1_5-sha256）；`src/OtaBox.tsx` 在 App 底部顯示版本/更新 id/時間，回前景自動檢查＋下載，**不自動 reload**，出現「有新版，點此套用」按鈕才 `reloadAsync()`（`__DEV__` 或未啟用時隱藏）。
+- 純 JS 改動 → `bash scripts/publish-update.sh 1.1`（`--list`；`--republish <ts>` 回滾；`--rollback-embedded`）。原生改動（Swift、plugin、原生套件、app.json 原生設定）→ 升 runtimeVersion（app.json＋OtaBox APP_VERSION＋發佈參數）＋CI 編 ipa＋Sideloadly 重裝。
 - 憑證換了＝已裝 App 拒收舊簽章更新，需重裝；私鑰在 `~/.config/pandatimer/keys/`，不進 repo。
 ## 純 JS 功能（可 OTA）
 - **本期統計**（v0.7，`src/stats.ts`）：彈性線 L＝預估×graceFactor；準時＝實際≤L；超時率＝平均 min(cap, max(0,(實際−L)/L))；取消不計（三期實單驗算 43/19、45/19、40/21，官方 44/19、47/14、39/20）。每 14 天一期，錨點 2026-09-28 00:00 台北。目標（準時目標 50%/底線 40%/超時 ≤20%）與本期補登（N0/P0/T0，綁期別）存 AsyncStorage，本期＝加權合併。
@@ -92,5 +96,5 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - 膠囊「省電中/放慢辨識」與診斷「省電/記憶體」（`powerLine`）讀 `DetectorStatus.power`：v1.0 statusJSON 帶 App 的 `lowPower/thermal/saver/batt/charging`＋ext 的 `extMode/memMB/peakMB/extAt`（v0.9 原生沒帶 → 無 key）。v1.0 `userInterfaceStyle:"dark"`（系統 Alert/鍵盤也暗色）。
 ## 已知風險
 - Swift 只在 CI 編譯；CI 失敗先看 `xcodebuild.log` 的 error 行。runner `macos-26`（fileSystemSynchronizedGroups 需 Xcode 16+）。定位保活下背景 update、alertConfiguration 本地 update 都**沒有官方文件**，以實機為準。
-- v0.9/v1.0 Swift 未經編譯。v1.0 最不確定：`enqueueCard`（Task 串 `await previous?.value`）、widget `if …, let m` 寫法、背景無 alert 的清除 update 是否重繪（不重繪就靠 staleDate 60 秒）。telemetry.keywords >40 列時 v0.7 App 整份改用內建白名單。
+- v1.1 Swift 未經編譯。實機待驗：單號在畫面上的位置（補掃範圍）、取消/捲走按鈕且畫面上看不到單號時會被當成按了確認（退路：遠端 `delivery.mode:"appear"`）、綁號時機。telemetry.keywords >40 列時 v0.7 App 整份改用內建白名單。
 - 免費帳號：每 7 天重簽、App ID 佔 **3** 個（主 App＋widget＋broadcast；免費帳號 7 天最多 10 個新 App ID）。動態島/通知權限需在 iPhone 允許。

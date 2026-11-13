@@ -128,7 +128,9 @@ test('遠端設定 delivery/ocr：預設、範圍、正則不得命中空字串�
     assert.ok(bad.problems.some((p) => p.startsWith(k)), k);
   }
   const ok = validateConfig({ version: 'x', delivery: { enabled: false, minOrderAgeSec: 300, completedKeywords: '交付成功', finalKeywords: '完成囉', pendingSec: 0 } });
-  assert.deepEqual(ok.config.delivery, { enabled: false, minOrderAgeSec: 300, completedKeywords: '交付成功', finalKeywords: '完成囉', pendingSec: 0 });
+  assert.deepEqual(ok.config.delivery, {
+    ...DEFAULT_DELIVERY, enabled: false, minOrderAgeSec: 300, completedKeywords: '交付成功', finalKeywords: '完成囉', pendingSec: 0,
+  });
 });
 
 test('Swift 與 TS 同規則：extension DeliveryEdge、App AutoDelivery、互斥鍵名、預設值與範圍', () => {
