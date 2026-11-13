@@ -3,7 +3,7 @@
 //
 // 表：
 //   orders(id PK, acceptedAt, estimateMin, deliveredAt NULL, status, amount NULL, stacked, source, note,
-//          updatedAt, deleted, editedBy, syncAt)
+//          updatedAt, deleted, editedBy, syncAt, tip NULL)   ← tip（小費，元）v1.2 加；舊資料庫由 migrate() 冪等 ALTER TABLE 補欄位
 //   baselines(period PK, orders, onTimePct, overrunPct, income NULL, updatedAt, deleted, syncAt)
 //   meta(key PK, value)：dbId（資料庫身分，App 用來偵測伺服器資料庫被重建）、syncCode、sessionKey
 // updatedAt＝最後修改時間（LWW 比較用；App 端是手機時鐘、管理頁是伺服器時鐘）；
@@ -17,6 +17,7 @@ export const SOURCES = ['manual', 'auto', 'import', 'confirm', 'admin'];
 export const MAX_NOTE = 100;
 export const MAX_ESTIMATE = 180;
 export const MAX_AMOUNT = 100_000;
+export const MAX_TIP = 2000;
 export const MAX_BASELINE_ORDERS = 2000;
 export const MAX_INCOME = 10_000_000;
 const ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
@@ -97,13 +98,20 @@ export function validateOrder(r, now, opts = {}) {
     if (!isNum(r.amount) || r.amount < 0 || r.amount > MAX_AMOUNT) return { ok: false, error: 'amount 不合法' };
     amount = Math.round(r.amount * 100) / 100;
   }
+  // 小費（選填，元，0~2000，兩位小數）；沒帶或 null＝沒有。0 視為沒有（存 null）
+  let tip = null;
+  if (r.tip != null) {
+    if (!isNum(r.tip) || r.tip < 0 || r.tip > MAX_TIP) return { ok: false, error: `tip 不合法（0~${MAX_TIP}）` };
+    tip = Math.round(r.tip * 100) / 100;
+    if (tip === 0) tip = null;
+  }
   const stacked = toBool(r.stacked);
   if (stacked == null) return { ok: false, error: 'stacked 不合法' };
   const source = r.source == null ? 'manual' : r.source;
   if (!SOURCES.includes(source)) return { ok: false, error: 'source 不合法' };
   const note = cleanNote(r.note);
   if (note == null) return { ok: false, error: `note 不合法（字串、≤${MAX_NOTE} 字）` };
-  return { ok: true, value: { id, acceptedAt, estimateMin, deliveredAt, status, amount, stacked, source, note, updatedAt, deleted } };
+  return { ok: true, value: { id, acceptedAt, estimateMin, deliveredAt, status, amount, tip, stacked, source, note, updatedAt, deleted } };
 }
 
 /** 補登（period＝期別起日 YYYY-MM-DD；百分比 0~100） */
@@ -143,7 +151,7 @@ CREATE TABLE IF NOT EXISTS orders(
   id TEXT PRIMARY KEY, acceptedAt INTEGER NOT NULL, estimateMin REAL NOT NULL, deliveredAt INTEGER,
   status TEXT NOT NULL, amount REAL, stacked INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'manual',
   note TEXT NOT NULL DEFAULT '', updatedAt INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
-  editedBy TEXT NOT NULL DEFAULT 'app', syncAt INTEGER NOT NULL);
+  editedBy TEXT NOT NULL DEFAULT 'app', syncAt INTEGER NOT NULL, tip REAL);
 CREATE INDEX IF NOT EXISTS orders_syncAt ON orders(syncAt);
 CREATE INDEX IF NOT EXISTS orders_acceptedAt ON orders(acceptedAt);
 CREATE TABLE IF NOT EXISTS baselines(
@@ -160,6 +168,7 @@ const orderOut = (r) => ({
   deliveredAt: r.deliveredAt ?? null,
   status: r.status,
   amount: r.amount ?? null,
+  tip: r.tip ?? null,
   stacked: !!r.stacked,
   source: r.source,
   note: r.note,
@@ -187,7 +196,14 @@ export async function openStore(dbPath, { seedSyncCode = '' } = {}) {
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=3000; PRAGMA foreign_keys=ON;');
   db.exec(SCHEMA);
+  migrate(db);
   return new Store(db, seedSyncCode);
+}
+
+/** 冪等遷移：舊資料庫（v0.11~v1.1）沒有 orders.tip → ALTER TABLE 補上（NULL＝沒有小費）；重複執行無副作用 */
+export function migrate(db) {
+  const cols = db.prepare('PRAGMA table_info(orders)').all().map((c) => c.name);
+  if (!cols.includes('tip')) db.exec('ALTER TABLE orders ADD COLUMN tip REAL');
 }
 
 export class Store {
@@ -198,11 +214,11 @@ export class Store {
       getMeta: q('SELECT value FROM meta WHERE key = ?'),
       setMeta: q('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
       getOrder: q('SELECT * FROM orders WHERE id = ?'),
-      upsertOrder: q(`INSERT INTO orders(id, acceptedAt, estimateMin, deliveredAt, status, amount, stacked, source, note, updatedAt, deleted, editedBy, syncAt)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+      upsertOrder: q(`INSERT INTO orders(id, acceptedAt, estimateMin, deliveredAt, status, amount, stacked, source, note, updatedAt, deleted, editedBy, syncAt, tip)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET acceptedAt=excluded.acceptedAt, estimateMin=excluded.estimateMin, deliveredAt=excluded.deliveredAt,
           status=excluded.status, amount=excluded.amount, stacked=excluded.stacked, source=excluded.source, note=excluded.note,
-          updatedAt=excluded.updatedAt, deleted=excluded.deleted, editedBy=excluded.editedBy, syncAt=excluded.syncAt`),
+          updatedAt=excluded.updatedAt, deleted=excluded.deleted, editedBy=excluded.editedBy, syncAt=excluded.syncAt, tip=excluded.tip`),
       tombOrder: q('UPDATE orders SET deleted = 1, updatedAt = ?, editedBy = ?, syncAt = ? WHERE id = ?'),
       setDeleted: q('UPDATE orders SET deleted = ?, updatedAt = ?, editedBy = ?, syncAt = ? WHERE id = ?'),
       ordersSince: q('SELECT * FROM orders WHERE syncAt > ? ORDER BY syncAt LIMIT ?'),
@@ -263,7 +279,7 @@ export class Store {
   #writeOrder(v, editedBy) {
     this.s.upsertOrder.run(
       v.id, v.acceptedAt, v.estimateMin, v.deliveredAt, v.status, v.amount, v.stacked ? 1 : 0, v.source, v.note,
-      v.updatedAt, v.deleted ? 1 : 0, editedBy, this.tick(),
+      v.updatedAt, v.deleted ? 1 : 0, editedBy, this.tick(), v.tip ?? null,
     );
   }
   #writeBaseline(v) {

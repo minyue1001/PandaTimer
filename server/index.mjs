@@ -778,7 +778,7 @@ function csvCell(v) {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 function ordersCsv(rows, graceFactor) {
-  const head = ['id', '接單(台北)', '預估分', '送達(台北)', '實際分', '狀態', '準時', '金額', '夾單', '來源', '備註', '修改時間(台北)', '修改者', '已刪除'];
+  const head = ['id', '接單(台北)', '預估分', '送達(台北)', '實際分', '狀態', '準時', '金額', '小費', '夾單', '來源', '備註', '修改時間(台北)', '修改者', '已刪除'];
   const status = { active: '進行中', delivered: '已送達', canceled: '已取消' };
   const lines = [head.join(',')];
   for (const o of rows) {
@@ -786,7 +786,7 @@ function ordersCsv(rows, graceFactor) {
     const ok = o.status === 'delivered' && act != null ? (act <= o.estimateMin * graceFactor + 1e-9 ? '準' : '超') : '';
     lines.push([
       o.id, taipeiText(o.acceptedAt), o.estimateMin, taipeiText(o.deliveredAt), act ?? '', status[o.status] ?? o.status, ok,
-      o.amount ?? '', o.stacked ? '是' : '', o.source, o.note, taipeiText(o.updatedAt), o.editedBy, o.deleted ? '是' : '',
+      o.amount ?? '', o.tip ?? '', o.stacked ? '是' : '', o.source, o.note, taipeiText(o.updatedAt), o.editedBy, o.deleted ? '是' : '',
     ].map(csvCell).join(','));
   }
   return '﻿' + lines.join('\r\n') + '\r\n';
@@ -897,7 +897,7 @@ async function handleAdminApi(req, res, url) {
       const body = await readJson(req, ADMIN_MAX_BODY);
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Body must be an object');
       const fields = {};
-      for (const k of ['acceptedAt', 'estimateMin', 'deliveredAt', 'status', 'amount', 'stacked', 'note']) if (k in body) fields[k] = body[k];
+      for (const k of ['acceptedAt', 'estimateMin', 'deliveredAt', 'status', 'amount', 'tip', 'stacked', 'note']) if (k in body) fields[k] = body[k];
       r = store.updateOrder(id, fields);
     } else if (!om[2] && m === 'DELETE') {
       requireAdmin(store, req, 'write');

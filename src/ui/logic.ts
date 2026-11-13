@@ -231,10 +231,12 @@ export type HistRow = {
   overMin: number;
   amount: number;
   amountEstimated: boolean;
+  /** v1.2 小費（元，0＝沒有） */
+  tip: number;
   tags: string[];
 };
 
-export type DaySubtotal = { count: number; onTimeRate: number | null; overrunRate: number | null; payout: number; stacked: number };
+export type DaySubtotal = { count: number; onTimeRate: number | null; overrunRate: number | null; payout: number; stacked: number; tip: number };
 
 export type DayGroup = {
   /** 台北日期 YYYY-MM-DD */
@@ -294,7 +296,7 @@ export function groupHistory(
   for (const key of keys) {
     if (shown >= limit) break;
     const list = byDay.get(key) as Order[];
-    const samples = list.map((o) => ({ est: o.estimateMin, act: o.actualMin as number }));
+    const samples = list.map((o) => ({ est: o.estimateMin, act: o.actualMin as number, ...(o.tip != null ? { tip: o.tip } : {}) }));
     const sum = summarize(samples, stats);
     const earn = summarizeEarnings(samples, pay);
     const take = list.slice(0, Math.max(0, limit - shown));
@@ -315,6 +317,7 @@ export function groupHistory(
           overMin: Math.round((act - o.estimateMin) * 10) / 10,
           amount: amt.value,
           amountEstimated: amt.estimated,
+          tip: o.tip ?? 0,
           tags: orderTags(o),
         };
       }),
@@ -324,6 +327,7 @@ export function groupHistory(
         overrunRate: sum.overrunRate,
         payout: earn.payout,
         stacked: list.filter((o) => o.stacked).length,
+        tip: earn.tipTotal,
       },
       hidden: list.length - take.length,
     });

@@ -445,3 +445,62 @@ test('還原備份：備份檔 dbId 換新（App 會全部重傳）；寫入不�
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('v1.2 小費：遷移冪等（舊資料庫補 tip 欄、資料不壞、重開不報錯）', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-mig-test-'));
+  try {
+    const db = path.join(dir, 'orders.db');
+    const old = new DatabaseSync(db); // v1.1 的舊 schema（沒有 tip）
+    old.exec(`CREATE TABLE orders(id TEXT PRIMARY KEY, acceptedAt INTEGER NOT NULL, estimateMin REAL NOT NULL, deliveredAt INTEGER,
+      status TEXT NOT NULL, amount REAL, stacked INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'manual',
+      note TEXT NOT NULL DEFAULT '', updatedAt INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+      editedBy TEXT NOT NULL DEFAULT 'app', syncAt INTEGER NOT NULL);
+      INSERT INTO orders VALUES('old1', ${T0}, 20, ${T0 + 600000}, 'delivered', 81.67, 0, 'auto', '', ${T0}, 0, 'app', 5);`);
+    old.close();
+    for (let i = 0; i < 2; i++) {
+      const s = await openStore(db);
+      const o = s.getOrder('old1');
+      assert.equal(o.tip, null);
+      assert.equal(o.amount, 81.67);
+      s.close();
+    }
+    const s = await openStore(db);
+    const r = s.sync({ since: 0, orders: [order('old1', { tip: 15, updatedAt: Date.now() - 1000 })] });
+    assert.equal(r.accepted.orders, 1);
+    assert.equal(s.getOrder('old1').tip, 15);
+    s.close();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('v1.2 小費：驗證（0~2000、兩位小數、非數字/負數/超額拒絕、0＝無）；sync 合併；管理頁 PUT/POST；CSV 有小費欄', async () => {
+  const bad = [-1, 2001, 'x', NaN, {}].map((tip, i) => ({ id: `tipbad${i}`, ...order(`tipbad${i}`, { tip: tip === NaN ? null : tip }) }));
+  const r = await sync({ since: 0, changes: { orders: [...bad, order('tipok', { tip: 12.345, updatedAt: T0 + 20 * 60_000 }), order('tipzero', { tip: 0 }), order('tipnone')] } });
+  assert.equal(r.status, 200);
+  assert.ok(r.body.invalid.filter((x) => x.error.startsWith('tip')).length >= 4);
+  const got = await sync({ since: 0 }, SEED);
+  const byId = Object.fromEntries(got.body.changes.orders.map((o) => [o.id, o]));
+  assert.equal(byId.tipok.tip, 12.35);
+  assert.equal(byId.tipzero.tip, null);
+  assert.equal(byId.tipnone.tip, null);
+  // LWW：較新的版本改小費才被採用
+  await sync({ since: 0, changes: { orders: [order('tipok', { tip: 20, updatedAt: T0 + 30 * 60_000 })] } });
+  const again = await sync({ since: 0 }, SEED);
+  assert.equal(again.body.changes.orders.find((o) => o.id === 'tipok').tip, 20);
+  // 管理頁
+  const { call } = await admin((await login()).cookie);
+  const put = await call('PUT', 'orders/tipok', { tip: 55.5 });
+  assert.equal(put.status, 200);
+  assert.equal(put.body.order.tip, 55.5);
+  assert.equal((await call('PUT', 'orders/tipok', { tip: 5000 })).status, 400);
+  assert.equal((await call('PUT', 'orders/tipok', { note: 'x' })).body.order.tip, 55.5, '沒帶 tip 的修改不清掉小費');
+  assert.equal((await call('PUT', 'orders/tipok', { tip: null })).body.order.tip, null);
+  const created = await call('POST', 'orders', { acceptedAt: T0 + 7_200_000, estimateMin: 10, status: 'delivered', deliveredAt: T0 + 7_800_000, amount: 45, tip: 8 });
+  assert.equal(created.body.order.tip, 8);
+  const res = await fetch(`${base}/api/admin/export.csv?from=2026-11-12&to=2026-11-12`, { headers: { 'x-pt-read': READ_KEY } });
+  const text = await res.text();
+  assert.match(text, /準時,金額,小費,夾單/);
+  assert.match(text, /,45,8,,管理頁|,45,8,/);
+});

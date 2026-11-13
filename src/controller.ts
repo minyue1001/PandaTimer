@@ -2,7 +2,7 @@ import { AppState, Linking } from 'react-native';
 import * as LiveActivity from '../modules/live-activity';
 import { activeMirror, applyNativeEvents, orphanActivityIds, parseNativeEvents, stackMark } from './nativeEvents';
 import { cancelReminders, scheduleReminders } from './notify';
-import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, exactFare, parseDeepLink, type Order } from './orders';
+import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, exactFare, normalizeTip, parseDeepLink, type Order } from './orders';
 import { addTombstones, applyPrune, dropTombstonedEvents, planPrune, type PruneCriteria, type PrunePlan } from './prune';
 import { planImport, type ImportPlan, type ImportRow } from './importLink';
 import { getOrders, loadSyncCode, loadSyncState, loadTombstones, mutate, subscribe, updateTombstones } from './store';
@@ -103,6 +103,18 @@ export async function completeOrder(id?: string): Promise<Order | undefined> {
   });
   await cleanup(done);
   return done;
+}
+
+/** v1.2 設定／清除小費（tip 0 或 undefined＝清除）；store.mutate 會蓋 updatedAt 並觸發雲端同步。回傳更新後的單（找不到 → undefined） */
+export async function setOrderTip(id: string, tip: number | undefined): Promise<Order | undefined> {
+  const next = normalizeTip(tip);
+  return mutate<Order>((list) => {
+    const target = list.find((o) => o.id === id);
+    if (!target) return { orders: list };
+    const { tip: _old, ...rest } = target;
+    const updated: Order = next != null ? { ...rest, tip: next } : rest;
+    return { orders: list.map((o) => (o.id === id ? updated : o)), result: updated };
+  });
 }
 
 export async function cancelOrder(id: string): Promise<void> {

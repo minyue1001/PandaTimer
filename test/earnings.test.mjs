@@ -144,3 +144,25 @@ test('money 格式', () => {
   assert.equal(money(49.01), '$49.01');
   assert.equal(money(1234567.5), '$1,234,567.50');
 });
+
+test('v1.2 小費：預計發放＝情境報酬＋小費（兩情境都加）；tipTotal/tipCount；無小費不變', () => {
+  const samples = [{ est: 20, act: 15, tip: 30 }, { est: 12, act: 31, tip: 10.5 }, { est: 30, act: 40 }, { est: 10, act: 9, tip: 0 }];
+  const base = summarizeEarnings(samples.map(({ tip, ...s }) => s), DEFAULT_PAY);
+  const withTip = summarizeEarnings(samples, DEFAULT_PAY);
+  near(withTip.tipTotal, 40.5);
+  assert.equal(withTip.tipCount, 2);
+  near(withTip.estTotal, base.estTotal); // 預估收入不含小費
+  near(withTip.payout, base.payout + 40.5);
+  near(withTip.payoutOther, base.payoutOther + 40.5);
+  assert.equal(base.tipTotal, 0);
+  assert.equal(summarizeEarnings([]).tipTotal, 0);
+});
+
+test('v1.2 periodAndTodayEarnings 帶入 order.tip', () => {
+  const now = Date.UTC(2026, 10, 12, 4, 0, 0);
+  const mk = (id, tip) => ({ id, acceptedAt: now - 3_600_000, estimateMin: 20, deadline: 0, status: 'delivered', actualMin: 15, deliveredAt: now - 2_700_000, ...(tip ? { tip } : {}) });
+  const r = periodAndTodayEarnings([mk('a', 25), mk('b')], now, DEFAULT_PAY, null);
+  near(r.today.tipTotal, 25);
+  near(r.period.tipTotal, 25);
+  near(r.today.payout, r.today.estTotal + 25);
+});

@@ -4,6 +4,7 @@
 //   被打星的單不補：發放 ＝ 預估報酬。App 無法得知哪張會被打星 → 兩種情境：
 //     樂觀＝都沒被打星（預估＋全部補錢）；保守＝晚到單全被打星（補錢 0，只領預估）。
 //   assumeStarredLate（預設 true）決定「預計發放」採哪一個，另一個當對照顯示。
+//   v1.2 小費：不受打星影響，直接加進「預計發放」（payout/payoutOther 含小費；estTotal/optimisticTotal/conservativeTotal 不含）。
 //   參數可由遠端設定 /api/config 的 pay 區塊覆寫（src/remoteConfig.ts 驗證）。
 import type { Order } from './orders';
 import { periodOf, taipeiDayStart, type Baseline } from './stats.ts';
@@ -25,6 +26,8 @@ export type PaySample = {
   act: number;
   /** 邀請畫面 OCR 抓到的金額（有就當預估報酬；目前 Order 沒存這欄，保留給之後） */
   estAmount?: number | null;
+  /** v1.2 小費（元）；沒有/0 不計 */
+  tip?: number | null;
 };
 
 export type OrderPay = { estPay: number; actPay: number; adjustment: number; late: boolean };
@@ -48,7 +51,10 @@ export type EarningsSummary = {
   optimisticTotal: number;
   /** 保守總額＝晚到單全被打星（補錢 0）＝預估 */
   conservativeTotal: number;
-  /** 預計發放（依 assumeStarredLate 取保守或樂觀） */
+  /** v1.2 小費合計（元）與有小費的單數 */
+  tipTotal: number;
+  tipCount: number;
+  /** 預計發放（依 assumeStarredLate 取保守或樂觀）＋小費 */
   payout: number;
   /** 另一個情境的數字（對照） */
   payoutOther: number;
@@ -66,7 +72,13 @@ export function summarizeEarnings(
   let estTotal = 0;
   let adjustment = 0;
   let lateCount = 0;
+  let tipTotal = 0;
+  let tipCount = 0;
   for (const s of samples) {
+    if (s.tip != null && Number.isFinite(s.tip) && s.tip > 0) {
+      tipTotal += s.tip;
+      tipCount += 1;
+    }
     const o = orderPay(s, p);
     estTotal += o.estPay;
     adjustment += o.adjustment;
@@ -84,8 +96,10 @@ export function summarizeEarnings(
     adjustment,
     optimisticTotal,
     conservativeTotal,
-    payout: conservative ? conservativeTotal : optimisticTotal,
-    payoutOther: conservative ? optimisticTotal : conservativeTotal,
+    tipTotal,
+    tipCount,
+    payout: (conservative ? conservativeTotal : optimisticTotal) + tipTotal,
+    payoutOther: (conservative ? optimisticTotal : conservativeTotal) + tipTotal,
     scenario: conservative ? 'conservative' : 'optimistic',
     baselineIncome: extra,
   };
@@ -95,7 +109,7 @@ export function summarizeEarnings(
 export function paySamplesBetween(orders: readonly Order[], since: number, until: number): PaySample[] {
   return orders
     .filter((o) => o.status === 'delivered' && o.actualMin != null && o.acceptedAt >= since && o.acceptedAt < until)
-    .map((o) => ({ est: o.estimateMin, act: o.actualMin as number }));
+    .map((o) => ({ est: o.estimateMin, act: o.actualMin as number, ...(o.tip != null ? { tip: o.tip } : {}) }));
 }
 
 /** 本期（含同期補登收入）與今日（台北日，不含補登）的收入 */

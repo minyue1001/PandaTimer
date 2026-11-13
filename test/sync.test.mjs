@@ -339,3 +339,33 @@ test('端到端：首次配對全部上傳 → 管理頁改/刪/新增 → App �
   assert.equal(after2.changes.orders.find((o) => o.id === 'old-2').deleted, true, '本機刪除已同步到伺服器');
   assert.equal(after2.changes.orders.find((o) => o.id === 'old-1').deleted, true);
 });
+
+test('v1.2 小費：orderToWire/wireToOrder 往返、舊資料（沒 tip）不帶欄位、指紋含 tip', async () => {
+  const { normalizeTip, parseTipInput } = await import('../src/orders.ts');
+  const o = ord('tp1', { tip: 12.5, updatedAt: T0 + 5 });
+  const w = orderToWire(o);
+  assert.equal(w.tip, 12.5);
+  assert.equal(wireToOrder(w, o).tip, 12.5);
+  assert.ok(!('tip' in orderToWire(ord('tp2'))), '沒小費不送 tip（伺服器視為 null）');
+  assert.equal(wireToOrder({ ...w, tip: null }).tip, undefined);
+  assert.equal(wireToOrder({ ...w, tip: 0 }).tip, undefined);
+  assert.equal(wireToOrder({ ...orderToWire(ord('tp3')) }).tip, undefined);
+  // 小費變動算同步欄位變更 → 蓋新 updatedAt
+  const prev = [ord('tp4', { updatedAt: T0 })];
+  const r = stampChanges(prev, [{ ...prev[0], tip: 20 }], T0 + 99_000);
+  assert.equal(r.changed, true);
+  assert.equal(r.orders[0].updatedAt, T0 + 99_000);
+  // 伺服器版合併進本機
+  const m = mergeServerOrders([ord('tp5', { updatedAt: T0 })], {}, { tp5: T0 }, [{ ...orderToWire(ord('tp5')), updatedAt: T0 + 10, tip: 8 }]);
+  assert.equal(m.orders[0].tip, 8);
+  assert.equal(parseSyncResponse({ now: 1, dbId: 'x', changes: { orders: [{ ...w, tip: 9 }, { ...w, id: 'bad', tip: 'x' }] } }).orders.length, 1);
+  // 輸入解析
+  assert.equal(normalizeTip(0), undefined);
+  assert.equal(normalizeTip(1999.996), 2000);
+  assert.equal(normalizeTip(2001), undefined);
+  assert.deepEqual(parseTipInput('30'), { ok: true, tip: 30 });
+  assert.deepEqual(parseTipInput(' $12.50 '), { ok: true, tip: 12.5 });
+  assert.deepEqual(parseTipInput(''), { ok: true, tip: undefined });
+  assert.deepEqual(parseTipInput('0'), { ok: true, tip: undefined });
+  for (const bad of ['-5', 'abc', '1.234', '2001']) assert.deepEqual(parseTipInput(bad), { ok: false }, bad);
+});

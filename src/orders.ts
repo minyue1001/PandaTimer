@@ -27,12 +27,32 @@ export type Order = {
   stackKind?: 'offer' | 'carry';
   /** v0.8：匯入時帶的金額（元）與備註 */
   amount?: number;
+  /** v1.2：小費（元，0~2000，兩位小數）；沒有＝0（舊資料沒這欄）。0 不存（normalizeTip → undefined） */
+  tip?: number;
   note?: string;
   /** 雲端同步：同步欄位最後修改時間 (ms)；store.mutate 自動蓋，LWW 用（'admin'＝管理網頁新增的單） */
   updatedAt?: number;
 };
 
 export const DEFAULT_ESTIMATE = 18;
+export const MAX_TIP = 2000;
+
+/** 小費正規化：非有限數/≤0/超過上限 → undefined（＝沒有）；否則四捨五入到兩位小數 */
+export function normalizeTip(x: unknown): number | undefined {
+  if (typeof x !== 'number' || !Number.isFinite(x) || x <= 0 || x > MAX_TIP) return undefined;
+  const t = Math.round(x * 100) / 100;
+  return t > 0 ? t : undefined;
+}
+
+/** 使用者輸入的小費文字 → { ok, tip }；空字串/0＝清除（tip undefined）；不合法（負數、非數字、>2000）→ ok:false */
+export function parseTipInput(text: string | null | undefined): { ok: true; tip: number | undefined } | { ok: false } {
+  const t = String(text ?? '').trim().replace(/^\$/, '').replace(/,/g, '');
+  if (t === '') return { ok: true, tip: undefined };
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return { ok: false };
+  const n = Number(t);
+  if (n > MAX_TIP) return { ok: false };
+  return { ok: true, tip: normalizeTip(n) };
+}
 export const SHORT_ORDER_MAX_MIN = 8;
 
 /**

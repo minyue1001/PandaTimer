@@ -250,3 +250,14 @@ test('v1.0 detectorStatus 省電/記憶體欄位：extension 模式/記憶體＋
   const p = detectPill(status({ armed: true, keepAlive: '定位中', lastBeatAt: now - 5_000, saver: true, extMode: 'away' }), now);
   assert.equal(p.detail, '心跳 5 秒前・定位中・省電中・放慢辨識');
 });
+
+test('v1.2 groupHistory：列帶 tip、日小計 tip 與 payout 含小費', () => {
+  const orders = [
+    delivered('a', '2026-11-12T10:00:00', 20, 18, { tip: 30 }),
+    delivered('b', '2026-11-12T11:00:00', 20, 18),
+  ];
+  const g = groupHistory(orders, { now: tp('2026-11-12T20:00:00') }).groups[0];
+  assert.equal(g.subtotal.tip, 30);
+  assert.ok(Math.abs(g.subtotal.payout - (2 * 81.67 + 30)) < 1e-6);
+  assert.deepEqual(g.rows.map((r) => [r.order.id, r.tip]).sort(), [['a', 30], ['b', 0]]);
+});

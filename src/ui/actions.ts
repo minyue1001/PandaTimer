@@ -1,7 +1,8 @@
 // 有副作用的確認流程（Alert＋controller），首頁與紀錄頁共用；文字沿用改版前
 import { Alert } from 'react-native';
-import { cancelOrder, previewPrune, pruneOrders } from '../controller';
-import type { Order } from '../orders';
+import { cancelOrder, previewPrune, pruneOrders, setOrderTip } from '../controller';
+import { MAX_TIP, parseTipInput, type Order } from '../orders';
+import { money } from '../earnings';
 import { describePlan, formatTaipeiDateTime, type PruneCriteria } from '../prune';
 
 export type Toast = (msg: string) => void;
@@ -34,6 +35,33 @@ export function confirmDeleteOne(o: Order, toast: Toast) {
     { text: '不要', style: 'cancel' },
     { text: '刪除', style: 'destructive', onPress: () => runPrune({ kind: 'ids', ids: [o.id] }, toast) },
   ]);
+}
+
+/** v1.2 小費輸入（iOS 文字輸入對話框；存檔即寫入本機並排雲端同步）。空白或 0＝清除小費 */
+export function promptTip(o: Order, toast: Toast, onDone?: () => void) {
+  const cur = o.tip != null ? String(o.tip) : '';
+  Alert.prompt(
+    '小費',
+    `${o.tip != null ? `目前 ${money(o.tip)}。` : ''}輸入這單的小費金額（元，0~${MAX_TIP}；留空＝沒有）`,
+    [
+      { text: '取消', style: 'cancel', onPress: () => onDone?.() },
+      {
+        text: '儲存',
+        onPress: (text?: string) => {
+          onDone?.();
+          const r = parseTipInput(text);
+          if (!r.ok) {
+            Alert.alert('金額格式不對', `請輸入 0~${MAX_TIP} 的數字，最多兩位小數`);
+            return;
+          }
+          void setOrderTip(o.id, r.tip).then(() => toast(r.tip != null ? `已記小費 ${money(r.tip)}` : '已清除小費'));
+        },
+      },
+    ],
+    'plain-text',
+    cur,
+    'decimal-pad',
+  );
 }
 
 export function confirmCancel(id: string) {

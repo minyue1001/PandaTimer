@@ -5,7 +5,7 @@
 //   - since/now 是伺服器的變更序（不受手機時鐘影響）；dbId 變了或 reset:true＝伺服器資料庫換過 → 全部重傳。
 // 本機「待上傳」不另存佇列：每筆訂單的 updatedAt 與 pushed[id]（伺服器已知的版本）不同就是待上傳；
 //   刪掉的單看 prune 的墓碑（id → 刪除時間＝墓碑的 updatedAt）。離線時自然累積，下次同步一起送。
-import type { Order } from './orders';
+import { normalizeTip, type Order } from './orders.ts';
 import { pruneTombstones, type Tombstones } from './prune.ts';
 import type { Baseline } from './stats';
 
@@ -17,6 +17,8 @@ export type WireOrder = {
   deliveredAt: number | null;
   status: Order['status'];
   amount: number | null;
+  /** v1.2 小費（元）；沒有＝省略或 null */
+  tip?: number | null;
   stacked: boolean;
   source: WireSource;
   note: string;
@@ -88,7 +90,7 @@ export function orderUpdatedAt(o: Order): number {
 /** 會同步的欄位（activityId/notifIds 是這台手機的本地狀態，不同步、改了也不算變更） */
 export function syncFingerprint(o: Order): string {
   return JSON.stringify([
-    o.acceptedAt, o.estimateMin, o.deliveredAt ?? null, o.status, o.amount ?? null, !!o.stacked, o.source ?? 'manual', o.note ?? '',
+    o.acceptedAt, o.estimateMin, o.deliveredAt ?? null, o.status, o.amount ?? null, !!o.stacked, o.source ?? 'manual', o.note ?? '', o.tip ?? null,
   ]);
 }
 
@@ -125,6 +127,7 @@ export function orderToWire(o: Order): WireOrder {
     deliveredAt: o.status === 'active' ? null : (o.deliveredAt ?? null),
     status: o.status,
     amount: o.amount ?? null,
+    ...(o.tip != null ? { tip: o.tip } : {}),
     stacked: !!o.stacked,
     source: o.source ?? 'manual',
     note: (o.note ?? '').slice(0, MAX_NOTE),
@@ -144,6 +147,7 @@ export function parseWireOrder(raw: unknown): WireOrder | null {
   if (r.deliveredAt != null && !isNum(r.deliveredAt)) return null;
   if (r.status === 'delivered' && r.deliveredAt == null) return null;
   if (r.amount != null && !isNum(r.amount)) return null;
+  if (r.tip != null && !isNum(r.tip)) return null;
   const source = SOURCES.includes(r.source as WireSource) ? (r.source as WireSource) : 'manual';
   return {
     id: r.id,
@@ -152,6 +156,7 @@ export function parseWireOrder(raw: unknown): WireOrder | null {
     deliveredAt: (r.deliveredAt as number | null | undefined) ?? null,
     status: r.status as Order['status'],
     amount: (r.amount as number | null | undefined) ?? null,
+    ...(normalizeTip(r.tip) != null ? { tip: normalizeTip(r.tip) as number } : {}),
     stacked: r.stacked === true,
     source,
     note: typeof r.note === 'string' ? r.note.slice(0, MAX_NOTE) : '',
@@ -178,6 +183,7 @@ export function wireToOrder(w: WireOrder, local?: Order): Order {
     // v1.1 stackKind 只存本機（伺服器只有 stacked）：仍標 stacked 就沿用本機的種類
     ...(w.stacked && local?.stackKind ? { stackKind: local.stackKind } : {}),
     ...(w.amount != null ? { amount: w.amount } : {}),
+    ...(normalizeTip(w.tip) != null ? { tip: normalizeTip(w.tip) as number } : {}),
     ...(w.note ? { note: w.note } : {}),
     updatedAt: w.updatedAt,
   };

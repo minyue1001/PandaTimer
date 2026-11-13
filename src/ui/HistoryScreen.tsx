@@ -5,7 +5,7 @@ import { money, type EarningsSummary, type PayParams } from '../earnings';
 import type { Order } from '../orders';
 import { formatTaipeiDateTime, parseTaipeiDateTime } from '../prune';
 import type { StatsParams, Summary } from '../stats';
-import { confirmDeleteOne, confirmPrune, runPrune, type Toast } from './actions';
+import { confirmDeleteOne, confirmPrune, promptTip, runPrune, type Toast } from './actions';
 import { Btn, Collapsible, Tags } from './common';
 import { groupHistory, pctText, type DayGroup } from './logic';
 import { C, F, pressed, S } from './theme';
@@ -46,7 +46,7 @@ export const HistoryScreen = memo(function HistoryScreen(p: HistoryProps) {
       {hist.shown < hist.total && (
         <Btn kind="ghost" small title={`顯示更多（還有 ${hist.total - hist.shown} 筆）`} onPress={() => setLimit(limit + PAGE)} />
       )}
-      <Text style={S.small}>長按任一筆可單筆刪除。金額「約」＝依預估分鐘估算的報酬。</Text>
+      <Text style={S.small}>點任一筆可編輯小費，長按可單筆刪除。金額「約」＝依預估分鐘估算的報酬。</Text>
     </ScrollView>
   );
 });
@@ -106,6 +106,9 @@ function EarnBlock({ title, e }: { title: string; e: EarningsSummary }) {
       </Text>
       <Text style={S.text}>
         補錢 {money(e.adjustment)}（若未被打星；晚到 {e.lateCount} 單）
+      </Text>
+      <Text style={S.text}>
+        小費 {money(e.tipTotal)}（{e.tipCount} 單有小費；已含在預計發放）
       </Text>
     </View>
   );
@@ -194,12 +197,15 @@ function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
       <Text style={[S.small, { paddingBottom: 6 }]}>
         {s.count} 單・準時 {pctText(s.onTimeRate)}・超時 {pctText(s.overrunRate)}
         {s.stacked ? `・夾單 ${s.stacked}` : ''}
+        {s.tip > 0 ? `・小費 ${money(s.tip)}` : ''}
       </Text>
       {g.rows.map((r) => (
         <Pressable
           key={r.order.id}
+          onPress={() => promptTip(r.order, toast)}
           onLongPress={() => confirmDeleteOne(r.order, toast)}
           delayLongPress={500}
+          accessibilityHint="點一下編輯小費，長按刪除"
           style={(st) => [rowStyle, pressed(st)]}
         >
           <Text style={[S.textBold, { width: 58, fontVariant: ['tabular-nums'] }]}>{r.time}</Text>
@@ -216,6 +222,9 @@ function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
             <Text style={[S.small, { color: C.sub }]}>
               {r.amountEstimated ? '約' : ''}
               {money(r.amount)}
+            </Text>
+            <Text style={[S.small, { color: r.tip > 0 ? C.green : C.dim }]}>
+              {r.tip > 0 ? `＋小費 ${money(r.tip)}` : '＋小費'}
             </Text>
           </View>
         </Pressable>

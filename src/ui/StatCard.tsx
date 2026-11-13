@@ -67,7 +67,7 @@ export function TodayCard({ today, earn }: { today: Summary; earn: EarningsSumma
     <View style={[S.card, { flexDirection: 'row', gap: 8 }]}>
       <Cell label="今日單數" value={String(today.count)} />
       <Cell label="今日準時" value={pctText(today.onTimeRate)} />
-      <Cell label="預計收入" value={money(earn.payout)} color={C.green} />
+      <Cell label={earn.tipTotal > 0 ? `預計收入（含小費 ${money(earn.tipTotal)}）` : '預計收入'} value={money(earn.payout)} color={C.green} />
     </View>
   );
 }
