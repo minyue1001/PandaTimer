@@ -470,7 +470,8 @@ final class DetectorHub {
             self.emit(["type": "restored", "how": result.text])
           }
         } else if tracking {
-          self.queue.async { self.pushCard(note: nil) }
+          // v1.1：沒在偵測（廣播已停）→ 維持「偵測已停止」，不要推回 standby「偵測中」
+          self.queue.async { self.pushCard(note: nil, stopping: !self.armed) }
         }
       }
     }

@@ -373,6 +373,29 @@ export function locationAuthPending(status: DetectorStatus | null): boolean {
   return status.keepAliveMode === 'auth' || status.locationAuth === 'notDetermined' || status.locationAuth === 'unknown';
 }
 
+/** v1.1 殘留偵測卡：心跳超過這麼久沒來就算廣播已停（＝ui/logic.ts BEAT_STALE_SEC） */
+export const STALE_CARD_BEAT_SEC = 150;
+/** App 剛啟動、還沒收到第一個心跳時的寬限（extension 心跳 60 秒一次） */
+export const STALE_CARD_LAUNCH_GRACE_MS = 90_000;
+
+/**
+ * v1.1 回前景自癒：廣播已停（App 沒在偵測）但動態島還掛著「偵測中」待命卡 → true（呼叫端 stopDetection() 收掉；
+ * 倒數中的卡原生會保留給那張單）。原生 appBecameActive 舊版會把「偵測已停止」卡推回 standby，這裡補救。
+ * 不收的情況：App 偵測中；或心跳還新鮮（App 重開但廣播仍在跑）；或剛啟動還沒等到第一個心跳。
+ */
+export function shouldClearStaleDetectorCard(
+  cards: readonly { mode: string; detector: boolean }[] | null,
+  status: DetectorStatus | null,
+  now: number,
+  uptimeMs: number,
+): boolean {
+  if (!cards || !status || status.armed) return false;
+  if (!cards.some((c) => c.detector && (c.mode === 'standby' || c.mode === 'offer' || c.mode === 'stopped'))) return false;
+  if (status.stoppedUnexpectedAt != null) return true;
+  if (status.lastBeatAt == null) return uptimeMs >= STALE_CARD_LAUNCH_GRACE_MS;
+  return now - status.lastBeatAt > STALE_CARD_BEAT_SEC * 1000;
+}
+
 /** 心跳多久前（秒）；沒有心跳 → null */
 export function beatAgeSec(status: DetectorStatus | null, now: number): number | null {
   if (!status?.lastBeatAt) return null;

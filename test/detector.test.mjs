@@ -337,3 +337,20 @@ test('v1.0 offer.cleared.<原因>、ext.mode/mem/peak：編碼與解析、Swift 
     assert.ok(hub.includes(`d["${k}"]`), `statusJSON 缺 ${k}`);
   }
 });
+
+test('v1.1 shouldClearStaleDetectorCard：廣播停了還掛偵測中卡 → 收；偵測中/心跳新鮮/剛啟動 → 不收', async () => {
+  const { shouldClearStaleDetectorCard: f } = await import('../src/detector.ts');
+  const now = 1_800_000_000_000;
+  const base = { armed: false, lastBeatAt: now - 11 * 60_000, stoppedUnexpectedAt: null };
+  const standby = [{ id: 'a', mode: 'standby', detector: true }];
+  assert.equal(f(standby, base, now, 600_000), true); // 23:03 停、23:15 回前景
+  assert.equal(f([{ id: 'a', mode: 'stopped', detector: true }], { ...base, lastBeatAt: now - 5_000, stoppedUnexpectedAt: now - 5_000 }, now, 600_000), true);
+  assert.equal(f(standby, { ...base, armed: true }, now, 600_000), false);
+  assert.equal(f(standby, { ...base, lastBeatAt: now - 30_000 }, now, 600_000), false); // App 重開、廣播還在跑
+  assert.equal(f(standby, { ...base, lastBeatAt: null }, now, 10_000), false); // 剛啟動寬限
+  assert.equal(f(standby, { ...base, lastBeatAt: null }, now, 120_000), true);
+  assert.equal(f([{ id: 'c', mode: 'countdown', detector: true }], base, now, 600_000), false); // 倒數卡不動
+  assert.equal(f([], base, now, 600_000), false);
+  assert.equal(f(null, base, now, 600_000), false);
+  assert.equal(f(standby, null, now, 600_000), false);
+});

@@ -1,6 +1,7 @@
 import { AppState, Linking } from 'react-native';
 import * as LiveActivity from '../modules/live-activity';
 import { activeMirror, applyNativeEvents, orphanActivityIds, parseNativeEvents, stackMark } from './nativeEvents';
+import { shouldClearStaleDetectorCard } from './detector';
 import { cancelReminders, scheduleReminders } from './notify';
 import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, exactFare, normalizeTip, parseDeepLink, type Order } from './orders';
 import { addTombstones, applyPrune, dropTombstonedEvents, planPrune, type PruneCriteria, type PrunePlan } from './prune';
@@ -244,8 +245,26 @@ export function initNativeBridge(feedback?: Feedback): () => void {
     if (disposed) return;
     unsubscribe = subscribe(pushMirror);
   })();
+  // v1.1：廣播停了卻還顯示「偵測中」→ 收掉（原生回前景重推會先跑，晚 2.5 秒再看）
+  const launchedAt = Date.now();
+  let staleTimer: ReturnType<typeof setTimeout> | null = null;
+  const checkStaleCard = () => {
+    if (staleTimer) clearTimeout(staleTimer);
+    staleTimer = setTimeout(() => {
+      staleTimer = null;
+      if (disposed) return;
+      const now = Date.now();
+      if (shouldClearStaleDetectorCard(LiveActivity.activitySummaries(), LiveActivity.detectorStatus(), now, now - launchedAt)) {
+        void LiveActivity.stopDetection().catch(() => undefined);
+      }
+    }, 2500);
+  };
+  checkStaleCard();
   const appSub = AppState.addEventListener('change', (s) => {
-    if (s === 'active') void drainFromNative().then(report).catch(() => undefined);
+    if (s === 'active') {
+      void drainFromNative().then(report).catch(() => undefined);
+      checkStaleCard();
+    }
   });
   // v0.4：自動偵測新單／動態島送達（App Intents）→ 原生已寫好事件佇列，這裡立刻 drain 入帳。
   // App 在背景時靠音訊保活 JS 仍在跑；就算沒跑到，回前景的 drain 也會補上（事件留在佇列裡）。
@@ -267,6 +286,7 @@ export function initNativeBridge(feedback?: Feedback): () => void {
   });
   return () => {
     disposed = true;
+    if (staleTimer) clearTimeout(staleTimer);
     unsubscribe?.();
     appSub.remove();
     detSub();
