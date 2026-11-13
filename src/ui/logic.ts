@@ -6,7 +6,7 @@
 //   parseTab / shouldJumpHome  分頁記憶與自動切回首頁
 import { beatAgeSec, OFFER_PENDING_STALE_SEC, type DetectorStatus } from '../detector.ts';
 import { formatClock, formatDuration, type Order } from '../orders.ts';
-import { DEFAULT_PAY, fareFor, summarizeEarnings, type PayParams } from '../earnings.ts';
+import { DEFAULT_PAY, fareFor, money, summarizeEarnings, type PayParams } from '../earnings.ts';
 import {
   DEFAULT_STATS,
   isOnTime,
@@ -220,6 +220,46 @@ export function orderTags(o: Pick<Order, 'source' | 'stacked' | 'stackKind'>): s
 
 // ── 紀錄頁：依日期分組 ──
 
+/**
+ * 超時分鐘＝實際 − 預估（向上取整，至少 1）。只在「超過彈性線」（isOnTime 為 false）時才顯示；
+ * 沿用 isOnTime 的 graceFactor 判定是否超時，分鐘數則以預估為基準（使用者看到的「預估 22、實際 27 → 超 5」）。
+ */
+export function overMinutes(est: number, act: number): number {
+  return Math.max(1, Math.ceil(act - est - 1e-9));
+}
+
+/** 一列的狀態文字：準時／超 N 分／進行中／已取消 */
+export function rowStatusText(r: { status?: 'delivered' | 'active' | 'canceled'; est: number; act?: number | null; onTime?: boolean }): string {
+  if (r.status === 'canceled') return '已取消';
+  if (r.status === 'active' || r.act == null) return '進行中';
+  return r.onTime === false ? `超 ${overMinutes(r.est, r.act)} 分` : '準時';
+}
+
+/** 「22 分 → 27 分」；進行中「22 分 → 進行中」；取消「已取消」 */
+export function estActText(r: { status?: 'delivered' | 'active' | 'canceled'; est: number; act?: number | null }): string {
+  if (r.status === 'canceled') return '已取消';
+  if (r.status === 'active' || r.act == null) return `${r.est} 分 → 進行中`;
+  return `${r.est} 分 → ${Math.round(r.act * 10) / 10} 分`;
+}
+
+/** 日標題：「11/13（四）今天」 */
+export function dayTitle(g: { label: string; relative: string }): string {
+  return g.relative ? `${g.label}${g.relative}` : g.label;
+}
+
+/** 日標題右側：「11 單 · 準時 45% · $657.80」（金額含小費） */
+export function daySummaryText(s: { count: number; onTimeRate: number | null; payout: number }): string {
+  return `${s.count} 單 · 準時 ${pctText(s.onTimeRate)} · ${money(s.payout)}`;
+}
+
+/** 日標題下第二行：超時率、小費合計、夾單數；全無則空字串 */
+export function daySubText(s: { overrunRate: number | null; tip: number; stacked: number }): string {
+  const parts = [`超時率 ${pctText(s.overrunRate)}`];
+  if (s.tip > 0) parts.push(`小費 ${money(s.tip)}`);
+  if (s.stacked > 0) parts.push(`夾單 ${s.stacked}`);
+  return parts.join(' · ');
+}
+
 export type HistRow = {
   order: Order;
   /** 接單 HH:mm（台北） */
@@ -234,6 +274,10 @@ export type HistRow = {
   /** v1.2 小費（元，0＝沒有） */
   tip: number;
   tags: string[];
+  /** 「準時」／「超 N 分」 */
+  statusText: string;
+  /** 「22 分 → 27 分」 */
+  estActText: string;
 };
 
 export type DaySubtotal = { count: number; onTimeRate: number | null; overrunRate: number | null; payout: number; stacked: number; tip: number };
@@ -308,17 +352,20 @@ export function groupHistory(
       rows: take.map((o) => {
         const act = o.actualMin as number;
         const amt = orderAmount(o, pay);
+        const onTime = isOnTime({ est: o.estimateMin, act }, stats);
         return {
           order: o,
           time: taipeiClock(o.acceptedAt),
           est: o.estimateMin,
           act,
-          onTime: isOnTime({ est: o.estimateMin, act }, stats),
+          onTime,
           overMin: Math.round((act - o.estimateMin) * 10) / 10,
           amount: amt.value,
           amountEstimated: amt.estimated,
           tip: o.tip ?? 0,
           tags: orderTags(o),
+          statusText: rowStatusText({ status: 'delivered', est: o.estimateMin, act, onTime }),
+          estActText: estActText({ status: 'delivered', est: o.estimateMin, act }),
         };
       }),
       subtotal: {

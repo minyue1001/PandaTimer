@@ -1,13 +1,13 @@
 // 紀錄頁：收入摘要 → 管理紀錄（批次刪除，折疊）→ 依日期分組的歷史（日小計）；列長按＝單筆刪除
 import { memo, useMemo, useState } from 'react';
-import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { money, type EarningsSummary, type PayParams } from '../earnings';
 import type { Order } from '../orders';
 import { formatTaipeiDateTime, parseTaipeiDateTime } from '../prune';
 import type { StatsParams, Summary } from '../stats';
 import { confirmDeleteOne, confirmPrune, promptTip, runPrune, type Toast } from './actions';
-import { Btn, Collapsible, Tags } from './common';
-import { groupHistory, pctText, type DayGroup } from './logic';
+import { Btn, Collapsible } from './common';
+import { dayTitle, daySubText, daySummaryText, groupHistory, pctText, type DayGroup } from './logic';
 import { C, F, pressed, S } from './theme';
 
 const PAGE = 60;
@@ -186,18 +186,22 @@ function ManageCard({ toast }: { toast: Toast }) {
 function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
   const s = g.subtotal;
   return (
-    <View style={[S.card, { gap: 0, paddingVertical: 12 }]}>
-      <View style={[S.rowBetween, { paddingBottom: 8 }]}>
-        <Text style={S.h2}>
-          {g.label}
-          {g.relative ? ` ${g.relative}` : ''}
+    <View style={[S.card, { gap: 0, paddingVertical: 12, paddingHorizontal: 14 }]}>
+      <View style={S.rowBetween}>
+        <Text style={{ fontSize: 17, fontWeight: '800', color: C.text }} numberOfLines={1}>
+          {dayTitle(g)}
         </Text>
-        <Text style={[S.textBold, { color: C.green }]}>{money(s.payout)}</Text>
+        <Text
+          style={{ flex: 1, textAlign: 'right', fontSize: 16, fontWeight: '700', color: C.sub, fontVariant: ['tabular-nums'] }}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.7}
+        >
+          {daySummaryText(s)}
+        </Text>
       </View>
-      <Text style={[S.small, { paddingBottom: 6 }]}>
-        {s.count} 單・準時 {pctText(s.onTimeRate)}・超時 {pctText(s.overrunRate)}
-        {s.stacked ? `・夾單 ${s.stacked}` : ''}
-        {s.tip > 0 ? `・小費 ${money(s.tip)}` : ''}
+      <Text style={[S.small, { paddingTop: 2, paddingBottom: 8 }]} numberOfLines={1}>
+        {daySubText(s)}
       </Text>
       {g.rows.map((r) => (
         <Pressable
@@ -208,24 +212,31 @@ function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
           accessibilityHint="點一下編輯小費，長按刪除"
           style={(st) => [rowStyle, pressed(st)]}
         >
-          <Text style={[S.textBold, { width: 58, fontVariant: ['tabular-nums'] }]}>{r.time}</Text>
-          <View style={{ flex: 1, gap: 4 }}>
-            <Text style={S.text}>
-              {r.est} → {r.act} 分
-            </Text>
-            <Tags tags={r.tags} />
-          </View>
-          <View style={{ alignItems: 'flex-end', gap: 2 }}>
-            <Text style={[S.textBold, { color: r.onTime ? C.green : C.red }]}>
-              {r.onTime ? '準時' : `超 +${r.overMin}`}
-            </Text>
-            <Text style={[S.small, { color: C.sub }]}>
-              {r.amountEstimated ? '約' : ''}
-              {money(r.amount)}
-            </Text>
-            <Text style={[S.small, { color: r.tip > 0 ? C.green : C.dim }]}>
-              {r.tip > 0 ? `＋小費 ${money(r.tip)}` : '＋小費'}
-            </Text>
+          <Text style={timeStyle}>{r.time}</Text>
+          <View style={[barStyle, { backgroundColor: r.onTime ? C.green : C.red }]} />
+          <View style={{ flex: 1, gap: 3 }}>
+            <View style={S.row}>
+              <Text style={estStyle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+                {r.estActText}
+              </Text>
+              <Text style={[statusStyle, { color: r.onTime ? C.green : C.red }]} numberOfLines={1}>
+                {r.statusText}
+              </Text>
+              <Text style={amountStyle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>
+                {r.amountEstimated ? '約' : ''}
+                {money(r.amount)}
+              </Text>
+            </View>
+            <View style={S.row}>
+              <Text style={[S.small, { flex: 1 }]} numberOfLines={1}>
+                {r.tags.join(' · ')}
+              </Text>
+              {r.tip > 0 && (
+                <Text style={[S.small, { color: C.green, fontVariant: ['tabular-nums'] }]} numberOfLines={1}>
+                  +{money(r.tip)} 小費
+                </Text>
+              )}
+            </View>
           </View>
         </Pressable>
       ))}
@@ -236,10 +247,15 @@ function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
 
 const rowStyle = {
   flexDirection: 'row',
-  alignItems: 'center',
+  alignItems: 'stretch',
   gap: 10,
-  minHeight: 56,
-  paddingVertical: 8,
-  borderTopWidth: 1,
+  minHeight: 64,
+  paddingVertical: 11,
+  borderTopWidth: StyleSheet.hairlineWidth,
   borderTopColor: C.border,
 } as const;
+const timeStyle = { width: 52, fontSize: 16, fontWeight: '700', color: C.sub, fontVariant: ['tabular-nums'] } as const;
+const barStyle = { width: 4, borderRadius: 2 } as const;
+const estStyle = { width: 118, fontSize: 18, fontWeight: '700', color: C.text, fontVariant: ['tabular-nums'] } as const;
+const statusStyle = { width: 70, fontSize: 16, fontWeight: '800' } as const;
+const amountStyle = { flex: 1, textAlign: 'right', fontSize: 18, fontWeight: '700', color: C.text, fontVariant: ['tabular-nums'] } as const;

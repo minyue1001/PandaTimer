@@ -4,8 +4,14 @@ import assert from 'node:assert/strict';
 import {
   actionHint,
   BEAT_STALE_SEC,
+  dayTitle,
+  daySubText,
+  daySummaryText,
   detectPill,
+  estActText,
   groupHistory,
+  overMinutes,
+  rowStatusText,
   onTimeTone,
   orderAmount,
   orderCountdown,
@@ -260,4 +266,24 @@ test('v1.2 groupHistory：列帶 tip、日小計 tip 與 payout 含小費', () =
   assert.equal(g.subtotal.tip, 30);
   assert.ok(Math.abs(g.subtotal.payout - (2 * 81.67 + 30)) < 1e-6);
   assert.deepEqual(g.rows.map((r) => [r.order.id, r.tip]).sort(), [['a', 30], ['b', 0]]);
+});
+
+test('v1.3 紀錄列純函式：超時分鐘、狀態文字、預估→實際、日標題', () => {
+  assert.equal(overMinutes(22, 27), 5);
+  assert.equal(overMinutes(3, 29), 26);
+  assert.equal(overMinutes(20, 20.2), 1); // 向上取整、至少 1
+  assert.equal(rowStatusText({ status: 'delivered', est: 22, act: 27, onTime: false }), '超 5 分');
+  assert.equal(rowStatusText({ status: 'delivered', est: 18, act: 18, onTime: true }), '準時');
+  assert.equal(rowStatusText({ status: 'active', est: 22 }), '進行中');
+  assert.equal(rowStatusText({ status: 'canceled', est: 22 }), '已取消');
+  assert.equal(estActText({ status: 'delivered', est: 22, act: 27 }), '22 分 → 27 分');
+  assert.equal(estActText({ status: 'active', est: 22 }), '22 分 → 進行中');
+  assert.equal(estActText({ status: 'canceled', est: 22 }), '已取消');
+  assert.equal(dayTitle({ label: '11/13（四）', relative: '今天' }), '11/13（四）今天');
+  assert.equal(dayTitle({ label: '11/9（一）', relative: '' }), '11/9（一）');
+  assert.equal(daySummaryText({ count: 11, onTimeRate: 0.45, payout: 657.8 }), '11 單 · 準時 45% · $657.80');
+  assert.equal(daySubText({ overrunRate: 0.1, tip: 15, stacked: 2 }), '超時率 10% · 小費 $15.00 · 夾單 2');
+  assert.equal(daySubText({ overrunRate: null, tip: 0, stacked: 0 }), '超時率 —');
+  const g = groupHistory([delivered('a', '2026-11-12T10:00:00', 20, 27, { tip: 15 })], { now: tp('2026-11-12T20:00:00') }).groups[0];
+  assert.deepEqual([g.rows[0].statusText, g.rows[0].estActText], ['超 7 分', '20 分 → 27 分']);
 });
