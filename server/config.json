@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-14.9",
+  "version": "2026-11-14.10",
   "picker": {
     "minutePattern": "(?<![0-9.])([0-9]{1,3})(?![0-9.])\\s*(?:分鐘|分钟|分|min)",
     "minMinutes": 1,
@@ -27,7 +27,7 @@
   },
   "detector": {
     "acceptPattern": "(?<!已)接受(?:訂單|订单)",
-    "dedupeSeconds": 3600,
+    "dedupeSeconds": 90,
     "goneAfterMisses": 2,
     "ocrIntervalSeconds": 1.5,
     "idleOcrIntervalSeconds": 1.5,
