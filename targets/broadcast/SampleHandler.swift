@@ -777,7 +777,7 @@ final class BroadcastDetector {
     handleOffer(tracker.observe(Date(), OfferObservation(info)), info: info)
     // v1.2：沒有邀請進行中、送單畫面連 2 次「N 筆訂單／疊單」→ 告訴 App（App 進行中單數 < N 才提示補記）
     if let n = screenOrders.observe(
-      Date(), n: ScreenOrdersWatch.count(orders: info.orders, stackScreen: info.stackScreen),
+      Date(), n: ScreenOrdersWatch.count(orders: info.orders),
       busy: tracker.isActive || info.accept)
     {
       PandaSignal.postScreenOrders(n)
@@ -1080,6 +1080,8 @@ final class BroadcastDetector {
     if parts.count > 1 {
       fields["bundle"] = parts.count
       fields["others"] = "part\(i + 1)/\(parts.count) total\(d.offer.minutes)"
+    } else if d.offer.bundle >= 2 {
+      fields["others"] = "nosplit bundle\(d.offer.bundle)"  // v1.2.1：送餐資訊 ≥2 但沒拆（當一張）
     }
     if let t = tip {
       fields["tip"] = t

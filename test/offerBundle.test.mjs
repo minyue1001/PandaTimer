@@ -34,24 +34,33 @@ test('組合單拆分：94.01/23 分/2 張 → [12, 11]（49.01＋45）；扣掉
   assert.deepEqual(splitBundle(23, 94.03, 2), [12, 11]);
 });
 
-test('組合單拆分：多解或無解 → 平均分（餘數給前面）；不夠分/不是組合單 → 不拆', () => {
-  // 10 分 $90：1+9、2+8…5+5 全都是 45+45 → 多解
-  assert.deepEqual(splitBundle(10, 90, 2), [5, 5]);
-  assert.deepEqual(splitBundle(11, 90, 2), [6, 5]);
-  // 無解（金額對不上任何組合，例如含了沒讀到的小費）
-  assert.deepEqual(splitBundle(23, 150, 2), [12, 11]);
-  assert.deepEqual(splitBundle(25, 150, 3), [9, 8, 8]);
-  // 沒金額 → 平均分
-  assert.deepEqual(splitBundle(23, null, 2), [12, 11]);
+test('組合單拆分（v1.2.1）：多解/無解/金額不足/單張就對得上 → 一律不拆（當一張）；唯一解才拆', () => {
+  // 邀請畫面同時列出進行中那張的「送餐資訊」：9/10/11 分 $45 其實是一張
+  assert.deepEqual(splitBundle(9, 45, 2), [9]);
+  assert.deepEqual(splitBundle(10, 45, 2), [10]);
+  assert.deepEqual(splitBundle(11, 45, 2), [11]);
+  // 真組合單
+  assert.deepEqual(splitBundle(23, 94.01, 2), [12, 11]);
+  // 單張 25 分 = 102.09，拆 13+12 也差 0.01 → 不確定 → 不拆；102.10 同理
+  assert.deepEqual(splitBundle(25, 102.09, 2), [25]);
+  assert.deepEqual(splitBundle(25, 102.1, 2), [25]);
+  // 10 分 $90：多解 → 不拆
+  assert.deepEqual(splitBundle(10, 90, 2), [10]);
+  // 無解 → 不拆
+  assert.deepEqual(splitBundle(23, 150, 2), [23]);
+  assert.deepEqual(splitBundle(25, 150, 3), [25]);
+  // 沒金額 → 不拆
+  assert.deepEqual(splitBundle(23, null, 2), [23]);
   assert.deepEqual(splitBundle(23, 94.01, 1), [23]);
   assert.deepEqual(splitBundle(1, 45, 2), [1]);
-  assert.deepEqual(splitBundle(30, 200, 9).length, 4); // 上限 4 張
   assert.deepEqual(evenSplit(23, 2), [12, 11]);
   // 三張：12+12+11 → 49.01×2＋45（唯一解）
   assert.deepEqual(splitBundle(35, 143.02, 3), [12, 12, 11]);
-  // 兩張都 ≥12 分：報酬幾乎線性 → 15+15、14+16… 都對得上 → 多解 → 平均分
-  assert.deepEqual(splitBundle(30, exactFare(15) * 2, 2), [15, 15]);
-  assert.deepEqual(splitBundle(31, exactFare(13) + exactFare(18), 2), [16, 15]);
+  // 兩張都 ≥12 分：報酬幾乎線性 → 多解 → 不拆
+  assert.deepEqual(splitBundle(30, exactFare(15) * 2, 2), [30]);
+  assert.deepEqual(splitBundle(31, exactFare(13) + exactFare(18), 2), [31]);
+  // 非遞增列舉：[12,11] 與 [11,12] 不重複算兩解
+  assert.deepEqual(splitBundle(23, 94.01, 2).length, 2);
 });
 
 test('組合單畫面：「送餐資訊」出現 2 次 → bundle 2；接單後 Offer.bundle 2（給 extension 拆單）', () => {
@@ -201,9 +210,9 @@ test('11:53 實機重現：送前一張（畫面一直有 1筆訂單）時沒接
 });
 
 // ── ⑤ 送單畫面 N 筆訂單 ──
-test('screenOrderCount：N 筆訂單取 N、只有「疊單」＝2、都沒有 → null', () => {
+test('screenOrderCount：只採 N 筆訂單的 N；「疊單」字樣不參與、都沒有 → null', () => {
   assert.equal(screenOrderCount(2, false), 2);
-  assert.equal(screenOrderCount(null, true), 2);
+  assert.equal(screenOrderCount(null, true), null); // v1.2.1：「疊單」字樣不算
   assert.equal(screenOrderCount(3, true), 3);
   assert.equal(screenOrderCount(1, false), 1);
   assert.equal(screenOrderCount(null, false), null);
@@ -307,7 +316,8 @@ test('Darwin 名稱：v1.2 共 874 個（< 1000）；Swift DetectorHub/extension
     `var maxBundle = ${DEFAULT_OFFER.maxBundle}`,
     'maxBundle = RemoteConfig.int(o["maxBundle"], 1, 4, maxBundle)',
     'if found.count > 1 { return }',
-    'return found.count == 1 ? found[0] : evenParts',
+    'return found.count == 1 ? found[0] : [totalMinutes]',
+    'if target < k * 4500 - 1 { return [totalMinutes] }',
     'var repeatSec: TimeInterval = 300',
     'var quietSec: TimeInterval = 15',
   ]) assert.ok(ot.includes(s), s);

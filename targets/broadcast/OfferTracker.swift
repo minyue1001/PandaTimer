@@ -398,13 +398,15 @@ enum BundleSplit {
   }
 
   /// 總分鐘 T、總金額（含小費）、張數、小費 → 每張分鐘（大的在前）。Σfare 與（金額−小費）差 ≤0.02 的組合恰好一組才用，
-  /// 多組/無解 → 平均分；張數 <2 或不夠分 → [T]
+  /// 其餘一律不拆 → [T]；張數 <2 或不夠分 → [T]
   static func split(totalMinutes: Int, amount: Double?, count: Int, tip: Int?) -> [Int] {
     let k = min(maxBundle, count)
     guard totalMinutes >= 1, k >= 2, totalMinutes >= k else { return [totalMinutes] }
-    let evenParts = even(totalMinutes, k)
-    guard let a = amount, a.isFinite else { return evenParts }
+    // v1.2.1：金額不明、不到 N×45、單張就對得上、多解、無解 → 一律不拆（當一張）
+    guard let a = amount, a.isFinite else { return [totalMinutes] }
     let target = Int(((a - Double(tip ?? 0)) * 100).rounded())
+    if target < k * 4500 - 1 { return [totalMinutes] }
+    if abs(OfferTracker.fareCents(totalMinutes) - target) <= 2 { return [totalMinutes] }
     var found: [[Int]] = []
     var acc: [Int] = []
     func walk(_ left: Int, _ slots: Int, _ maxPart: Int, _ cents: Int) {
@@ -423,7 +425,7 @@ enum BundleSplit {
       }
     }
     walk(totalMinutes, k, totalMinutes, 0)
-    return found.count == 1 ? found[0] : evenParts
+    return found.count == 1 ? found[0] : [totalMinutes]
   }
 }
 
@@ -440,9 +442,9 @@ final class ScreenOrdersWatch {
   private var quietUntil = Date.distantPast
   private var sentAt: [Int: Date] = [:]
 
-  /// max(「N筆訂單」的 N, 有「疊單」＝2)；都沒有 → nil（＝TS screenOrderCount）
-  static func count(orders: Int?, stackScreen: Bool) -> Int? {
-    let n = max(orders ?? 0, stackScreen ? 2 : 0)
+  /// 只採「N筆訂單」的 N（v1.2.1：「疊單」字樣常駐、不參與）；沒有 → nil（＝TS screenOrderCount）
+  static func count(orders: Int?) -> Int? {
+    let n = orders ?? 0
     return n > 0 ? n : nil
   }
 

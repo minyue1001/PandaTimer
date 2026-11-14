@@ -4,9 +4,9 @@
 //
 // 組合單（11/14 12:28 實機）：一張邀請「每單收入 94.01 $ / 23 分鐘」下面有兩個「送餐資訊」區塊（兩位客人）＝其實是
 //   12 分 $49.01 ＋ 11 分 $45 兩張單。拆法：總分鐘 T、總金額 A（先扣小費）、N 張 → 找每張 ≥1 分、和為 T 的分鐘組合
-//   （不計順序），使 Σfare 與 A 相差 ≤0.02；恰好一組 → 用它（大的在前）；多組或無解 → 平均分（餘數給前面）。
+//   （不計順序），使 Σfare 與 A 相差 ≤0.02；恰好一組 → 用它（大的在前）；v1.2.1 起多組/無解 → 不拆（平均分已拿掉）。
 // 送單畫面「N 筆訂單」（11/14 12:13：疊單的第二張沒有邀請畫面 → 漏記）：extension 不知道 App 有幾張單 → 只要沒有邀請進行中、
-//   連續 ≥2 次 OCR 讀到同一個 N（2~5；「疊單」字樣沒有數字＝2）就送 com.pandatimer.screenorders.<N>，同 N 5 分鐘只送一次、
+//   連續 ≥2 次 OCR 讀到同一個 N（2~5；v1.2.1 起只認「N筆訂單」數字，「疊單」字樣不算）就送 com.pandatimer.screenorders.<N>，同 N 5 分鐘只送一次、
 //   接單後 15 秒內不送（組合單的第二張訊號還在路上）；App 比對進行中單數 < N 才提示補記。
 import { fareCents } from './offerTracker.ts';
 
@@ -22,13 +22,16 @@ export function evenSplit(total: number, n: number): number[] {
 /**
  * 組合單拆分。totalMin＝邀請分鐘數、amount＝邀請金額（含小費）、n＝「送餐資訊」個數、tip＝小費（沒有 → null）。
  * n < 2、分鐘數不合理或不夠分 → [totalMin]（不拆）；n 上限 MAX_BUNDLE。
+ * v1.2.1：只在「恰好一組」分鐘組合對得上金額才拆，其餘（金額<N×45、單張也對得上、多解、無解、沒金額）一律不拆。
  */
 export function splitBundle(totalMin: number, amount: number | null, n: number, tip: number | null = null): number[] {
   const k = Math.min(MAX_BUNDLE, Math.floor(n));
   if (!Number.isInteger(totalMin) || totalMin < 1 || !(k >= 2) || totalMin < k) return [totalMin];
-  const even = evenSplit(totalMin, k);
-  if (amount == null || !Number.isFinite(amount)) return even;
+  // v1.2.1：金額不明、不到 N×45（每張最低報酬）、單張就對得上、多解、無解 → 一律不拆（當一張）
+  if (amount == null || !Number.isFinite(amount)) return [totalMin];
   const target = Math.round((amount - (tip ?? 0)) * 100);
+  if (target < k * 4500 - 1) return [totalMin];
+  if (Math.abs(fareCents(totalMin) - target) <= 2) return [totalMin];
   const found: number[][] = [];
   // 不增序列（大的在前）列舉：每張 ≥1、總和 T；找到第 2 組就停（多解＝平均分）
   const walk = (left: number, slots: number, maxPart: number, acc: number[], cents: number) => {
@@ -46,12 +49,13 @@ export function splitBundle(totalMin: number, amount: number | null, n: number, 
     }
   };
   walk(totalMin, k, totalMin, [], 0);
-  return found.length === 1 ? found[0] : even;
+  return found.length === 1 ? found[0] : [totalMin];
 }
 
 /** 送單畫面上的訂單數：max(「N筆訂單」的 N, 有「疊單」＝2)；都沒有 → null */
-export function screenOrderCount(orders: number | null | undefined, stackScreen: boolean | undefined): number | null {
-  const n = Math.max(orders ?? 0, stackScreen ? 2 : 0);
+export function screenOrderCount(orders: number | null | undefined, _stackScreen?: boolean): number | null {
+  // v1.2.1：「疊單」字樣在送單畫面常駐、跟單數無關 → 只採「N筆訂單」的數字
+  const n = orders ?? 0;
   return n > 0 ? n : null;
 }
 
