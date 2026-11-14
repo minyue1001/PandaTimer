@@ -34,21 +34,23 @@ test('組合單拆分：94.01/23 分/2 張 → [12, 11]（49.01＋45）；扣掉
   assert.deepEqual(splitBundle(23, 94.03, 2), [12, 11]);
 });
 
-test('組合單拆分（v1.2.1）：多解/無解/金額不足/單張就對得上 → 一律不拆（當一張）；唯一解才拆', () => {
-  // 邀請畫面同時列出進行中那張的「送餐資訊」：9/10/11 分 $45 其實是一張
+test('組合單拆分（v1.2.2）：金額<N×45／單張就對得上 → 不拆；其餘確定 N 張：唯一解用它、多解/無解 → 平均分', () => {
+  // 邀請畫面同時列出進行中那張的「送餐資訊」：9/10/11 分 $45 其實是一張（金額 < 2×45）
   assert.deepEqual(splitBundle(9, 45, 2), [9]);
   assert.deepEqual(splitBundle(10, 45, 2), [10]);
   assert.deepEqual(splitBundle(11, 45, 2), [11]);
-  // 真組合單
+  // 真組合單：唯一解
   assert.deepEqual(splitBundle(23, 94.01, 2), [12, 11]);
-  // 單張 25 分 = 102.09，拆 13+12 也差 0.01 → 不確定 → 不拆；102.10 同理
+  // 單張 25 分 = 102.09（差 ≤0.02）→ 不拆；102.10 同理（規則 2 先於列舉）
   assert.deepEqual(splitBundle(25, 102.09, 2), [25]);
   assert.deepEqual(splitBundle(25, 102.1, 2), [25]);
-  // 10 分 $90：多解 → 不拆
-  assert.deepEqual(splitBundle(10, 90, 2), [10]);
-  // 無解 → 不拆
-  assert.deepEqual(splitBundle(23, 150, 2), [23]);
-  assert.deepEqual(splitBundle(25, 150, 3), [25]);
+  // 11/14 23:52 實機：16 分 $90、bundle=2 ＝兩張 $45；多解（8+8、9+7、10+6、11+5）→ 平均分
+  assert.deepEqual(splitBundle(16, 90, 2), [8, 8]);
+  assert.equal(exactFare(8) + exactFare(8), 90);
+  assert.deepEqual(splitBundle(10, 90, 2), [5, 5]);
+  // 無解 → 平均分
+  assert.deepEqual(splitBundle(23, 150, 2), [12, 11]);
+  assert.deepEqual(splitBundle(25, 150, 3), [9, 8, 8]);
   // 沒金額 → 不拆
   assert.deepEqual(splitBundle(23, null, 2), [23]);
   assert.deepEqual(splitBundle(23, 94.01, 1), [23]);
@@ -56,7 +58,7 @@ test('組合單拆分（v1.2.1）：多解/無解/金額不足/單張就對得�
   assert.deepEqual(evenSplit(23, 2), [12, 11]);
   // 三張：12+12+11 → 49.01×2＋45（唯一解）
   assert.deepEqual(splitBundle(35, 143.02, 3), [12, 12, 11]);
-  // 兩張都 ≥12 分：報酬幾乎線性 → 多解 → 不拆
+  // 兩張都 ≥12 分：報酬幾乎線性 → 單張 fare(T) 就對得上（規則 2）→ 不拆（取捨：寧可少拆）
   assert.deepEqual(splitBundle(30, exactFare(15) * 2, 2), [30]);
   assert.deepEqual(splitBundle(31, exactFare(13) + exactFare(18), 2), [31]);
   // 非遞增列舉：[12,11] 與 [11,12] 不重複算兩解
@@ -327,6 +329,22 @@ test('未確認邀請：組合單拆出來的分鐘（12）帶 offerMin（23）�
   assert.deepEqual(matchOrder(s2, 11), s2);
 });
 
+test('未確認邀請（v1.2.2）：11/14 23:52 實況——前一張 8 分 timeout 卡還在，16 分組合單拆成 [8,8] → 16 分卡不得留下', () => {
+  // 時間線：8 分 $45 邀請（superseded → offerCleared timeout → 出卡）→ 16 分 $90 邀請 → 接單、拆成 8＋8
+  let s = recordOffer(EMPTY_STATE, 8, 1000, 'e8');
+  s = recordOffer(s, 16, 2000, 'e16');
+  // 第一張 order：minutes=8、offerMin=16 → 收掉 16 分那張（舊版會被同分鐘 8 吃掉，16 留下）
+  s = matchOrder(s, 8, 16);
+  assert.deepEqual([...s.pending, ...s.unconfirmed].map((e) => e.min), [8]);
+  // 第二張 order：minutes=8、沒有 offerMin → 收掉那張 8 分
+  s = matchOrder(s, 8);
+  assert.deepEqual([...s.pending, ...s.unconfirmed], []);
+  // 沒有前一張 8 分卡的單純情況也成立
+  let t = recordOffer(EMPTY_STATE, 16, 2000, 'x');
+  t = matchOrder(matchOrder(t, 8, 16), 8);
+  assert.deepEqual([...t.pending, ...t.unconfirmed], []);
+});
+
 // ── Darwin 名稱總數與 Swift 同步 ──
 test('Darwin 名稱：v1.2 共 874 個（< 1000）；Swift DetectorHub/extension 名稱與 TS 一致', () => {
   const names = allSignalNames();
@@ -361,7 +379,7 @@ test('Darwin 名稱：v1.2 共 874 個（< 1000）；Swift DetectorHub/extension
     `var maxBundle = ${DEFAULT_OFFER.maxBundle}`,
     'maxBundle = RemoteConfig.int(o["maxBundle"], 1, 4, maxBundle)',
     'if found.count > 1 { return }',
-    'return found.count == 1 ? found[0] : [totalMinutes]',
+    'return found.count == 1 ? found[0] : even(totalMinutes, k)',
     'if target < k * 4500 - 1 { return [totalMinutes] }',
     'var repeatSec: TimeInterval = 300',
     'var quietSec: TimeInterval = 15',

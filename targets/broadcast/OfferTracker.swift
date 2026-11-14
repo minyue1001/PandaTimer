@@ -398,11 +398,11 @@ enum BundleSplit {
   }
 
   /// 總分鐘 T、總金額（含小費）、張數、小費 → 每張分鐘（大的在前）。Σfare 與（金額−小費）差 ≤0.02 的組合恰好一組才用，
-  /// 其餘一律不拆 → [T]；張數 <2 或不夠分 → [T]
+  /// 金額不明/<N×45/單張就對得上 → [T]；其餘多解或無解 → 平均分（v1.2.2，＝TS splitBundle）；張數 <2 或不夠分 → [T]
   static func split(totalMinutes: Int, amount: Double?, count: Int, tip: Int?) -> [Int] {
     let k = min(maxBundle, count)
     guard totalMinutes >= 1, k >= 2, totalMinutes >= k else { return [totalMinutes] }
-    // v1.2.1：金額不明、不到 N×45、單張就對得上、多解、無解 → 一律不拆（當一張）
+    // v1.2.2：金額不明、不到 N×45、單張就對得上 → 不拆；其餘唯一解用它、多解/無解 → 平均分
     guard let a = amount, a.isFinite else { return [totalMinutes] }
     let target = Int(((a - Double(tip ?? 0)) * 100).rounded())
     if target < k * 4500 - 1 { return [totalMinutes] }
@@ -425,7 +425,7 @@ enum BundleSplit {
       }
     }
     walk(totalMinutes, k, totalMinutes, 0)
-    return found.count == 1 ? found[0] : [totalMinutes]
+    return found.count == 1 ? found[0] : even(totalMinutes, k)
   }
 }
 

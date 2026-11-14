@@ -40,11 +40,16 @@ export function recordOffer(s: OfferState, min: number, at: number, id: string):
 
 /**
  * 收到同分鐘的 order 事件（含延遲入帳）：移除最早的一筆同分鐘邀請（pending 或 unconfirmed）。
- * v1.2 組合單：order 是拆出來的分鐘（12、11），邀請是總分鐘（23）→ 原生在第一張帶 offerMin；同分鐘找不到才用 offerMin 找。
+ * v1.2 組合單：order 是拆出來的分鐘（12、11），邀請是總分鐘（23）→ 原生在第一張帶 offerMin。
+ * v1.2.2：offerMin 是「拆出來的總分鐘」（min < offerMin ≤ min×4，第一張至少是總數的 1/4）且卡片存在 → 優先收它，
+ *   即使同時有同分鐘的卡（11/14 23:52：前一張 8 分 $45 timeout 卡還在，8+8 的第一張被它吃掉、16 分卡留下 → 使用者按「有接」多記一張）。
+ *   其餘（offerMin ≤ min＝superseded，指的是後一張）維持同分鐘優先；同分鐘找不到才用 offerMin 找。
  */
 export function matchOrder(s: OfferState, min: number, offerMin?: number | null): OfferState {
-  let all = [...s.pending, ...s.unconfirmed].filter((e) => e.min === min);
-  if (!all.length && offerMin != null && offerMin !== min) all = [...s.pending, ...s.unconfirmed].filter((e) => e.min === offerMin);
+  const every = [...s.pending, ...s.unconfirmed];
+  const bundleTotal = offerMin != null && offerMin > min && offerMin <= min * 4 ? every.filter((e) => e.min === offerMin) : [];
+  let all = bundleTotal.length ? bundleTotal : every.filter((e) => e.min === min);
+  if (!all.length && offerMin != null && offerMin !== min) all = every.filter((e) => e.min === offerMin);
   if (!all.length) return s;
   const target = all.reduce((a, b) => (b.at < a.at ? b : a));
   return {
