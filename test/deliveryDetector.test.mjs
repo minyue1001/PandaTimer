@@ -166,7 +166,7 @@ test('Swift 與 TS 同規則：extension DeliveryEdge、App AutoDelivery、互�
   const rc = read('../modules/live-activity/ios/RemoteConfig.swift');
   for (const s of ['var enabled = true', 'var minOrderAgeSec = 120', 'int(d["minOrderAgeSec"], 0, 1800, out.minOrderAgeSec)',
     'var memSkipMB = 36.0', 'var memHighMB = 44.0', 'number(o["memSkipMB"], 20, 60, out.memSkipMB)', 'number(o["memHighMB"], 25, 80, out.memHighMB)',
-    'var pendingSec = 30', 'int(d["pendingSec"], 0, 60, out.pendingSec)', 'var rebuildEvery = 30', 'int(o["rebuildEvery"], 1, 1000, out.rebuildEvery)',
+    'var pendingSec = 30', 'var stackScreenGapSec = 120', 'int(d["stackScreenGapSec"], 0, 600, out.stackScreenGapSec)', 'int(d["pendingSec"], 0, 60, out.pendingSec)', 'var rebuildEvery = 30', 'int(o["rebuildEvery"], 1, 1000, out.rebuildEvery)',
     'var englishToo = false', `static let defaultFinalKeywords = "${DEFAULT_DELIVERY.finalKeywords}"`]) {
     assert.ok(rc.includes(s), s);
   }

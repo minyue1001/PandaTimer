@@ -212,6 +212,8 @@ final class RemoteConfig {
     var numberScanTop = 0.05
     var numberScanBottom = 0.6
     var bindWindowSec = 300
+    /// v1.2.2：疊單字樣距最近一次送達訊號要 >= 這麼久才算 2 筆（剛送完單殘留字樣會誤報）
+    var stackScreenGapSec = 120
   }
 
   static func delivery(_ root: [String: Any]) -> DeliverySettings {
@@ -232,6 +234,7 @@ final class RemoteConfig {
       out.numberScanBottom = bottom
     }
     out.bindWindowSec = int(d["bindWindowSec"], 30, 3600, out.bindWindowSec)
+    out.stackScreenGapSec = int(d["stackScreenGapSec"], 0, 600, out.stackScreenGapSec)
     return out
   }
 

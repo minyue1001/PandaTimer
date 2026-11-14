@@ -42,6 +42,8 @@ export type DeliverySettings = {
   numberScanBottom: number;
   /** v1.1 接單後多久內看到的新號碼可以綁給它（秒） */
   bindWindowSec: number;
+  /** v1.2.2 疊單字樣距最近一次送達訊號要 >= 這麼久才算 2 筆（0~600） */
+  stackScreenGapSec: number;
 };
 export type DeliveryMode = 'disappear' | 'appear';
 export const DELIVERY_MODES: readonly DeliveryMode[] = ['disappear', 'appear'];
@@ -57,6 +59,7 @@ export const DEFAULT_DELIVERY: Readonly<DeliverySettings> = Object.freeze({
   numberScanTop: 0.05,
   numberScanBottom: 0.6,
   bindWindowSec: 300,
+  stackScreenGapSec: 120,
 });
 
 /** 延遲訊號只編 0…60 秒 */

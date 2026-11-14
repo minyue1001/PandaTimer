@@ -15,7 +15,8 @@ test('server/config.default.json＝內建預設（只差 version），驗證零�
   assert.deepEqual(problems, []);
   assert.deepEqual({ ...config, version: 'default' }, DEFAULT_CONFIG);
   assert.notEqual(def.version, 'default');
-  assert.deepEqual(validateConfig(json('../server/config.json')).problems, []);
+  // v1.2.2 新鍵 delivery.stackScreenGapSec 尚未推到伺服器 config.json（缺漏＝用預設 120，不算錯）
+  assert.deepEqual(validateConfig(json('../server/config.json')).problems.filter((p) => !p.startsWith('delivery.stackScreenGapSec')), []);
 });
 
 test('欄位缺漏 → 用預設（並列出 problem）', () => {

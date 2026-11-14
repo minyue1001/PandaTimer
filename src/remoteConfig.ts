@@ -163,6 +163,7 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'delivery.numberScanTop': [0, 0.9, false], // v1.1 上方補掃範圍（比例，由上往下；交叉檢查 top < bottom）
   'delivery.numberScanBottom': [0.1, 1, false],
   'delivery.bindWindowSec': [30, 3600, true],
+  'delivery.stackScreenGapSec': [0, 600, true],
   'ocr.memSkipMB': [20, 60, false],
   'ocr.memHighMB': [25, 80, false],
   'ocr.rebuildEvery': [1, 1000, true],

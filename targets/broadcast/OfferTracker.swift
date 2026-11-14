@@ -441,11 +441,25 @@ final class ScreenOrdersWatch {
   private var streak = 0
   private var quietUntil = Date.distantPast
   private var sentAt: [Int: Date] = [:]
+  /// v1.2.2 最近一次送出送達訊號的時間；疊單字樣要距此 >= stackGapSec 才算（delivery.stackScreenGapSec）
+  private var lastDeliveredAt = Date.distantPast
+  var stackGapSec: TimeInterval = 120
 
-  /// 只採「N筆訂單」的 N（v1.2.1：「疊單」字樣常駐、不參與）；沒有 → nil（＝TS screenOrderCount）
-  static func count(orders: Int?) -> Int? {
-    let n = orders ?? 0
+  /// max(「N筆訂單」的 N, 疊單字樣 ? 2 : 0)；都沒有 → nil（＝TS screenOrderCount；sinceDeliveredSec 從沒送過＝nil）
+  static func count(orders: Int?, stackScreen: Bool, sinceDeliveredSec: TimeInterval?, gapSec: TimeInterval) -> Int? {
+    let stackOk = stackScreen && (sinceDeliveredSec == nil || sinceDeliveredSec! >= gapSec)
+    let n = max(orders ?? 0, stackOk ? 2 : 0)
     return n > 0 ? n : nil
+  }
+
+  /// 送出任何送達訊號時呼叫
+  func delivered(_ now: Date) {
+    lastDeliveredAt = now
+  }
+
+  /// 距最近一次送達訊號的秒數（從沒送過 → nil）
+  func sinceDelivered(_ now: Date) -> TimeInterval? {
+    lastDeliveredAt == Date.distantPast ? nil : now.timeIntervalSince(lastDeliveredAt)
   }
 
   /// 接單訊號送出時呼叫

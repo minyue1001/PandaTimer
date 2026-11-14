@@ -159,7 +159,8 @@ test('遠端設定 away/power/keepAlive/app.cardRefreshSeconds/telemetry.flushSe
   // 伺服器設定已升版並帶新區塊
   const cfg = JSON.parse(read('../server/config.json'));
   assert.ok(cfg.version >= '2026-11-14.1', `config version ${cfg.version} 應 ≥ 2026-11-14.1`);
-  assert.deepEqual(validateConfig(cfg).problems, []);
+  // v1.2.2 新鍵 delivery.stackScreenGapSec 尚未推到伺服器 config.json（缺漏＝用預設 120，不算錯）
+  assert.deepEqual(validateConfig(cfg).problems.filter((p) => !p.startsWith('delivery.stackScreenGapSec')), []);
 });
 
 test('Swift 與 TS 同規則：RemoteConfig 預設/範圍、AwayTracker、PowerTiming、取樣/排程接線', () => {

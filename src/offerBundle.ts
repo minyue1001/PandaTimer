@@ -52,10 +52,21 @@ export function splitBundle(totalMin: number, amount: number | null, n: number, 
   return found.length === 1 ? found[0] : [totalMin];
 }
 
-/** 送單畫面上的訂單數：max(「N筆訂單」的 N, 有「疊單」＝2)；都沒有 → null */
-export function screenOrderCount(orders: number | null | undefined, _stackScreen?: boolean): number | null {
-  // v1.2.1：「疊單」字樣在送單畫面常駐、跟單數無關 → 只採「N筆訂單」的數字
-  const n = orders ?? 0;
+/** v1.2.2 疊單字樣要距最近一次送達訊號至少這麼久才算（delivery.stackScreenGapSec，0~600；剛送完單殘留字樣會誤報） */
+export const STACK_SCREEN_GAP_SEC = 120;
+
+/**
+ * 送單畫面上的訂單數：max(「N筆訂單」的 N, 疊單字樣 ? 2 : 0)；都沒有 → null。
+ * 「疊單」字樣只在 sinceDeliveredSec（距最近一次送達訊號的秒數；從沒送過＝Infinity/null）>= gapSec 才算；「N筆訂單」不受限。
+ */
+export function screenOrderCount(
+  orders: number | null | undefined,
+  stackScreen?: boolean,
+  sinceDeliveredSec: number | null = null,
+  gapSec: number = STACK_SCREEN_GAP_SEC,
+): number | null {
+  const stackOk = !!stackScreen && (sinceDeliveredSec == null || sinceDeliveredSec >= gapSec);
+  const n = Math.max(orders ?? 0, stackOk ? 2 : 0);
   return n > 0 ? n : null;
 }
 
@@ -71,6 +82,9 @@ export class ScreenOrdersWatch {
   private streak = 0;
   private quietUntil = -Infinity;
   private sentAt = new Map<number, number>();
+  /** v1.2.2 最近一次送出送達訊號的時間（從沒送過＝-Infinity） */
+  private lastDeliveredAt = -Infinity;
+  stackGapSec = STACK_SCREEN_GAP_SEC;
 
   constructor(repeatSec = 300, minStreak = 2, quietSec = 15) {
     this.repeatSec = repeatSec;
@@ -85,7 +99,17 @@ export class ScreenOrdersWatch {
     this.streak = 0;
   }
 
-  /** 每次 OCR：n＝screenOrderCount(...)；busy＝邀請進行中或畫面有接單鈕。回傳要送的 N（2~5）或 null */
+  /** 送出任何送達訊號（delivered / delivered.seq / 含 noNumber、unbound）時呼叫 */
+  delivered(now: number): void {
+    this.lastDeliveredAt = now;
+  }
+
+  /** 距最近一次送達訊號的秒數（從沒送過＝Infinity） */
+  sinceDelivered(now: number): number {
+    return now - this.lastDeliveredAt;
+  }
+
+  /** 每次 OCR：n＝screenOrderCount(orders, stackScreen, watch.sinceDelivered(now), watch.stackGapSec)；busy＝邀請進行中或畫面有接單鈕。回傳要送的 N（2~5）或 null */
   observe(now: number, n: number | null, busy: boolean): number | null {
     if (busy || n == null || n < SCREEN_ORDERS_MIN) {
       this.streakN = null;

@@ -271,7 +271,8 @@
     "numberScan": true,
     "numberScanTop": 0.05,
     "numberScanBottom": 0.6,
-    "bindWindowSec": 300
+    "bindWindowSec": 300,
+    "stackScreenGapSec": 120
   },
   "ocr": {
     "memSkipMB": 36,

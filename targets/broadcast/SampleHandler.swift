@@ -512,6 +512,7 @@ final class BroadcastDetector {
     tracker.dedupeSeconds = next.dedupeWindow
     deliveryEdge.pendingSec = TimeInterval(next.delivery.pendingSec)
     book.bindWindow = TimeInterval(next.delivery.bindWindowSec)
+    screenOrders.stackGapSec = TimeInterval(next.delivery.stackScreenGapSec)
     ocr.configure(englishToo: next.ocrGuard.englishToo, rebuildEvery: next.ocrGuard.rebuildEvery)
     if old.heartbeatInterval != next.heartbeatInterval, let timer = heartbeatTimer {
       timer.schedule(
@@ -776,8 +777,12 @@ final class BroadcastDetector {
     // v0.7：邀請狀態機（不再「看到邀請就送訊號」；接單判定見 OfferTracker.swift）
     handleOffer(tracker.observe(Date(), OfferObservation(info)), info: info)
     // v1.2：沒有邀請進行中、送單畫面連 2 次「N 筆訂單／疊單」→ 告訴 App（App 進行中單數 < N 才提示補記）
+    let soNow = Date()
     if let n = screenOrders.observe(
-      Date(), n: ScreenOrdersWatch.count(orders: info.orders),
+      soNow,
+      n: ScreenOrdersWatch.count(
+        orders: info.orders, stackScreen: info.stackScreen,
+        sinceDeliveredSec: screenOrders.sinceDelivered(soNow), gapSec: screenOrders.stackGapSec),
       busy: tracker.isActive || info.accept)
     {
       PandaSignal.postScreenOrders(n)
@@ -900,6 +905,7 @@ final class BroadcastDetector {
       return
     }
     deliveredCount += 1
+    screenOrders.delivered(now)  // v1.2.2：疊單字樣要距最近送達訊號 >= stackScreenGapSec 才算
     PandaSignal.postDeliveredDelay(delay)
     switch resolution {
     case .seq(let seq, _):

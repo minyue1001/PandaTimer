@@ -210,15 +210,60 @@ test('11:53 實機重現：送前一張（畫面一直有 1筆訂單）時沒接
 });
 
 // ── ⑤ 送單畫面 N 筆訂單 ──
-test('screenOrderCount：只採 N 筆訂單的 N；「疊單」字樣不參與、都沒有 → null', () => {
-  assert.equal(screenOrderCount(2, false), 2);
-  assert.equal(screenOrderCount(null, true), null); // v1.2.1：「疊單」字樣不算
-  assert.equal(screenOrderCount(3, true), 3);
-  assert.equal(screenOrderCount(1, false), 1);
-  assert.equal(screenOrderCount(null, false), null);
+test('screenOrderCount（v1.2.2）：max(N筆訂單, 疊單字樣=2)；疊單字樣要距送達 >=120 秒才算、N筆訂單不受限', () => {
+  assert.equal(screenOrderCount(2, false, 5), 2); // N筆訂單＝2：送達後 3 秒仍算
+  assert.equal(screenOrderCount(2, false, 3), 2);
+  assert.equal(screenOrderCount(null, true, 3), null); // 剛送完殘留字樣
+  assert.equal(screenOrderCount(null, true, 119), null);
+  assert.equal(screenOrderCount(null, true, 120), 2);
+  assert.equal(screenOrderCount(null, true, null), 2); // 從沒送過
+  assert.equal(screenOrderCount(null, true, Infinity), 2);
+  assert.equal(screenOrderCount(3, true, 500), 3);
+  assert.equal(screenOrderCount(1, true, 500), 2);
+  assert.equal(screenOrderCount(3, true, 1), 3);
+  assert.equal(screenOrderCount(1, false, 500), 1);
+  assert.equal(screenOrderCount(null, false, 500), null);
+  assert.equal(screenOrderCount(null, true, 30, 20), 2); // 可調門檻
+  assert.equal(screenOrderCount(null, true, 599, 600), null);
   const s = summarizeScreen('疊單\n店名A\n店名B');
   assert.deepEqual([s.stackScreen, s.orders], [true, null]);
   assert.equal(summarizeScreen('叠单').stackScreen, true);
+});
+
+test('v1.2.2 實機 11/15 五個時間點：三個剛送完殘留字樣不送、兩個真的疊單送 N=2', () => {
+  // t＝看到「疊單」的時間、d＝最近一次送達訊號時間（秒，當天）；連 2 次 observe 模擬去抖
+  const hms = (h, m, s) => h * 3600 + m * 60 + s;
+  const run = (t, d) => {
+    const w = new ScreenOrdersWatch();
+    if (d != null) w.delivered(d);
+    const n = (x) => screenOrderCount(null, true, w.sinceDelivered(x), w.stackGapSec);
+    const first = w.observe(t, n(t), false);
+    const second = w.observe(t + 2, n(t + 2), false);
+    return [first, second];
+  };
+  assert.deepEqual(run(hms(0, 8, 39), hms(0, 8, 20)), [null, null]); // 差 19 秒
+  assert.deepEqual(run(hms(1, 14, 59), hms(1, 14, 56)), [null, null]); // 差 3 秒
+  assert.deepEqual(run(hms(1, 29, 58), hms(1, 29, 10)), [null, null]); // 差 48 秒
+  assert.deepEqual(run(hms(2, 59, 28), hms(2, 57, 16)), [null, 2]); // 差 132 秒，當時實際 3 張
+  assert.deepEqual(run(hms(2, 53, 38), null), [null, 2]); // 無近期送達
+  // 「N筆訂單＝2」送達後 3 秒仍算
+  const w = new ScreenOrdersWatch();
+  w.delivered(1000);
+  const n = (x) => screenOrderCount(2, false, w.sinceDelivered(x), w.stackGapSec);
+  assert.equal(w.observe(1003, n(1003), false), null);
+  assert.equal(w.observe(1005, n(1005), false), 2);
+  // 送達後殘留字樣、過了 120 秒仍在畫面 → 之後才算（連 2 次）
+  const w2 = new ScreenOrdersWatch();
+  w2.delivered(0);
+  const m = (x) => screenOrderCount(null, true, w2.sinceDelivered(x), w2.stackGapSec);
+  assert.equal(w2.observe(119, m(119), false), null);
+  assert.equal(w2.observe(120, m(120), false), null); // 第 1 次
+  assert.equal(w2.observe(122, m(122), false), 2);
+  w2.stackGapSec = 300; // 遠端可調
+  const w3 = new ScreenOrdersWatch();
+  w3.stackGapSec = 300;
+  w3.delivered(0);
+  assert.equal(screenOrderCount(null, true, w3.sinceDelivered(200), w3.stackGapSec), null);
 });
 
 test('ScreenOrdersWatch 去抖：連 2 次同 N 才送、同 N 5 分鐘一次、邀請中/接單鈕重置、接單後 15 秒內不送、N 上限 5', () => {
