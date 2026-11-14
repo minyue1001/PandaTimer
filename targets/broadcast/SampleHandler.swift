@@ -41,6 +41,11 @@ import Vision
 //   - 單號的問句在畫面上半部（主 OCR 只看下半部）→ 綁號中/對話框沒讀到號碼時，同一幀另 OCR 上方 numberScanTop~Bottom。
 //   - 單號只在 extension 記憶體，**不上傳**（telemetry 只有 matched/result）。
 //   - OfferTracker 誤讀防護：分鐘 < offer.suspectBelowMinutes 且同畫面有接單後字樣 → 不送 offer.pending（telemetry offer_suspect）。
+// v1.2（11/14 實機；規則＝src/offerTracker.ts＋src/offerBundle.ts＋src/screenInfo.ts，以 TS 測試為準）：
+//   - 組合單：邀請畫面「送餐資訊」≥2 個 → 接單後 BundleSplit 拆成 N 張，每張各自 seq 送 accept.delay＋order（間隔 1.2 秒，
+//     避免同名 Darwin 合併、App 端卡片並行更新）；telemetry bundle=N。
+//   - 小費：「包含額外 N 元」→ 第一張的 order 之前先送 com.pandatimer.tip.<值>（值見 PandaSignal.tipValue；telemetry tip＝原值）。
+//   - 送單畫面「N 筆訂單／疊單」（沒有邀請進行中、連 2 次）→ com.pandatimer.screenorders.<N>（ScreenOrdersWatch 去抖）。
 //
 // 省記憶體（v0.4 實測峰值 43MB → v0.5 目標 ≤36MB；jetsam 約 50MB）：
 //  - 不用 CIContext：直接讀 pixel buffer 的亮度平面（420f 的 Y），只取畫面下方 50%，
@@ -104,6 +109,31 @@ enum PandaSignal {
   static let offerStacked = "com.pandatimer.offer.stacked"
   /// v1.1：送達對話框上的單號對到接單 seq → com.pandatimer.delivered.seq.<seq mod 4>（取代 delivered；之前照樣先送 delivered.delay）
   static let deliveredSeqPrefix = "com.pandatimer.delivered.seq."
+  /// v1.2：小費 com.pandatimer.tip.<值>（1~100 每 1 元、110~300 每 10 元；＝src/detector.ts TIP_SIGNAL_VALUES）
+  static let tipPrefix = "com.pandatimer.tip."
+  static let maxTipSignal = 300
+  /// v1.2：送單畫面 N 筆訂單 com.pandatimer.screenorders.<2-5>
+  static let screenOrdersPrefix = "com.pandatimer.screenorders."
+
+  /// 小費 → 訊號值（＝TS tipSignalValue）：<1 → nil；1~100 原值；101~299 最近的 10 元；≥300 → 300
+  static func tipValue(_ tip: Int) -> Int? {
+    if tip < 1 { return nil }
+    if tip <= 100 { return tip }
+    if tip >= maxTipSignal { return maxTipSignal }
+    return (tip + 5) / 10 * 10
+  }
+
+  /// 送出小費訊號，回傳實際送的值（nil＝沒送）
+  static func postTip(_ tip: Int) -> Int? {
+    guard let v = tipValue(tip) else { return nil }
+    post("\(tipPrefix)\(v)")
+    return v
+  }
+
+  static func postScreenOrders(_ n: Int) {
+    guard n >= 2 else { return }
+    post("\(screenOrdersPrefix)\(min(5, n))")
+  }
 
   static func post(_ name: String) {
     CFNotificationCenterPostNotification(
@@ -229,6 +259,8 @@ final class BroadcastDetector {
       rules.acceptedKeywords = offer.acceptedKeywords
       rules.rejectedKeywords = offer.rejectedKeywords
       rules.stackedKeywords = offer.stackedKeywords
+      rules.weakAcceptedKeywords = offer.weakAcceptedKeywords
+      rules.bundleKeywords = offer.bundleKeywords
       delivery = RemoteConfig.delivery(root)
       rules.completedKeywords = delivery.completedKeywords
       rules.finalKeywords = delivery.finalKeywords
@@ -305,6 +337,8 @@ final class BroadcastDetector {
   private var decisionTimer: DispatchWorkItem?
   private var orderSeq = 0
   private var dupCount = 0
+  /// v1.2 送單畫面「N 筆訂單」去抖
+  private let screenOrders = ScreenOrdersWatch()
   /// v0.7 自動送達邊緣觸發、記憶體保護
   private let deliveryEdge = DeliveryEdge()
   /// v1.1 單號 ↔ 接單 seq、送達對話框消失偵測（OrderNumbers.swift）；最近一次對話框單號（appear 模式用）、上方補掃時間/次數
@@ -741,6 +775,16 @@ final class BroadcastDetector {
 
     // v0.7：邀請狀態機（不再「看到邀請就送訊號」；接單判定見 OfferTracker.swift）
     handleOffer(tracker.observe(Date(), OfferObservation(info)), info: info)
+    // v1.2：沒有邀請進行中、送單畫面連 2 次「N 筆訂單／疊單」→ 告訴 App（App 進行中單數 < N 才提示補記）
+    if let n = screenOrders.observe(
+      Date(), n: ScreenOrdersWatch.count(orders: info.orders, stackScreen: info.stackScreen),
+      busy: tracker.isActive || info.accept)
+    {
+      PandaSignal.postScreenOrders(n)
+      var fields: [String: Any] = ["screenOrders": n, "kw": info.kw, "screen": info.screen, "trig": why]
+      if let o = info.orders { fields["orders"] = o }
+      telemetry.log("screen_orders", fields, urgent: true)
+    }
     // v1.1 單號：需要時 OCR 上方補掃 → 接單後畫面綁號
     let now = Date()
     let bindable = !info.accept && !scan.dialog && !info.deliveredFinal && info.offerAccepted
@@ -908,6 +952,8 @@ final class BroadcastDetector {
         PandaSignal.postOfferPending(offer.minutes)
         var fields: [String: Any] = ["min": offer.minutes, "note": "pending", "trig": lastWhy, "stacked": offer.stacked]
         if let a = offer.amount { fields["amt"] = a }
+        if offer.bundle >= 2 { fields["bundle"] = offer.bundle }
+        if let t = offer.tip { fields["tip"] = t }
         if let i = info {
           fields["kw"] = i.kw
           fields["screen"] = i.screen
@@ -943,6 +989,8 @@ final class BroadcastDetector {
       "kw": d.kw, "hit": d.hit, "stacked": d.offer.stacked,
     ]
     if let a = d.offer.amount { fields["amt"] = a }
+    if d.offer.bundle >= 2 { fields["bundle"] = d.offer.bundle }
+    if let t = d.offer.tip { fields["tip"] = t }
     telemetry.log("offer_decided", fields, urgent: true)
     let reasonText: String
     switch d.reason {
@@ -962,41 +1010,83 @@ final class BroadcastDetector {
       return
     }
     let now = d.decidedAt
+    // v1.2 組合單：「送餐資訊」≥2 → 拆成 N 張（每張 ≥1 分、Σfare＝金額−小費；不確定就平均分）
+    let bundle = min(d.offer.bundle, currentSettings().offer.maxBundle)
+    let parts = bundle >= 2
+      ? BundleSplit.split(totalMinutes: minutes, amount: d.offer.amount, count: bundle, tip: d.offer.tip) : [minutes]
+    let firstSeq = orderSeq
+    orderSeq += parts.count
     lastTriggerMinutes = minutes
     lastTriggerAt = now
-    triggerCount += 1
-    let seq = orderSeq
-    orderSeq += 1
-    let delay = OfferTracker.delaySeconds(decidedAt: now, acceptedAt: acceptedAt)
+    triggerCount += parts.count
+    screenOrders.accepted(Date())
     let stacked = d.offer.stacked
-    if stacked { PandaSignal.post(PandaSignal.offerStacked) }  // v0.8：先夾單、再延遲、最後 order
-    PandaSignal.postAcceptDelay(delay)
-    let sent = PandaSignal.postOrder(minutes, seq: seq)
-    // v1.1：App 收得到這個 seq 才記（之後畫面上的 #單號綁給它）
-    if sent { book.accepted(seq: seq, at: acceptedAt) }
+    let tip = d.offer.tip
+    // 第 i 張：（第一張先送小費）→ 夾單 → 延遲 → order；之後每張隔 1.2 秒（同名 Darwin 通知可能合併、App 端卡片更新並行）
+    let sent = sendOrderPart(d, parts: parts, index: 0, firstSeq: firstSeq, acceptedAt: acceptedAt)
+    for i in 1..<max(1, parts.count) {
+      workQueue.asyncAfter(deadline: .now() + 1.2 * Double(i)) { [weak self] in
+        self?.sendOrderPart(d, parts: parts, index: i, firstSeq: firstSeq, acceptedAt: acceptedAt)
+      }
+    }
     let text2 = diag()
-    var orderFields: [String: Any] = [
-      "min": minutes, "seq": seq % PandaSignal.seqMod, "triggers": triggerCount, "kw": d.kw, "accept": true,
-      "memMB": currentMB, "peakMB": peakMB, "delay": delay, "reason": d.reason,
-      "note": sent ? "signal" : "outOfRange", "stacked": stacked,
-    ]
-    if let a = d.offer.amount { orderFields["amt"] = a }
-    telemetry.log("order", orderFields, urgent: true)
     // userInfo：App 被暫停後才收到訊號時，用這裡的時間（＝按下接受的時間）當接單時間（DetectorNotify.detectedAt，
-    // 以分鐘數＋序號配對）。點這則通知 → 系統打開 App → App 回前景就把卡片重推一次（不會重複記錄）。
+    // 以分鐘數＋序號配對；v1.2 組合單每張在 parts 裡、小費只在第一張）。點這則通知 → 系統打開 App → App 回前景就把卡片重推一次。
     let detectedMs = (acceptedAt.timeIntervalSince1970 * 1000).rounded()
-    let seqValue = seq % PandaSignal.seqMod
+    let seqValue = firstSeq % PandaSignal.seqMod
+    let partsInfo: [[String: Any]] = parts.enumerated().map { (i, m) -> [String: Any] in
+      var p: [String: Any] = ["minutes": m, "seq": (firstSeq + i) % PandaSignal.seqMod]
+      if i == 0, let t = tip { p["tip"] = t }
+      return p
+    }
+    let firstMinutes = parts[0]
+    let bundleText = parts.count > 1 ? "（組合單拆成 " + parts.map { "\($0) 分" }.joined(separator: "＋") + "）" : ""
+    let tipText = tip.map { "・小費 \($0) 元" } ?? ""
     Task.detached {
-      let infoDict: [String: Any] = [
-        "pandatimer": "detected", "minutes": minutes, "detectedAt": detectedMs, "seq": seqValue, "stacked": stacked,
+      var infoDict: [String: Any] = [
+        "pandatimer": "detected", "minutes": firstMinutes, "detectedAt": detectedMs, "seq": seqValue, "stacked": stacked,
+        "parts": partsInfo,
       ]
+      if let t = tip { infoDict["tip"] = t }
       await Notifier.post(
-        "已接單：\(minutes) 分鐘" + (stacked ? "（夾單）" : ""),
-        amountText + "\(reasonText)。"
+        "已接單：\(minutes) 分鐘" + (stacked ? "（夾單）" : "") + bundleText,
+        amountText + "\(reasonText)\(tipText)。"
           + (sent ? "已通知 App 開倒數與記錄。動態島沒變→點這則打開 App" : "分鐘數超出 1–90，未通知 App")
           + "\n\(text2)",
         passive: false, userInfo: infoDict)
     }
+  }
+
+  /// v1.2 送出一張接單（只在 workQueue）：第一張先送小費 → 夾單 → 延遲 → order。回傳 order 有沒有送出（分鐘超出 1~90 → false）
+  @discardableResult
+  private func sendOrderPart(_ d: OfferDecision, parts: [Int], index i: Int, firstSeq: Int, acceptedAt: Date) -> Bool {
+    let m = parts[i]
+    let seq = firstSeq + i
+    let tip = i == 0 ? d.offer.tip : nil
+    let stacked = d.offer.stacked
+    let tipSent = tip.flatMap { PandaSignal.postTip($0) }
+    if stacked { PandaSignal.post(PandaSignal.offerStacked) }  // v0.8：先夾單、再延遲、最後 order
+    let delay = OfferTracker.delaySeconds(decidedAt: Date(), acceptedAt: acceptedAt)
+    PandaSignal.postAcceptDelay(delay)
+    let sent = PandaSignal.postOrder(m, seq: seq)
+    // v1.1：App 收得到這個 seq 才記（之後畫面上的 #單號綁給它）
+    if sent { book.accepted(seq: seq, at: acceptedAt) }
+    var fields: [String: Any] = [
+      "min": m, "seq": seq % PandaSignal.seqMod, "triggers": triggerCount, "kw": d.kw, "accept": true,
+      "memMB": currentMB, "peakMB": peakMB, "delay": delay, "reason": d.reason,
+      "note": sent ? "signal" : "outOfRange", "stacked": stacked,
+    ]
+    if let a = d.offer.amount { fields["amt"] = a }
+    if parts.count > 1 {
+      fields["bundle"] = parts.count
+      fields["others"] = "part\(i + 1)/\(parts.count) total\(d.offer.minutes)"
+    }
+    if let t = tip {
+      fields["tip"] = t
+      if tipSent != t { fields["code"] = tipSent ?? 0 }  // 小費超出訊號值（>300 或非整十）→ code＝實際送的值
+    }
+    telemetry.log("order", fields, urgent: true)
+    return sent
   }
 
   /// 畫面分類或接單鈕狀態有變才記一筆（最多每 5 秒一筆，接單鈕狀態改變不受限）

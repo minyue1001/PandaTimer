@@ -125,6 +125,18 @@ export type ScreenSummary = {
   deliveredFinal: boolean;
   /** v0.8：邀請畫面上有「夾單」（offer.stackedKeywords） */
   stacked: boolean;
+  /** v1.2：去掉常駐字（offer.weakAcceptedKeywords：筆訂單/取餐體驗）後仍命中 acceptedKeywords＝強證據 */
+  acceptStrong: boolean;
+  /** v1.2：命中常駐字（送單中畫面本來就一直在的「N筆訂單」「取餐體驗」） */
+  acceptWeak: boolean;
+  /** v1.2：「N筆訂單」的 N（1~9；沒讀到數字 → null） */
+  orders: number | null;
+  /** v1.2：畫面有「疊單」字樣 */
+  stackScreen: boolean;
+  /** v1.2：「送餐資訊」出現次數（offer.bundleKeywords；邀請畫面 ≥2＝組合單） */
+  bundle: number;
+  /** v1.2：邀請金額下方「包含額外 N $ 元」＝小費（整數元 1~2000；沒有 → null） */
+  tip: number | null;
 };
 
 // v0.7 接單後/未接畫面的預設關鍵字（v0.8 加入首日實測接單後畫面：「預計7分鐘後抵達店家・1筆訂單」「再 8 分鐘即將準備完成」「取餐體驗如何呢?」；
@@ -140,6 +152,55 @@ export const DEFAULT_COMPLETED_KEYWORDS =
 export const DEFAULT_FINAL_KEYWORDS = '訂單完成|订单完成|訂單已完成|订单已完成';
 /** v0.8 夾單邀請（上方小字「夾單訂單依系統顯示金額為主」） */
 export const DEFAULT_STACKED_KEYWORDS = '夾單|夹单';
+/** v1.2 送單中畫面常駐、不能單獨當接單證據的字（11/14 實機：送前一張時沒接新邀請，畫面一直有「1筆訂單」「取餐體驗」→ 被判接單）。
+ *  先從文字中去掉它們再比對 acceptedKeywords（「取餐體驗」裡的「取餐」一起去掉）。 */
+export const DEFAULT_WEAK_ACCEPTED_KEYWORDS = '筆訂單|笔订单|取餐體驗|取餐体验';
+/** v1.2 組合單：邀請畫面每位客人一個「送餐資訊」區塊 */
+export const DEFAULT_BUNDLE_KEYWORDS = '送餐資訊|送餐资讯|送餐資讯|送餐资訊';
+
+/** v1.2「包含額外 30.00 $ 元」（愛心圖示）＝小費：去空白後比對，金額取整數元 */
+const TIP_RX = /包含[額额]外(?:NT)?[$＄]?([0-9]{1,4}(?:[.．][0-9]{1,2})?)/;
+/** v1.2「預計7分鐘後抵達店家・2筆訂單」→ 2（數字緊接「筆訂單」） */
+const ORDERS_RX = /([1-9])(?:筆|笔)(?:訂單|订单)/;
+const STACK_SCREEN_RX = /疊單|叠单/;
+
+/** 去空白文字 → 小費整數元（1~2000）；沒有/不合理 → null */
+export function extractTip(compact: string): number | null {
+  const m = TIP_RX.exec(compact);
+  if (!m) return null;
+  const v = Math.round(parseFloat(m[1].replace('．', '.')));
+  return Number.isFinite(v) && v >= 1 && v <= 2000 ? v : null;
+}
+
+/** 去空白文字 → 「N筆訂單」的 N；沒有 → null */
+export function extractOrderCount(compact: string): number | null {
+  const m = ORDERS_RX.exec(compact);
+  return m ? Number(m[1]) : null;
+}
+
+/** pattern 在去空白文字裡（不重疊）出現幾次；編不過 → 用 fallback；空字串命中不算 */
+function countMatches(compact: string, pattern: string | undefined, fallback: string): number {
+  let r: RegExp;
+  try {
+    r = new RegExp(pattern ?? fallback, 'g');
+  } catch {
+    r = new RegExp(fallback, 'g');
+  }
+  let n = 0;
+  for (const m of compact.matchAll(r)) if (m[0].length > 0) n++;
+  return n;
+}
+
+/** 常駐字換成分隔符（不是空字串：避免前後兩段黏成假命中） */
+function stripWeak(compact: string, pattern: string | undefined): string {
+  let r: RegExp;
+  try {
+    r = new RegExp(pattern ?? DEFAULT_WEAK_ACCEPTED_KEYWORDS, 'g');
+  } catch {
+    r = new RegExp(DEFAULT_WEAK_ACCEPTED_KEYWORDS, 'g');
+  }
+  return compact.replace(r, (m) => (m.length ? '|' : m));
+}
 
 export type ScreenRules = {
   picker: PickerConfig;
@@ -150,6 +211,8 @@ export type ScreenRules = {
   completedKeywords?: string;
   finalKeywords?: string;
   stackedKeywords?: string;
+  weakAcceptedKeywords?: string;
+  bundleKeywords?: string;
 };
 export const DEFAULT_SCREEN_RULES: ScreenRules = {
   picker: DEFAULT_PICKER,
@@ -160,6 +223,8 @@ export const DEFAULT_SCREEN_RULES: ScreenRules = {
   completedKeywords: DEFAULT_COMPLETED_KEYWORDS,
   finalKeywords: DEFAULT_FINAL_KEYWORDS,
   stackedKeywords: DEFAULT_STACKED_KEYWORDS,
+  weakAcceptedKeywords: DEFAULT_WEAK_ACCEPTED_KEYWORDS,
+  bundleKeywords: DEFAULT_BUNDLE_KEYWORDS,
 };
 
 const offerRx = new Map<string, RegExp | null>();
@@ -196,6 +261,8 @@ export function summarizeScreen(raw: string | null | undefined, rules: ScreenRul
   const done = compact && !accept ? (firstOfferMatch(compact, rules.completedKeywords, DEFAULT_COMPLETED_KEYWORDS) ?? finalHit) : null;
   const stacked = compact ? firstOfferMatch(compact, rules.stackedKeywords, DEFAULT_STACKED_KEYWORDS) != null : false;
   const minutes = accept ? pickMinutes(raw, rules.picker) : null;
+  const weak = compact && acc ? firstOfferMatch(compact, rules.weakAcceptedKeywords, DEFAULT_WEAK_ACCEPTED_KEYWORDS) : null;
+  const strong = acc && weak ? firstOfferMatch(stripWeak(compact, rules.weakAcceptedKeywords), rules.acceptedKeywords, DEFAULT_ACCEPTED_KEYWORDS) : acc;
   return {
     accept,
     minutes,
@@ -210,6 +277,12 @@ export function summarizeScreen(raw: string | null | undefined, rules: ScreenRul
     deliveredHit: done ? matchKeywords(done, rules.keywords) : [],
     deliveredFinal: finalHit != null,
     stacked,
+    acceptStrong: strong != null,
+    acceptWeak: weak != null,
+    orders: compact ? extractOrderCount(compact) : null,
+    stackScreen: compact ? STACK_SCREEN_RX.test(compact) : false,
+    bundle: compact ? countMatches(compact, rules.bundleKeywords, DEFAULT_BUNDLE_KEYWORDS) : 0,
+    tip: compact ? extractTip(compact) : null,
   };
 }
 

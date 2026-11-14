@@ -1,9 +1,10 @@
 // 有副作用的確認流程（Alert＋controller），首頁與紀錄頁共用；文字沿用改版前
 import { Alert } from 'react-native';
-import { cancelOrder, previewPrune, pruneOrders, setOrderTip } from '../controller';
+import { cancelOrder, previewPrune, pruneOrders, setOrderTip, startOrder } from '../controller';
 import { MAX_TIP, parseTipInput, type Order } from '../orders';
 import { money } from '../earnings';
 import { describePlan, formatTaipeiDateTime, type PruneCriteria } from '../prune';
+import { parseMinutesInput, type ScreenHint } from '../unconfirmedOffers';
 
 export type Toast = (msg: string) => void;
 
@@ -61,6 +62,31 @@ export function promptTip(o: Order, toast: Toast, onDone?: () => void) {
     'plain-text',
     cur,
     'decimal-pad',
+  );
+}
+
+/** v1.2 送單畫面 N 筆訂單、App 少記 → 補記一張（輸入預估分鐘；接單時間＝畫面看到的時間，source 'confirm'） */
+export function promptMissingOrder(h: ScreenHint, toast: Toast) {
+  Alert.prompt(
+    '補記一張單',
+    `畫面顯示 ${h.n} 筆訂單，App 只有 ${h.active} 張。輸入漏掉那張的預估分鐘（1~90）`,
+    [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '補記',
+        onPress: (text?: string) => {
+          const min = parseMinutesInput(text);
+          if (min == null) {
+            Alert.alert('分鐘數不對', '請輸入 1~90 的整數');
+            return;
+          }
+          void startOrder(min, toast, { acceptedAt: h.at, source: 'confirm' }).then(() => toast(`已補記：預估 ${min} 分`));
+        },
+      },
+    ],
+    'plain-text',
+    '',
+    'number-pad',
   );
 }
 

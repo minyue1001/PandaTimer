@@ -85,6 +85,7 @@ test('summarizeScreen：新單畫面 → 結構化欄位，沒有任何原文（
     accept: true, minutes: 27, amount: 110.26, km: 6.7, kw: ['接受訂單', '拒絕', '上線中', '每單收入'], screen: 'newOrder',
     offerAccepted: false, offerRejected: true, offerHit: ['上線中'],
     delivered: false, deliveredHit: [], deliveredFinal: false, stacked: false,
+    acceptStrong: false, acceptWeak: false, orders: null, stackScreen: false, bundle: 1, tip: null,
   });
   const json = JSON.stringify(s);
   for (const leak of ['鬍鬚張', '台北市', 'XX路', '現金', '送餐資訊']) assert.ok(!json.includes(leak), leak);

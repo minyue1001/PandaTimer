@@ -81,9 +81,9 @@ test('Swift OfferTracker 與 TS 同結構（狀態、理由字串、預設值、
   const sw = read('../targets/broadcast/OfferTracker.swift');
   for (const reason of ['"accepted"', '"rejected"', '"timeout"', '"superseded"', '"replaced"', '"stopped"']) assert.ok(sw.includes(reason), reason);
   for (const s of ['case offered(Offer, misses: Int, firstMissAt: Date?)', 'case deciding(Offer, goneAt: Date, lastKw: [String])',
-    'if o.offerAccepted && !o.offerRejected', 'if o.offerRejected && !o.offerAccepted', 'acceptedAt: accept ? (goneAt ?? now) : nil',
+    'if accepted && !o.offerRejected', 'if o.offerRejected && !accepted', 'acceptedAt: accept ? (goneAt ?? now) : nil',
     'if accept { recentAccepted.append((minutes: offer.minutes, amount: offer.amount, at: now)) }', 'return min(60, max(0, Int(d)))',
-    'return a == 0 || b == 0 || a == b', 'var seen = Self.filled(offer, o.amount)',
+    'return a == 0 || b == 0 || a == b', 'var seen = Self.noted(Self.filled(offer, o.amount), o)',
     '"\\(minutes)/\\(ScreenInfo.amountKey(amount))"']) {
     assert.ok(sw.includes(s), s);
   }
@@ -111,8 +111,9 @@ test('v0.7 實機修正：同一張邀請先沒抓到金額、後來抓到 → �
   assert.equal(decided[0].offer.key, '27/110');
   // 接單後同一張（這次又沒抓到金額）回來 → dup，不是新單
   assert.deepEqual(t.observe(40, s(noAmt)).map((e) => e.type), ['dup']);
-  // 不同金額＝不同張
-  assert.equal(sameOffer(27, 110.26, 27, 98.4), false);
+  // 不同金額（兩個都合理，例如含小費）＝不同張；v1.2 不可能地低的金額（< fare−0.01）＝誤讀，算同一張
+  assert.equal(sameOffer(27, 110.26, 27, 140.26), false);
+  assert.equal(sameOffer(27, 110.26, 27, 98.4), true);
   assert.equal(sameOffer(27, null, 27, 98.4), true);
   assert.equal(sameOffer(27, 0, 27, 98.4), true);
   assert.equal(sameOffer(27, 110.26, 18, 110.26), false);
@@ -152,5 +153,5 @@ test('v0.8 首日實測畫面：暗色主題邀請 → 接單後畫面判定接�
   const sw = read('../targets/broadcast/OfferTracker.swift');
   assert.equal([...sw.matchAll(/if o\.stacked \{ seen\.stacked = true \}/g)].length, 3);
   assert.ok(sw.includes('stacked: o.stacked)'));
-  assert.ok(read('../targets/broadcast/OrderDetector.swift').includes('stacked: stacked)'));
+  assert.ok(read('../targets/broadcast/OrderDetector.swift').includes('stacked: stacked,'));
 });

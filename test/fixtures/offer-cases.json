@@ -9,7 +9,15 @@
     "IDLE_MAP": "狀態\n上線中\n今日收入",
     "BOTH": "上線中\n前往取餐",
     "OTHER_APP": "LINE\n王小明：晚點到",
-    "BLANK": ""
+    "BLANK": "",
+    "INVITE_11_45": "每單收入\n45.00 $\n(2.9 公里)\n11 分鐘\n店名\n送餐資訊\n接受訂單",
+    "INVITE_11_MISREAD": "每單收入\n11 $\n(2.9 公里)\n11 分鐘\n店名\n送餐資訊\n接受訂單",
+    "INVITE_16_6534": "每單收入\n65.34 $\n(4.6 公里)\n16 分鐘\n店名\n送餐資訊\n接受訂單",
+    "INVITE_16_9534_TIP": "每單收入\n95.34 $\n包含額外 30.00 $ 元\n(4.6 公里)\n16 分鐘\n店名\n送餐資訊\n接受訂單",
+    "INVITE_14": "每單收入\n57.17 $\n(3.3 公里)\n14 分鐘\n店名\n送餐資訊\n接受訂單",
+    "DELIVERING_1": "即將抵達\n顧客地址\n1筆訂單\n取餐體驗如何呢?記得邀請店家給好評!",
+    "DELIVERING_DIALOG_1": "送達\n無法聯繫顧客\n1筆訂單",
+    "PICKUP_STORE_2": "店名\n預計7分鐘後抵達店家・2筆訂單\n再 8 分鐘即將準備完成"
   },
   "cases": [
     {
@@ -134,6 +142,58 @@
         { "type": "decided", "result": "accept", "reason": "stopped", "minutes": 27, "acceptedAt": 1.5, "waitSec": 3.5 },
         { "type": "seen", "minutes": 18 },
         { "type": "decided", "result": "reject", "reason": "stopped", "minutes": 18, "acceptedAt": null, "waitSec": 0 }
+      ]
+    },
+    {
+      "name": "v1.2 金額誤讀（10:43 實機）：11 分 $45 → 同畫面讀成 $11（< fare−0.01）→ 同一張，不判 replaced，保留 $45",
+      "steps": [[0, "INVITE_11_45"], [4, "INVITE_11_MISREAD"], [5.5, "BLANK"], [7, "BLANK"], [8.5, "PICKUP"]],
+      "expect": [
+        { "type": "seen", "minutes": 11 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 11, "acceptedAt": 5.5 }
+      ]
+    },
+    {
+      "name": "v1.2 金額誤讀：先讀到 $11、後讀到 $45 → 同一張",
+      "steps": [[0, "INVITE_11_MISREAD"], [1.5, "INVITE_11_45"], [3, "BLANK"], [4.5, "BLANK"], [6, "PICKUP"]],
+      "expect": [
+        { "type": "seen", "minutes": 11 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 11 }
+      ]
+    },
+    {
+      "name": "v1.2 同分鐘兩個合理金額（65.34 vs 含小費 95.34）→ 仍是不同張（replaced）",
+      "steps": [[0, "INVITE_16_6534"], [1.5, "INVITE_16_9534_TIP"]],
+      "expect": [
+        { "type": "seen", "minutes": 16 },
+        { "type": "decided", "result": "reject", "reason": "replaced", "minutes": 16 },
+        { "type": "seen", "minutes": 16 }
+      ]
+    },
+    {
+      "name": "v1.2 送前一張時沒接（11:53 實機）：邀請前就有「1筆訂單」，消失後只剩常駐字 → 不算接單，到期依 ambiguousAs(reject)",
+      "settings": { "ambiguousAs": "reject", "decideWindowSec": 45 },
+      "steps": [[0, "DELIVERING_DIALOG_1"], [10, "INVITE_14"], [11.5, "BLANK"], [13, "DELIVERING_1"], [20, "DELIVERING_1"], [60, "tick"]],
+      "expect": [
+        { "type": "seen", "minutes": 14 },
+        { "type": "decided", "result": "reject", "reason": "timeout", "minutes": 14, "acceptedAt": null }
+      ]
+    },
+    {
+      "name": "v1.2 空手接單：邀請前沒看過常駐字 → 接單後只看到「1筆訂單」也算接單",
+      "settings": { "ambiguousAs": "reject" },
+      "steps": [[0, "IDLE_MAP"], [5, "INVITE_14"], [6.5, "BLANK"], [8, "DELIVERING_1"]],
+      "expect": [
+        { "type": "seen", "minutes": 14 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 14, "acceptedAt": 6.5 }
+      ]
+    },
+    {
+      "name": "v1.2 疊單接第二張：邀請前「1筆訂單」→ 接單後「2筆訂單」＋抵達店家 → 接單",
+      "settings": { "ambiguousAs": "reject" },
+      "steps": [[0, "DELIVERING_1"], [5, "INVITE_14"], [6.5, "BLANK"], [8, "PICKUP_STORE_2"]],
+      "expect": [
+        { "type": "seen", "minutes": 14 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 14 }
       ]
     }
   ]

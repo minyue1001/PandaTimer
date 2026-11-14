@@ -8,7 +8,7 @@
 //     都沒有 → 最早一筆進行中。
 //     指定了但找不到（例如已在 App 內按過送達/取消）→ 忽略，不誤結別張單。
 import type { Order } from './orders';
-import { exactFare } from './orders.ts';
+import { exactFare, normalizeTip } from './orders.ts';
 
 export type NativeStartEvent = {
   type: 'start';
@@ -22,6 +22,8 @@ export type NativeStartEvent = {
   /** v0.8 夾單（DetectorHub 配對 com.pandatimer.offer.stacked）；v1.1 原生也會標疊單（stackKind 'carry'） */
   stacked?: boolean;
   stackKind?: 'offer' | 'carry';
+  /** v1.2 小費（DetectorHub 配對 com.pandatimer.tip.<元>；組合單只在第一張） */
+  tip?: number;
 };
 export type NativeDoneEvent = { type: 'done'; at: number; orderId?: string; activityId?: string };
 export type NativeEvent = NativeStartEvent | NativeDoneEvent;
@@ -37,6 +39,7 @@ export function parseNativeEvents(raw: unknown): NativeEvent[] {
     if (!e || typeof e !== 'object') continue;
     const r = e as Record<string, unknown>;
     if (r.type === 'start' && isStr(r.id) && isNum(r.acceptedAt) && isNum(r.estimateMin) && isNum(r.deadline)) {
+      const tip = normalizeTip(r.tip);
       out.push({
         type: 'start',
         id: r.id,
@@ -48,6 +51,7 @@ export function parseNativeEvents(raw: unknown): NativeEvent[] {
         ...(r.source === 'auto' ? { source: 'auto' as const } : {}),
         ...(r.stacked === true ? { stacked: true } : {}),
         ...(r.stackKind === 'offer' || r.stackKind === 'carry' ? { stackKind: r.stackKind } : {}),
+        ...(tip != null ? { tip } : {}),
       });
     } else if (r.type === 'done' && isNum(r.at)) {
       out.push({
@@ -108,6 +112,7 @@ export function applyNativeEvents(orders: Order[], events: NativeEvent[]): Order
           notifIds: ev.notifIds ?? [],
           ...(ev.source ? { source: ev.source } : {}),
           ...stackMark(ev, othersActive),
+          ...(ev.tip != null ? { tip: ev.tip } : {}),
         },
         ...list,
       ];

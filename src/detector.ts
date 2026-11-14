@@ -20,6 +20,10 @@
 // v1.1：com.pandatimer.delivered.seq.<0-3>（送達對話框上的 #單號對到接單 seq → 槽＝seq mod 4，與 order 訊號一致；
 //   緊接在 delivered.delay 之後、取代 delivered）。order 改 mod 8 會變 90×8＝720 → 總數 1110 超過 1000，所以槽維持 mod 4
 //   （extension 在同槽已有更新的單時改送 delivered）。註冊數量：746＋4＝750 個。
+// v1.2：com.pandatimer.tip.<元>（小費；在該單的 accept.delay/order 之前送，App 10 秒內配對寫進 start 事件 tip；
+//   值只有 TIP_SIGNAL_VALUES：1~100 每 1 元、110~300 每 10 元，超過 300 送 300、中間取最近的，extension telemetry 記原值）、
+//   com.pandatimer.screenorders.<2-5>（送單畫面讀到「N 筆訂單／疊單」，App 進行中單數 < N → 提示補記）。
+//   註冊數量：750＋120＋4＝874 個（< 1000）。
 import type { Order } from './orders';
 
 export const ORDER_SIGNAL_PREFIX = 'com.pandatimer.order.';
@@ -48,6 +52,17 @@ export const EXT_MEM_PREFIX = 'com.pandatimer.ext.mem.';
 export const EXT_PEAK_PREFIX = 'com.pandatimer.ext.peak.';
 export const MAX_EXT_MB = 80;
 export const DELIVERED_SEQ_PREFIX = 'com.pandatimer.delivered.seq.';
+export const TIP_PREFIX = 'com.pandatimer.tip.';
+/** 小費訊號可用的值：1~100 每 1 元、110~300 每 10 元（共 120 個） */
+export const TIP_SIGNAL_VALUES: readonly number[] = Object.freeze([
+  ...Array.from({ length: 100 }, (_, i) => i + 1),
+  ...Array.from({ length: 20 }, (_, i) => 110 + i * 10),
+]);
+export const MAX_TIP_SIGNAL = 300;
+/** App 端：tip 訊號在 order 之前 10 秒內（或之後 2 秒內，亂序）才配對 */
+export const TIP_PAIR_BEFORE_MS = 10_000;
+export const SCREEN_ORDERS_PREFIX = 'com.pandatimer.screenorders.';
+export const SCREEN_ORDERS_RANGE = [2, 5] as const;
 /** Darwin 通知註冊上限（系統沒有明文，保守取 1000） */
 export const MAX_SIGNAL_NAMES = 1000;
 
@@ -60,7 +75,9 @@ export type DetectorSignal =
   | { kind: 'offerPending'; minutes: number }
   | { kind: 'acceptDelay'; seconds: number }
   | { kind: 'deliveredDelay'; seconds: number }
-  | { kind: 'deliveredSeq'; slot: number };
+  | { kind: 'deliveredSeq'; slot: number }
+  | { kind: 'tip'; yuan: number }
+  | { kind: 'screenOrders'; count: number };
 
 /** 純數字、無前導 0（"0" 本身可以）、1~2 位、在 lo…hi 之間（同 DetectorHub.plainInt） */
 function plainInt(text: string, lo: number, hi: number): number | null {
@@ -92,6 +109,33 @@ export function extMemName(mb: number, peak = false): string {
 export function deliveredSeqName(seq: number): string {
   const s = ((Math.trunc(Number.isFinite(seq) ? seq : 0) % SIGNAL_SEQ_MOD) + SIGNAL_SEQ_MOD) % SIGNAL_SEQ_MOD;
   return `${DELIVERED_SEQ_PREFIX}${s}`;
+}
+
+/** 小費（整數元）→ 訊號值：≤0/非數字 → null；1~100 原值；101~300 取最近的 10 元（四捨五入）；>300 → 300（＝Swift PandaSignal.tipValue） */
+export function tipSignalValue(tip: number): number | null {
+  if (!Number.isFinite(tip)) return null;
+  const t = Math.round(tip);
+  if (t < 1) return null;
+  if (t <= 100) return t;
+  if (t >= MAX_TIP_SIGNAL) return MAX_TIP_SIGNAL;
+  return Math.floor((t + 5) / 10) * 10;
+}
+
+export function tipSignalName(tip: number): string | null {
+  const v = tipSignalValue(tip);
+  return v == null ? null : `${TIP_PREFIX}${v}`;
+}
+
+export function screenOrdersName(n: number): string | null {
+  if (!Number.isInteger(n) || n < SCREEN_ORDERS_RANGE[0]) return null;
+  return `${SCREEN_ORDERS_PREFIX}${Math.min(SCREEN_ORDERS_RANGE[1], n)}`;
+}
+
+/** App 端配對（＝DetectorHub.takeTip）：order 收到前 10 秒～後 2 秒內的 tip 訊號才算；時間：毫秒 */
+export function pairedTip(receivedAt: number, tip: { yuan: number; at: number } | null | undefined): number | null {
+  if (!tip) return null;
+  const d = receivedAt - tip.at;
+  return d <= TIP_PAIR_BEFORE_MS && d >= -2000 ? tip.yuan : null;
 }
 
 export function deliveredDelayName(seconds: number): string {
@@ -126,6 +170,16 @@ export function parseSignalName(name: unknown): DetectorSignal | null {
       const mb = plainInt(name.slice(prefix.length), 0, MAX_EXT_MB);
       return mb == null ? null : { kind, mb };
     }
+  }
+  if (name.startsWith(TIP_PREFIX)) {
+    const t = name.slice(TIP_PREFIX.length);
+    if (!/^[1-9][0-9]{0,2}$/.test(t)) return null;
+    const yuan = Number(t);
+    return TIP_SIGNAL_VALUES.includes(yuan) ? { kind: 'tip', yuan } : null;
+  }
+  if (name.startsWith(SCREEN_ORDERS_PREFIX)) {
+    const count = plainInt(name.slice(SCREEN_ORDERS_PREFIX.length), SCREEN_ORDERS_RANGE[0], SCREEN_ORDERS_RANGE[1]);
+    return count == null ? null : { kind: 'screenOrders', count };
   }
   if (name.startsWith(DELIVERED_SEQ_PREFIX)) {
     const slot = plainInt(name.slice(DELIVERED_SEQ_PREFIX.length), 0, SIGNAL_SEQ_MOD - 1);
@@ -169,6 +223,8 @@ export function allSignalNames(): string[] {
   for (let m = 0; m <= MAX_EXT_MB; m++) names.push(`${EXT_MEM_PREFIX}${m}`);
   for (let m = 0; m <= MAX_EXT_MB; m++) names.push(`${EXT_PEAK_PREFIX}${m}`);
   for (let s = 0; s < SIGNAL_SEQ_MOD; s++) names.push(`${DELIVERED_SEQ_PREFIX}${s}`);
+  for (const v of TIP_SIGNAL_VALUES) names.push(`${TIP_PREFIX}${v}`);
+  for (let n = SCREEN_ORDERS_RANGE[0]; n <= SCREEN_ORDERS_RANGE[1]; n++) names.push(`${SCREEN_ORDERS_PREFIX}${n}`);
   return names;
 }
 
@@ -275,6 +331,8 @@ export type DetectorStatus = {
   offerNote: string;
   /** v0.8：偵測中卻收到廣播停止（使用者沒按停止偵測）的時間；重新開始後清掉 */
   stoppedUnexpectedAt: number | null;
+  /** v1.2：最近一次「畫面 N 筆訂單、App 只有 active 張」（原生 4 秒後比對進行中鏡像；v1.1 原生沒帶 → 無 key） */
+  screenOrders?: { n: number; active: number; at: number };
   /**
    * 省電/記憶體（v0.9 原生 statusJSON 沒帶 → 欄位不存在；v1.0 起有）：低電量模式、thermalState(0~3)、省電倍率中（App 自己看，
    * 規則同 extension）、電量/充電中（App）、extension 最近一次回報的 away/normal 模式與目前/峰值記憶體 MB（extAt＝回報時間）。
@@ -316,8 +374,10 @@ export function parseDetectorStatus(raw: unknown): DetectorStatus | null {
   if (num(o.extAt) != null) power.extAt = o.extAt as number;
   if (num(o.batt) != null) power.batt = o.batt as number;
   if (typeof o.charging === 'boolean') power.charging = o.charging;
+  const so = num(o.screenOrders), soAt = num(o.screenOrdersAt), soActive = num(o.screenOrdersActive);
   return {
     ...(Object.keys(power).length ? { power } : {}),
+    ...(so != null && soAt != null ? { screenOrders: { n: so, active: soActive ?? 0, at: soAt } } : {}),
     armed: o.armed === true,
     keepAlive: typeof o.keepAlive === 'string' ? o.keepAlive : '未知',
     keepAliveMode: typeof o.keepAliveMode === 'string' ? o.keepAliveMode : 'none',

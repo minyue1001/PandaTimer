@@ -59,10 +59,11 @@ test('parseSignalName：狀態訊號與垃圾', () => {
   assert.equal(parseSignalName(5), null);
 });
 
-test('allSignalNames：v1.1 共 750 個（< 1000）、每個都解析得回來、無重複', () => {
+test('allSignalNames：v1.2 共 874 個（< 1000）、每個都解析得回來、無重複', () => {
   const names = allSignalNames();
-  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1 + 1 + 61 + 3 + 2 + 81 + 81 + 4);
-  assert.equal(names.length, 750);
+  // v1.1 的 750 ＋ v1.2 tip 120 個＋screenorders 4 個
+  assert.equal(names.length, 4 + 90 * 4 + 90 + 1 + 61 + 1 + 1 + 61 + 3 + 2 + 81 + 81 + 4 + 120 + 4);
+  assert.equal(names.length, 874);
   assert.ok(names.length < 1000);
   assert.equal(new Set(names).size, names.length);
   for (const n of names) assert.notEqual(parseSignalName(n), null, n);
@@ -163,7 +164,7 @@ test('v0.6：app.json 背景模式／定位說明／runtimeVersion 與 OtaBox �
   assert.deepEqual([...plist.UIBackgroundModes].sort(), ['audio', 'location']);
   assert.ok(plist.NSLocationWhenInUseUsageDescription.length > 5);
   assert.ok(plist.NSLocationAlwaysAndWhenInUseUsageDescription.length > 5);
-  assert.equal(app.runtimeVersion, '1.1');
+  assert.equal(app.runtimeVersion, '1.2');
   assert.equal(app.userInterfaceStyle, 'dark'); // v1.0：系統 Alert/鍵盤也是暗色
   // v0.6 遠端回報：寫入金鑰在 extra（進 App 可接受），網址 https；讀取金鑰絕不進 repo
   assert.match(app.extra.telemetryKey, /^[A-Za-z0-9_-]{32,}$/);

@@ -38,9 +38,13 @@ export function recordOffer(s: OfferState, min: number, at: number, id: string):
   return { ...s, pending: [...s.pending, { id, min, at }] };
 }
 
-/** 收到同分鐘的 order 事件（含延遲入帳）：移除最早的一筆同分鐘邀請（pending 或 unconfirmed） */
-export function matchOrder(s: OfferState, min: number): OfferState {
-  const all = [...s.pending, ...s.unconfirmed].filter((e) => e.min === min);
+/**
+ * 收到同分鐘的 order 事件（含延遲入帳）：移除最早的一筆同分鐘邀請（pending 或 unconfirmed）。
+ * v1.2 組合單：order 是拆出來的分鐘（12、11），邀請是總分鐘（23）→ 原生在第一張帶 offerMin；同分鐘找不到才用 offerMin 找。
+ */
+export function matchOrder(s: OfferState, min: number, offerMin?: number | null): OfferState {
+  let all = [...s.pending, ...s.unconfirmed].filter((e) => e.min === min);
+  if (!all.length && offerMin != null && offerMin !== min) all = [...s.pending, ...s.unconfirmed].filter((e) => e.min === offerMin);
   if (!all.length) return s;
   const target = all.reduce((a, b) => (b.at < a.at ? b : a));
   return {
@@ -111,4 +115,34 @@ export function parseOfferState(raw: unknown): OfferState {
   if (!v || typeof v !== 'object') return { pending: [], unconfirmed: [] };
   const o = v as Record<string, unknown>;
   return { pending: list(o.pending), unconfirmed: list(o.unconfirmed) };
+}
+
+// ── v1.2 送單畫面「N 筆訂單」但 App 進行中單數較少（疊單第二張沒有邀請畫面）→ 首頁提示卡，按了補記一張 ──
+export type ScreenHint = { n: number; active: number; at: number };
+export const SCREEN_HINT_KEY = 'pandatimer.screenOrdersHint.dismissed.v1';
+export const SCREEN_HINT_EXPIRE_MS = 30 * 60_000;
+
+/**
+ * 原生 detectorStatus.screenOrders（最近一次「畫面 N 筆、App 只有 M 張」）→ 要不要顯示提示卡。
+ * 不顯示：沒有、超過 30 分鐘、目前進行中單數已 ≥ N（補記了或已同步）、使用者按過「不用」（dismissedAt ≥ 那次時間）。
+ */
+export function screenOrdersHint(
+  so: ScreenHint | null | undefined,
+  activeCount: number,
+  dismissedAt: number | null,
+  now: number,
+): ScreenHint | null {
+  if (!so || !(so.n >= 2) || !Number.isFinite(so.at)) return null;
+  if (now - so.at >= SCREEN_HINT_EXPIRE_MS || so.at - now > 60_000) return null;
+  if (activeCount >= so.n) return null;
+  if (dismissedAt != null && dismissedAt >= so.at) return null;
+  return { n: so.n, active: activeCount, at: so.at };
+}
+
+/** 補記單的分鐘輸入（1~90 整數）；不合法 → null */
+export function parseMinutesInput(text: string | null | undefined): number | null {
+  const t = String(text ?? '').trim();
+  if (!/^[0-9]{1,2}$/.test(t)) return null;
+  const n = Number(t);
+  return n >= 1 && n <= 90 ? n : null;
 }

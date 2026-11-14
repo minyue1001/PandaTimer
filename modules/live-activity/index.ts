@@ -26,6 +26,8 @@ export type DetectorEvent = {
   minutes?: number;
   /** v1.0 offerCleared：reject / timeout / stopped（舊原生沒帶） */
   reason?: string;
+  /** v1.2 order：組合單拆出來的第一張帶邀請總分鐘（和 minutes 不同才有） */
+  offerMin?: number;
   how?: string;
   /** v0.5：更新後回讀結果（動態島：已更新✓／疑似被系統擋✗） */
   check?: string;

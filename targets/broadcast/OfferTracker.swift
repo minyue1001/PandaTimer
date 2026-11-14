@@ -19,6 +19,11 @@ import Foundation
 //   v0.8 夾單：同一張邀請任一次 OCR 看到「夾單」（offer.stackedKeywords）→ offer.stacked=true（之後不會變回 false）。
 //   v1.1 OCR 誤讀防護：分鐘 < suspectBelowMinutes（3）且同畫面命中接單後字樣（offerAccepted）、又不是目前這張 →
 //     不當新邀請（.suspect，不送 pending），當成「有接單鈕但分鐘還讀不出來」。0＝關閉。
+//   v1.2（11/14 實機；規則＝src/offerTracker.ts＋src/offerBundle.ts，以 TS 測試為準）：
+//     ① 分鐘相同、其中一個金額 < fare(分鐘)−0.01（誤讀）→ 同一張，保留合理的金額；兩個都合理但不同 → 不同張。
+//     ② 判定時只命中常駐字（offer.weakAcceptedKeywords：筆訂單/取餐體驗）→ 邀請前 baselineSec 秒內沒看過常駐字、
+//        或「N筆訂單」比邀請前大才算接單，否則當沒命中。
+//     ③ Offer 記「送餐資訊」最大次數（bundle）與小費（tip）；接單後 BundleSplit 拆單。ScreenOrdersWatch：送單畫面 N 筆訂單去抖。
 
 /// 遠端設定 "offer" 區塊（預設＝src/offerTracker.ts 的 DEFAULT_OFFER＝server/config.default.json；範圍同 RANGES）
 struct OfferSettings {
@@ -28,6 +33,9 @@ struct OfferSettings {
   static let defaultRejectedKeywords = "已拒絕|已拒绝|訂單已取消|订单已取消|逾時|逾时|已過期|已过期|上線中|上线中"
   /// v0.8 夾單邀請（上方小字「夾單訂單依系統顯示金額為主」）
   static let defaultStackedKeywords = "夾單|夹单"
+  /// v1.2 送單中畫面常駐的接單字（單獨命中不算證據）、組合單每位客人一個的「送餐資訊」
+  static let defaultWeakAcceptedKeywords = "筆訂單|笔订单|取餐體驗|取餐体验"
+  static let defaultBundleKeywords = "送餐資訊|送餐资讯|送餐資讯|送餐资訊"
 
   var goneAfterMisses = 2
   var decideWindowSec = 25
@@ -37,6 +45,10 @@ struct OfferSettings {
   var stackedKeywords = OfferSettings.defaultStackedKeywords
   /// v1.1 分鐘數小於這個值又同時有接單後字樣 → 疑似誤讀（0＝關閉）
   var suspectBelowMinutes = 3
+  /// v1.2
+  var weakAcceptedKeywords = OfferSettings.defaultWeakAcceptedKeywords
+  var bundleKeywords = OfferSettings.defaultBundleKeywords
+  var maxBundle = 4
 
   init() {}
 
@@ -49,6 +61,9 @@ struct OfferSettings {
     ambiguousAs = RemoteConfig.choice(o["ambiguousAs"], ["accept", "reject"], ambiguousAs)
     stackedKeywords = RemoteConfig.offerRegex(o["stackedKeywords"], stackedKeywords)
     suspectBelowMinutes = RemoteConfig.int(o["suspectBelowMinutes"], 0, 10, suspectBelowMinutes)
+    weakAcceptedKeywords = RemoteConfig.offerRegex(o["weakAcceptedKeywords"], weakAcceptedKeywords)
+    bundleKeywords = RemoteConfig.offerRegex(o["bundleKeywords"], bundleKeywords)
+    maxBundle = RemoteConfig.int(o["maxBundle"], 1, 4, maxBundle)
   }
 }
 
@@ -63,6 +78,12 @@ struct OfferObservation {
   let kw: [String]
   /// v0.8 這次 OCR 看到夾單字樣
   let stacked: Bool
+  /// v1.2
+  let acceptStrong: Bool
+  let acceptWeak: Bool
+  let orders: Int?
+  let bundle: Int
+  let tip: Int?
 
   init(_ s: ScreenInfo.Summary) {
     accept = s.accept
@@ -73,6 +94,11 @@ struct OfferObservation {
     offerHit = s.offerHit
     kw = s.kw
     stacked = s.stacked
+    acceptStrong = s.acceptStrong
+    acceptWeak = s.acceptWeak
+    orders = s.orders
+    bundle = s.bundle
+    tip = s.tip
   }
 }
 
@@ -85,6 +111,11 @@ struct Offer {
   var lastSeen: Date
   /// v0.8 夾單
   var stacked = false
+  /// v1.2 組合單張數（「送餐資訊」最大次數）、小費（最近讀到的）、邀請前有沒有常駐字/最大「N筆訂單」
+  var bundle = 0
+  var tip: Int?
+  var baseWeak = false
+  var baseOrders: Int?
 }
 
 struct OfferDecision {
@@ -124,26 +155,61 @@ final class OfferTracker {
   private var ignored: (minutes: Int, amount: Double?)?
   private var idleMisses = 0
   private var recentAccepted: [(minutes: Int, amount: Double?, at: Date)] = []
+  /// v1.2 idle 時的畫面紀錄（常駐字/N筆訂單），只留 baselineSec 秒（＝TS BASELINE_SEC）
+  static let baselineSec: TimeInterval = 120
+  private var idleLog: [(at: Date, weak: Bool, orders: Int?)] = []
 
   static func key(_ minutes: Int, _ amount: Double?) -> String {
     "\(minutes)/\(ScreenInfo.amountKey(amount))"
   }
 
-  /// 同一張邀請？分鐘相同，且金額相同或任一方沒抓到（amountKey＝0）。同 TS sameOffer
+  /// 平台報酬（整數分）＝TS fareCents＝src/orders.ts exactFare
+  static func fareCents(_ minutes: Int) -> Int {
+    max(4500, minutes * 24500 / 60 + 1)
+  }
+
+  /// v1.2 金額合理？≥ fare−0.01；沒抓到 → true（＝TS plausibleAmount）
+  static func plausible(_ minutes: Int, _ amount: Double?) -> Bool {
+    guard let a = amount, a.isFinite else { return true }
+    return Int((a * 100).rounded()) >= fareCents(minutes) - 1
+  }
+
+  /// 同一張邀請？分鐘相同，且金額相同或任一方沒抓到（amountKey＝0）；v1.2 或一方金額不可能地低。同 TS sameOffer
   static func same(_ minutesA: Int, _ amountA: Double?, _ minutesB: Int, _ amountB: Double?) -> Bool {
     guard minutesA == minutesB else { return false }
+    if !plausible(minutesA, amountA) || !plausible(minutesB, amountB) { return true }
     let a = ScreenInfo.amountKey(amountA)
     let b = ScreenInfo.amountKey(amountB)
     return a == 0 || b == 0 || a == b
   }
 
-  /// 先前沒抓到金額、這次抓到 → 補上（key 一起更新）
+  /// 先前沒抓到金額、這次抓到 → 補上（key 一起更新）；v1.2 先前的是誤讀、這次合理 → 換成這次的
   static func filled(_ offer: Offer, _ amount: Double?) -> Offer {
-    guard ScreenInfo.amountKey(offer.amount) == 0, ScreenInfo.amountKey(amount) != 0 else { return offer }
+    guard ScreenInfo.amountKey(amount) != 0 else { return offer }
+    let missing = ScreenInfo.amountKey(offer.amount) == 0
+    let better = !plausible(offer.minutes, offer.amount) && plausible(offer.minutes, amount)
+    guard missing || better else { return offer }
     var out = offer
     out.amount = amount
     out.key = key(offer.minutes, amount)
     return out
+  }
+
+  /// v1.2 組合單張數取最大、小費取最近讀到的（＝TS noteExtras）
+  static func noted(_ offer: Offer, _ o: OfferObservation) -> Offer {
+    var out = offer
+    if o.bundle > out.bundle { out.bundle = o.bundle }
+    if let t = o.tip { out.tip = t }
+    return out
+  }
+
+  /// v1.2 判定中這次畫面算不算「接了」（＝TS acceptEvidence）
+  static func acceptEvidence(_ offer: Offer, _ o: OfferObservation) -> Bool {
+    guard o.offerAccepted else { return false }
+    if o.acceptStrong { return true }
+    if !offer.baseWeak { return true }
+    guard let n = o.orders, let base = offer.baseOrders else { return false }
+    return n > base
   }
 
   static func round1(_ x: Double) -> Double {
@@ -184,7 +250,7 @@ final class OfferTracker {
       guard let minutes = o.minutes, !suspect else {
         // 有接單鈕但還挑不出分鐘數（動畫中）：offered 視為仍在畫面上；其他狀態等下一次 OCR
         if case .offered(let offer, _, _) = state {
-          var seen = offer
+          var seen = Self.noted(offer, o)
           seen.lastSeen = now
           if o.stacked { seen.stacked = true }
           state = .offered(seen, misses: 0, firstMissAt: nil)
@@ -194,7 +260,7 @@ final class OfferTracker {
       switch state {
       case .offered(let offer, _, _):
         if Self.same(offer.minutes, offer.amount, minutes, o.amount) {
-          var seen = Self.filled(offer, o.amount)
+          var seen = Self.noted(Self.filled(offer, o.amount), o)
           seen.lastSeen = now
           if o.stacked { seen.stacked = true }
           state = .offered(seen, misses: 0, firstMissAt: nil)
@@ -203,7 +269,7 @@ final class OfferTracker {
         out.append(decide(now, offer, accept: false, reason: "replaced", goneAt: nil, kw: o.kw, hit: []))
       case .deciding(let offer, let goneAt, _):
         if Self.same(offer.minutes, offer.amount, minutes, o.amount) {
-          var seen = Self.filled(offer, o.amount)
+          var seen = Self.noted(Self.filled(offer, o.amount), o)
           seen.lastSeen = now
           if o.stacked { seen.stacked = true }
           state = .offered(seen, misses: 0, firstMissAt: nil)
@@ -224,9 +290,13 @@ final class OfferTracker {
         return out
       }
       ignored = nil
-      let offer = Offer(
+      let base = idleLog.filter { now.timeIntervalSince($0.at) <= Self.baselineSec }
+      var offer = Offer(
         minutes: minutes, amount: o.amount, key: Self.key(minutes, o.amount), firstSeen: now, lastSeen: now,
         stacked: o.stacked)
+      offer.baseWeak = base.contains { $0.weak }
+      offer.baseOrders = base.compactMap { $0.orders }.max()
+      offer = Self.noted(offer, o)
       state = .offered(offer, misses: 0, firstMissAt: nil)
       out.append(.seen(offer))
       return out
@@ -239,6 +309,8 @@ final class OfferTracker {
     case .idle:
       idleMisses += 1
       if idleMisses >= s.goneAfterMisses { ignored = nil }
+      idleLog.removeAll { now.timeIntervalSince($0.at) > Self.baselineSec }
+      idleLog.append((at: now, weak: o.acceptWeak, orders: o.orders))
       return out
     case .offered(let current, let misses, let firstMissAt):
       let count = misses + 1
@@ -254,11 +326,12 @@ final class OfferTracker {
       goneAt = gone
     }
     state = .deciding(offer, goneAt: goneAt, lastKw: o.kw)
-    if o.offerAccepted && !o.offerRejected {
+    let accepted = Self.acceptEvidence(offer, o)
+    if accepted && !o.offerRejected {
       out.append(decide(now, offer, accept: true, reason: "accepted", goneAt: goneAt, kw: o.kw, hit: o.offerHit))
       return out
     }
-    if o.offerRejected && !o.offerAccepted {
+    if o.offerRejected && !accepted {
       out.append(decide(now, offer, accept: false, reason: "rejected", goneAt: goneAt, kw: o.kw, hit: o.offerHit))
       return out
     }
@@ -309,5 +382,94 @@ final class OfferTracker {
     let d = decidedAt.timeIntervalSince(acceptedAt).rounded()
     guard d.isFinite else { return 0 }
     return min(60, max(0, Int(d)))
+  }
+}
+
+// MARK: - v1.2 組合單拆分（＝src/offerBundle.ts splitBundle/evenSplit，以 TS 測試為準）
+
+enum BundleSplit {
+  static let maxBundle = 4
+
+  /// 平均分：餘數給前面（23/2 → [12, 11]）
+  static func even(_ total: Int, _ n: Int) -> [Int] {
+    let base = total / n
+    let rest = total - base * n
+    return (0..<n).map { base + ($0 < rest ? 1 : 0) }
+  }
+
+  /// 總分鐘 T、總金額（含小費）、張數、小費 → 每張分鐘（大的在前）。Σfare 與（金額−小費）差 ≤0.02 的組合恰好一組才用，
+  /// 多組/無解 → 平均分；張數 <2 或不夠分 → [T]
+  static func split(totalMinutes: Int, amount: Double?, count: Int, tip: Int?) -> [Int] {
+    let k = min(maxBundle, count)
+    guard totalMinutes >= 1, k >= 2, totalMinutes >= k else { return [totalMinutes] }
+    let evenParts = even(totalMinutes, k)
+    guard let a = amount, a.isFinite else { return evenParts }
+    let target = Int(((a - Double(tip ?? 0)) * 100).rounded())
+    var found: [[Int]] = []
+    var acc: [Int] = []
+    func walk(_ left: Int, _ slots: Int, _ maxPart: Int, _ cents: Int) {
+      if found.count > 1 { return }
+      if slots == 0 {
+        if left == 0 && abs(cents - target) <= 2 { found.append(acc) }
+        return
+      }
+      let hi = min(maxPart, left - (slots - 1))
+      let lo = (left + slots - 1) / slots
+      guard hi >= lo else { return }
+      for m in stride(from: hi, through: lo, by: -1) {
+        acc.append(m)
+        walk(left - m, slots - 1, m, cents + OfferTracker.fareCents(m))
+        acc.removeLast()
+      }
+    }
+    walk(totalMinutes, k, totalMinutes, 0)
+    return found.count == 1 ? found[0] : evenParts
+  }
+}
+
+// MARK: - v1.2 送單畫面「N 筆訂單」去抖（＝src/offerBundle.ts ScreenOrdersWatch，以 TS 測試為準；時間：Date）
+
+final class ScreenOrdersWatch {
+  static let minN = 2
+  static let maxN = 5
+  var repeatSec: TimeInterval = 300
+  var minStreak = 2
+  var quietSec: TimeInterval = 15
+  private var streakN: Int?
+  private var streak = 0
+  private var quietUntil = Date.distantPast
+  private var sentAt: [Int: Date] = [:]
+
+  /// max(「N筆訂單」的 N, 有「疊單」＝2)；都沒有 → nil（＝TS screenOrderCount）
+  static func count(orders: Int?, stackScreen: Bool) -> Int? {
+    let n = max(orders ?? 0, stackScreen ? 2 : 0)
+    return n > 0 ? n : nil
+  }
+
+  /// 接單訊號送出時呼叫
+  func accepted(_ now: Date) {
+    quietUntil = now.addingTimeInterval(quietSec)
+    streakN = nil
+    streak = 0
+  }
+
+  /// 每次 OCR：busy＝邀請進行中或畫面有接單鈕。回傳要送的 N（2~5）或 nil
+  func observe(_ now: Date, n: Int?, busy: Bool) -> Int? {
+    guard !busy, let raw = n, raw >= Self.minN else {
+      streakN = nil
+      streak = 0
+      return nil
+    }
+    let v = min(Self.maxN, raw)
+    if v == streakN {
+      streak += 1
+    } else {
+      streakN = v
+      streak = 1
+    }
+    if streak < minStreak || now < quietUntil { return nil }
+    if let last = sentAt[v], now.timeIntervalSince(last) < repeatSec { return nil }
+    sentAt[v] = now
+    return v
   }
 }

@@ -11,7 +11,7 @@ import { OrderCard } from './OrderCard';
 import { PeriodCard, TodayCard } from './StatCard';
 import { StatusPill } from './StatusPill';
 import { UnconfirmedCards } from './UnconfirmedCards';
-import type { OfferEntry } from '../unconfirmedOffers';
+import type { OfferEntry, ScreenHint } from '../unconfirmedOffers';
 import { C, F, pressed, S } from './theme';
 
 export type HomeProps = {
@@ -46,6 +46,10 @@ export type HomeProps = {
   unconfirmed: readonly OfferEntry[];
   onOfferYes: (e: OfferEntry) => void;
   onOfferNo: (e: OfferEntry) => void;
+  /** v1.2 送單畫面 N 筆訂單提示 */
+  screenHint?: ScreenHint | null;
+  onHintAdd?: (h: ScreenHint) => void;
+  onHintNo?: (h: ScreenHint) => void;
 };
 
 export const HomeScreen = memo(function HomeScreen(p: HomeProps) {
@@ -60,7 +64,14 @@ export const HomeScreen = memo(function HomeScreen(p: HomeProps) {
         onStop={p.onStopDetect}
         onShowPicker={p.onShowPicker}
       />
-      <UnconfirmedCards offers={p.unconfirmed} onYes={p.onOfferYes} onNo={p.onOfferNo} />
+      <UnconfirmedCards
+        offers={p.unconfirmed}
+        onYes={p.onOfferYes}
+        onNo={p.onOfferNo}
+        hint={p.screenHint}
+        onHintAdd={p.onHintAdd}
+        onHintNo={p.onHintNo}
+      />
       {!p.laSupported && (
         <Text style={S.warn}>動態島不可用（需原生版本，且 設定 › 熊貓倒數 › 即時動態 要開啟）</Text>
       )}

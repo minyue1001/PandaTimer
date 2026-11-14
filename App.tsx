@@ -36,11 +36,14 @@ import {
   parseOfferState,
   recordOffer,
   removeEntry,
+  SCREEN_HINT_KEY,
+  screenOrdersHint,
   tick as tickOffers,
   type OfferEntry,
   type OfferState,
+  type ScreenHint,
 } from './src/unconfirmedOffers';
-import { confirmCancel, confirmDeleteOne } from './src/ui/actions';
+import { confirmCancel, confirmDeleteOne, promptMissingOrder } from './src/ui/actions';
 import { HistoryScreen } from './src/ui/HistoryScreen';
 import { HomeScreen } from './src/ui/HomeScreen';
 import {
@@ -130,7 +133,7 @@ function Main() {
         if (alive) setOfferState((cur) => ({ ...cur })); // 觸發一次存檔
       });
     const off = LiveActivity.addDetectorListener((raw) => {
-      const ev = raw as { type: string; minutes?: number; reason?: unknown };
+      const ev = raw as { type: string; minutes?: number; reason?: unknown; offerMin?: unknown };
       // v1.0：未接的原因（reject 不出卡；timeout/stopped 立刻出卡）；minutes 可能沒有（原生不知道是哪張）
       if (ev.type === 'offerCleared') {
         setOfferState((cur) => clearOffer(cur, typeof ev.minutes === 'number' ? ev.minutes : null, ev.reason));
@@ -141,7 +144,8 @@ function Main() {
       if (ev.type === 'offer') {
         setOfferState((cur) => recordOffer(cur, ev.minutes as number, at, `${at}-${Math.random().toString(36).slice(2, 7)}`));
       } else if (ev.type === 'order') {
-        setOfferState((cur) => matchOrder(cur, ev.minutes as number));
+        const offerMin = typeof ev.offerMin === 'number' ? ev.offerMin : null;
+        setOfferState((cur) => matchOrder(cur, ev.minutes as number, offerMin));
       }
     });
     return () => {
@@ -168,6 +172,22 @@ function Main() {
     [showToast],
   );
   const onOfferNo = useCallback((e: OfferEntry) => setOfferState((cur) => removeEntry(cur, e.id)), []);
+
+  // v1.2 送單畫面「N 筆訂單」比 App 進行中多（原生 detectorStatus.screenOrders）→ 首頁提示卡；按「不用」記下那次的時間
+  const [hintDismissedAt, setHintDismissedAt] = useState<number | null>(null);
+  useEffect(() => {
+    void AsyncStorage.getItem(SCREEN_HINT_KEY)
+      .then((raw) => {
+        const v = raw == null ? NaN : Number(raw);
+        if (Number.isFinite(v)) setHintDismissedAt((cur) => (cur == null || v > cur ? v : cur));
+      })
+      .catch(() => undefined);
+  }, []);
+  const onHintNo = useCallback((h: ScreenHint) => {
+    setHintDismissedAt(h.at);
+    void AsyncStorage.setItem(SCREEN_HINT_KEY, String(h.at)).catch(() => undefined);
+  }, []);
+  const onHintAdd = useCallback((h: ScreenHint) => promptMissingOrder(h, showToast), [showToast]);
 
   // v0.7 統計參數（遠端設定 stats）＋目標（AsyncStorage）
   const [statsParams, setStatsParams] = useState<StatsParams>(DEFAULT_STATS);
@@ -372,6 +392,7 @@ function Main() {
   // 原生偵測狀態每秒讀一次（同步、很便宜）
   const det = useMemo(() => LiveActivity.detectorStatus(), [now]);
   const pill = detectPill(det, now, armedAt);
+  const screenHint = screenOrdersHint(det?.screenOrders, active.length, hintDismissedAt, now);
 
   // 偵測停止／有邀請（膠囊變紅/黃）或多了進行中單 → 自動切回首頁
   const lastAttention = useRef<Attention | null>(null);
@@ -417,6 +438,9 @@ function Main() {
             unconfirmed={offerState.unconfirmed}
             onOfferYes={onOfferYes}
             onOfferNo={onOfferNo}
+            screenHint={screenHint}
+            onHintAdd={onHintAdd}
+            onHintNo={onHintNo}
           />
         </View>
         <View style={[S.screen, tab !== 'history' && hidden]}>

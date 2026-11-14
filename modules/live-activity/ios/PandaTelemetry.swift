@@ -41,6 +41,8 @@ final class PandaTelemetry {
     "batt", "charging", "thermal", "lowPower", "ocrMin", "probes", "mode", "awaySec", "saver", "cardSkip",
     // v1.1 送達有沒有以單號配對到接單（單號本身不上傳）、疊單種類 offer/carry
     "matched", "stackKind",
+    // v1.2 組合單張數、小費（整數元）、送單畫面 N 筆訂單
+    "bundle", "tip", "screenOrders",
   ]
 
   private let endpoint: URL?

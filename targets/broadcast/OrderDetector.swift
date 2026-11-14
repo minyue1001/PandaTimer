@@ -37,6 +37,9 @@ struct ScreenRules {
   /// v0.8：優先送達字樣（訂單完成）、夾單字樣
   var finalKeywords = RemoteConfig.DeliverySettings.defaultFinalKeywords
   var stackedKeywords = OfferSettings.defaultStackedKeywords
+  /// v1.2：送單中常駐的接單字（單獨命中不算證據）、組合單的「送餐資訊」
+  var weakAcceptedKeywords = OfferSettings.defaultWeakAcceptedKeywords
+  var bundleKeywords = OfferSettings.defaultBundleKeywords
 
   static let standard = ScreenRules()
 }
@@ -117,6 +120,63 @@ enum ScreenInfo {
     let deliveredFinal: Bool
     /// v0.8：邀請畫面上有「夾單」（offer.stackedKeywords）
     let stacked: Bool
+    /// v1.2：去掉常駐字（offer.weakAcceptedKeywords）後仍命中 acceptedKeywords＝強證據；命中常駐字
+    let acceptStrong: Bool
+    let acceptWeak: Bool
+    /// v1.2：「N筆訂單」的 N（1~9）、畫面有「疊單」
+    let orders: Int?
+    let stackScreen: Bool
+    /// v1.2：「送餐資訊」出現次數（邀請畫面 ≥2＝組合單）、「包含額外 N 元」小費（整數元 1~2000）
+    let bundle: Int
+    let tip: Int?
+  }
+
+  // v1.2（＝src/screenInfo.ts TIP_RX / ORDERS_RX / STACK_SCREEN_RX）
+  private static let tipPattern = "包含[額额]外(?:NT)?[$＄]?([0-9]{1,4}(?:[.．][0-9]{1,2})?)"
+  private static let ordersPattern = "([1-9])(?:筆|笔)(?:訂單|订单)"
+  private static let stackScreenPattern = "疊單|叠单"
+
+  /// 去空白文字 → 小費整數元（1~2000）；沒有 → nil（＝TS extractTip）
+  static func extractTip(_ compactText: String) -> Int? {
+    let ns = compactText as NSString
+    guard let regex = try? NSRegularExpression(pattern: tipPattern, options: []),
+          let m = regex.firstMatch(in: compactText, options: [], range: NSRange(location: 0, length: ns.length)),
+          m.range(at: 1).location != NSNotFound,
+          let value = Double(ns.substring(with: m.range(at: 1)).replacingOccurrences(of: "．", with: "."))
+    else { return nil }
+    let v = Int(value.rounded())
+    return (v >= 1 && v <= 2000) ? v : nil
+  }
+
+  /// 去空白文字 → 「N筆訂單」的 N；沒有 → nil（＝TS extractOrderCount）
+  static func extractOrderCount(_ compactText: String) -> Int? {
+    let ns = compactText as NSString
+    guard let regex = try? NSRegularExpression(pattern: ordersPattern, options: []),
+          let m = regex.firstMatch(in: compactText, options: [], range: NSRange(location: 0, length: ns.length)),
+          m.range(at: 1).location != NSNotFound
+    else { return nil }
+    return Int(ns.substring(with: m.range(at: 1)))
+  }
+
+  /// pattern 在去空白文字裡（不重疊）出現幾次；編不過 → fallback；空字串命中不算（＝TS countMatches）
+  static func countMatches(_ compactText: String, _ pattern: String, fallback: String) -> Int {
+    guard !compactText.isEmpty,
+          let regex = (try? NSRegularExpression(pattern: pattern, options: []))
+            ?? (try? NSRegularExpression(pattern: fallback, options: []))
+    else { return 0 }
+    let ns = compactText as NSString
+    return regex.matches(in: compactText, options: [], range: NSRange(location: 0, length: ns.length))
+      .filter { $0.range.length > 0 }.count
+  }
+
+  /// 常駐字換成分隔符「|」（＝TS stripWeak）
+  static func stripWeak(_ compactText: String, _ pattern: String) -> String {
+    guard let regex = (try? NSRegularExpression(pattern: pattern, options: []))
+      ?? (try? NSRegularExpression(pattern: OfferSettings.defaultWeakAcceptedKeywords, options: []))
+    else { return compactText }
+    return regex.stringByReplacingMatches(
+      in: compactText, options: [], range: NSRange(location: 0, length: (compactText as NSString).length),
+      withTemplate: "|")
   }
 
   /// 正規化（全形數字/空白）後去掉所有空白
@@ -196,6 +256,13 @@ enum ScreenInfo {
         ?? finalHit)
     let stacked = firstOfferMatch(text, rules.stackedKeywords, fallback: OfferSettings.defaultStackedKeywords) != nil
     let minutes = accept ? MinutePicker.pick(raw, config: rules.picker) : nil
+    // v1.2：常駐字（筆訂單/取餐體驗）去掉後還命中接單字才算強證據
+    let weak: String? = acc == nil
+      ? nil : firstOfferMatch(text, rules.weakAcceptedKeywords, fallback: OfferSettings.defaultWeakAcceptedKeywords)
+    let strong: String? = (acc != nil && weak != nil)
+      ? firstOfferMatch(
+        stripWeak(text, rules.weakAcceptedKeywords), rules.acceptedKeywords, fallback: OfferSettings.defaultAcceptedKeywords)
+      : acc
     return Summary(
       accept: accept,
       minutes: minutes,
@@ -209,7 +276,13 @@ enum ScreenInfo {
       delivered: done != nil,
       deliveredHit: done.map { matchKeywords($0, rows: rules.keywords) } ?? [],
       deliveredFinal: finalHit != nil,
-      stacked: stacked)
+      stacked: stacked,
+      acceptStrong: strong != nil,
+      acceptWeak: weak != nil,
+      orders: extractOrderCount(text),
+      stackScreen: firstOfferMatch(text, stackScreenPattern, fallback: stackScreenPattern) != nil,
+      bundle: countMatches(text, rules.bundleKeywords, fallback: OfferSettings.defaultBundleKeywords),
+      tip: extractTip(text))
   }
 
   /// v0.9：摘要＋「畫面上有沒有 pandarider」（特徵詞 away.keywords 或接單鈕；away 模式用，同 src/powerSaver.ts pandaPresent）。

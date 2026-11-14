@@ -420,6 +420,8 @@ const FIELD_RULES = {
   batt: N, charging: B, thermal: N, lowPower: B, ocrMin: N, probes: N, mode: S, awaySec: N, saver: B, cardSkip: N,
   // v1.1：送達是否以單號配對到接單 seq（單號本身不上傳）、疊單種類 offer/carry
   matched: B, stackKind: S,
+  // v1.2：組合單張數、小費（整數元）、送單畫面「N 筆訂單」
+  bundle: N, tip: N, screenOrders: N,
 };
 const MAX_STR = 80;
 

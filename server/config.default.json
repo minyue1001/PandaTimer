@@ -246,7 +246,10 @@
     "stackedKeywords": "夾單|夹单",
     "islandIndicator": true,
     "alertSound": "default",
-    "suspectBelowMinutes": 3
+    "suspectBelowMinutes": 3,
+    "weakAcceptedKeywords": "筆訂單|笔订单|取餐體驗|取餐体验",
+    "bundleKeywords": "送餐資訊|送餐资讯|送餐資讯|送餐资訊",
+    "maxBundle": 4
   },
   "stats": {
     "graceFactor": 1.05,

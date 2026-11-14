@@ -19,8 +19,21 @@
 //   v1.1 OCR 誤讀防護（11/13 實機：新邀請滑入時畫面同時有取餐頁，分鐘讀成 1 → 送了 offer.pending.1）：
 //     分鐘 < suspectBelowMinutes（3）且同畫面命中接單後關鍵字（offerAccepted）→ 不當新邀請（suspect 事件，不送 pending），
 //     當成「有接單鈕但分鐘還讀不出來」（offered 仍算在畫面上）；是目前這張的同一張則照常。0＝關閉。
+//   v1.2（11/14 實機）：
+//     ① 金額誤讀：分鐘相同、其中一個金額低於 fare(分鐘)−0.01（不可能的低值，例 11 分讀成 $11）→ 同一張（保留合理的那個金額）；
+//        兩個金額都合理但不同 → 照舊當不同張（金額可能含小費）。
+//     ② 常駐字不當接單證據：送單中畫面一直有「N筆訂單」「取餐體驗」（offer.weakAcceptedKeywords）。判定時只命中這些字 →
+//        只有在「邀請出現前 BASELINE_SEC 秒內沒看過」或「N 比邀請前大」時才算接單，否則當沒命中（等到期走 ambiguousAs）。
+//     ③ 組合單/小費：邀請畫面「送餐資訊」出現次數（bundle，取最大）與「包含額外 N 元」（tip）記在 Offer，接單後由
+//        extension 拆單（src/offerBundle.ts splitBundle）。
 import { amountKey } from './ocrPick.ts';
-import { DEFAULT_ACCEPTED_KEYWORDS, DEFAULT_REJECTED_KEYWORDS, DEFAULT_STACKED_KEYWORDS } from './screenInfo.ts';
+import {
+  DEFAULT_ACCEPTED_KEYWORDS,
+  DEFAULT_BUNDLE_KEYWORDS,
+  DEFAULT_REJECTED_KEYWORDS,
+  DEFAULT_STACKED_KEYWORDS,
+  DEFAULT_WEAK_ACCEPTED_KEYWORDS,
+} from './screenInfo.ts';
 
 export type Ambiguous = 'accept' | 'reject';
 
@@ -34,6 +47,12 @@ export type OfferSettings = {
   stackedKeywords: string;
   /** v1.1 分鐘數小於這個值又同時有接單後字樣 → 疑似誤讀，不當新邀請（0＝關閉） */
   suspectBelowMinutes: number;
+  /** v1.2 送單中畫面常駐的接單字（單獨命中不算接單證據；正則，去空白文字比對） */
+  weakAcceptedKeywords: string;
+  /** v1.2 邀請畫面每位客人一個的區塊標題（出現 ≥2 次＝組合單） */
+  bundleKeywords: string;
+  /** v1.2 組合單最多拆幾張（1＝不拆） */
+  maxBundle: number;
 };
 
 export const DEFAULT_OFFER: Readonly<OfferSettings> = Object.freeze({
@@ -44,7 +63,13 @@ export const DEFAULT_OFFER: Readonly<OfferSettings> = Object.freeze({
   ambiguousAs: 'accept',
   stackedKeywords: DEFAULT_STACKED_KEYWORDS,
   suspectBelowMinutes: 3,
+  weakAcceptedKeywords: DEFAULT_WEAK_ACCEPTED_KEYWORDS,
+  bundleKeywords: DEFAULT_BUNDLE_KEYWORDS,
+  maxBundle: 4,
 });
+
+/** v1.2：邀請出現前多少秒內的畫面算「邀請前」（常駐字判斷用） */
+export const BASELINE_SEC = 120;
 
 /** 狀態機只吃這些（ScreenSummary 的子集合）；OCR 原文不進來 */
 export type OfferObservation = {
@@ -57,6 +82,16 @@ export type OfferObservation = {
   kw: string[];
   /** v0.8：這次 OCR 看到夾單字樣（舊樣本沒有這欄 → 當 false） */
   stacked?: boolean;
+  /** v1.2：去掉常駐字後仍命中接單字（沒有這欄 → 視為 true＝舊行為） */
+  acceptStrong?: boolean;
+  /** v1.2：命中常駐字（筆訂單/取餐體驗） */
+  acceptWeak?: boolean;
+  /** v1.2：「N筆訂單」的 N */
+  orders?: number | null;
+  /** v1.2：「送餐資訊」出現次數 */
+  bundle?: number;
+  /** v1.2：小費（整數元） */
+  tip?: number | null;
 };
 
 export type Offer = {
@@ -68,6 +103,13 @@ export type Offer = {
   lastSeen: number;
   /** v0.8 夾單 */
   stacked: boolean;
+  /** v1.2 組合單張數（邀請期間看到的「送餐資訊」最大次數；<2＝一般單） */
+  bundle: number;
+  /** v1.2 小費（整數元；最近一次讀到的） */
+  tip: number | null;
+  /** v1.2 邀請出現前 BASELINE_SEC 秒內：有沒有看過常駐字、最大的「N筆訂單」 */
+  baseWeak: boolean;
+  baseOrders: number | null;
 };
 
 export type DecisionReason = 'accepted' | 'rejected' | 'timeout' | 'superseded' | 'replaced' | 'stopped';
@@ -103,9 +145,21 @@ export function offerKeyOf(minutes: number, amount: number | null): string {
   return `${minutes}/${amountKey(amount)}`;
 }
 
-/** 同一張邀請？分鐘相同，且金額相同或任一方沒抓到（amountKey＝0） */
+/** 平台報酬（整數分）＝src/orders.ts exactFare：max(4500, floor(分×24500/60)+1)（Swift OfferTracker.fareCents） */
+export function fareCents(minutes: number): number {
+  return Math.max(4500, Math.floor((minutes * 24500) / 60) + 1);
+}
+
+/** v1.2 金額合理？≥ fare(分鐘)−0.01（含小費只會更高）；沒抓到金額 → true（不當誤讀） */
+export function plausibleAmount(minutes: number, amount: number | null | undefined): boolean {
+  if (amount == null || !Number.isFinite(amount)) return true;
+  return Math.round(amount * 100) >= fareCents(minutes) - 1;
+}
+
+/** 同一張邀請？分鐘相同，且金額相同或任一方沒抓到（amountKey＝0）；v1.2 或其中一方金額不可能地低（誤讀） */
 export function sameOffer(minutesA: number, amountA: number | null, minutesB: number, amountB: number | null): boolean {
   if (minutesA !== minutesB) return false;
+  if (!plausibleAmount(minutesA, amountA) || !plausibleAmount(minutesB, amountB)) return true;
   const a = amountKey(amountA);
   const b = amountKey(amountB);
   return a === 0 || b === 0 || a === b;
@@ -121,6 +175,8 @@ export class OfferTracker {
   private ignored: { minutes: number; amount: number | null } | null = null;
   private idleMisses = 0;
   private recentAccepted: { minutes: number; amount: number | null; at: number }[] = [];
+  /** v1.2 idle 時的畫面紀錄（常駐字/N筆訂單），只留 BASELINE_SEC 秒 */
+  private idleLog: { at: number; weak: boolean; orders: number | null }[] = [];
 
   constructor(settings: OfferSettings = DEFAULT_OFFER, dedupeSeconds = 90) {
     this.settings = { ...settings };
@@ -160,6 +216,7 @@ export class OfferTracker {
           st.misses = 0;
           st.firstMissAt = null;
           if (o.stacked) st.offer.stacked = true;
+          this.noteExtras(st.offer, o);
         }
         return out.concat(this.tick(now));
       }
@@ -172,6 +229,7 @@ export class OfferTracker {
           st.firstMissAt = null;
           this.fillAmount(st.offer, o.amount);
           if (o.stacked) st.offer.stacked = true;
+          this.noteExtras(st.offer, o);
           return out;
         }
         out.push(this.decide(now, 'reject', 'replaced', null, o.kw, []));
@@ -179,6 +237,7 @@ export class OfferTracker {
         if (same(st.offer)) {
           const offer = { ...st.offer, lastSeen: now, stacked: st.offer.stacked || !!o.stacked };
           this.fillAmount(offer, o.amount);
+          this.noteExtras(offer, o);
           this.state = { kind: 'offered', offer, misses: 0, firstMissAt: null };
           out.push({ type: 'resumed', offer, awaySec: round1(now - st.goneAt) });
           return out;
@@ -195,9 +254,13 @@ export class OfferTracker {
         return out;
       }
       this.ignored = null;
+      const base = this.idleLog.filter((e) => now - e.at <= BASELINE_SEC);
+      const baseOrders = base.reduce<number | null>((m, e) => (e.orders != null && (m == null || e.orders > m) ? e.orders : m), null);
       const offer: Offer = {
         minutes, amount: o.amount, key: offerKeyOf(minutes, o.amount), firstSeen: now, lastSeen: now, stacked: !!o.stacked,
+        bundle: 0, tip: null, baseWeak: base.some((e) => e.weak), baseOrders,
       };
+      this.noteExtras(offer, o);
       this.state = { kind: 'offered', offer, misses: 0, firstMissAt: null };
       out.push({ type: 'seen', offer });
       return out;
@@ -208,6 +271,8 @@ export class OfferTracker {
     if (st.kind === 'idle') {
       this.idleMisses += 1;
       if (this.idleMisses >= s.goneAfterMisses) this.ignored = null;
+      this.idleLog = this.idleLog.filter((e) => now - e.at <= BASELINE_SEC);
+      this.idleLog.push({ at: now, weak: !!o.acceptWeak, orders: o.orders ?? null });
       return out;
     }
     if (st.kind === 'offered') {
@@ -218,11 +283,12 @@ export class OfferTracker {
     }
     const d = this.state as Extract<State, { kind: 'deciding' }>;
     d.lastKw = o.kw;
-    if (o.offerAccepted && !o.offerRejected) {
+    const accepted = acceptEvidence(d.offer, o);
+    if (accepted && !o.offerRejected) {
       out.push(this.decide(now, 'accept', 'accepted', d.goneAt, o.kw, o.offerHit));
       return out;
     }
-    if (o.offerRejected && !o.offerAccepted) {
+    if (o.offerRejected && !accepted) {
       out.push(this.decide(now, 'reject', 'rejected', d.goneAt, o.kw, o.offerHit));
       return out;
     }
@@ -244,12 +310,21 @@ export class OfferTracker {
     return [];
   }
 
-  /** 先前沒抓到金額、這次抓到 → 補上（key 一起更新） */
+  /** 先前沒抓到金額、這次抓到 → 補上（key 一起更新）；v1.2 先前的是誤讀（不可能地低）、這次合理 → 換成這次的 */
   private fillAmount(offer: Offer, amount: number | null): void {
-    if (amountKey(offer.amount) === 0 && amountKey(amount) !== 0) {
+    if (amountKey(amount) === 0) return;
+    const missing = amountKey(offer.amount) === 0;
+    const better = !plausibleAmount(offer.minutes, offer.amount) && plausibleAmount(offer.minutes, amount);
+    if (missing || better) {
       offer.amount = amount;
       offer.key = offerKeyOf(offer.minutes, amount);
     }
+  }
+
+  /** v1.2 組合單張數取最大、小費取最近讀到的 */
+  private noteExtras(offer: Offer, o: OfferObservation): void {
+    if (o.bundle != null && o.bundle > offer.bundle) offer.bundle = o.bundle;
+    if (o.tip != null) offer.tip = o.tip;
   }
 
   private decide(
@@ -277,6 +352,17 @@ export class OfferTracker {
       hit: [...hit],
     };
   }
+}
+
+/**
+ * v1.2 判定中這次畫面算不算「接了」：沒命中 acceptedKeywords → 否；去掉常駐字還命中（強證據）→ 是；
+ * 只剩常駐字 → 邀請前沒看過常駐字（例：空手接單後才出現「1筆訂單」）或 N 比邀請前大（疊單 1→2）才算。
+ */
+export function acceptEvidence(offer: Pick<Offer, 'baseWeak' | 'baseOrders'>, o: OfferObservation): boolean {
+  if (!o.offerAccepted) return false;
+  if (o.acceptStrong ?? true) return true;
+  if (!offer.baseWeak) return true;
+  return o.orders != null && offer.baseOrders != null && o.orders > offer.baseOrders;
 }
 
 /** extension → App 的延遲秒數（App 用「收到時間 − 延遲」還原 acceptedAt）：四捨五入、夾在 0…60 */

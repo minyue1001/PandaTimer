@@ -173,7 +173,8 @@ test('v0.7 offer 區塊：缺漏補預設、範圍、正則（不得命中空字
     assert.ok(problems.some((p) => p.startsWith(`offer.${k}`)), k);
   }
   const ok = validateConfig({ version: 'v07b', offer: { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單' } });
-  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單', islandIndicator: true, alertSound: 'default', suspectBelowMinutes: 3 });
+  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單', islandIndicator: true, alertSound: 'default', suspectBelowMinutes: 3,
+    weakAcceptedKeywords: DEFAULT_CONFIG.offer.weakAcceptedKeywords, bundleKeywords: DEFAULT_CONFIG.offer.bundleKeywords, maxBundle: 4 });
   assert.equal(DEFAULT_CONFIG.offer.ambiguousAs, 'accept');
   assert.equal(DEFAULT_CONFIG.offer.decideWindowSec, 25);
   // Swift：offerRegex 擋空字串命中、choice 列舉

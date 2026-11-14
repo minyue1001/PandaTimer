@@ -61,6 +61,13 @@ import UserNotifications
 //   - 邀請動態島回讀：update 後**同一個 Activity 物件的 content 不會立刻變**（v1.0 一律 ✗ state:active 的原因；order 的 verifyCard
 //     是 1 秒後重新查才 ✓）→ 改成 0.25 秒一次重新查、最多 1.5 秒；期間 App 已收到結果（接單/未接）→ "-"＋islandErr resolved。
 //   註冊：746＋4（delivered.seq）＝750 個（< 1000）。
+// v1.2（規則＝src/detector.ts tipSignalValue/pairedTip、src/unconfirmedOffers.ts screenOrdersHint/matchOrder）：
+//   - com.pandatimer.tip.<元>（在該單的 accept.delay/order 之前送）→ 暫存，order 收到前 10 秒～後 2 秒內配對 → start 事件 tip
+//     （組合單只有第一張取得；App 曾被暫停 → 用偵測通知 userInfo 的 tip）。
+//   - 組合單：extension 拆成 N 張 order（各自 seq、間隔 1.2 秒）；第一張的 JS 事件帶 offerMin（邀請總分鐘，JS 收未確認邀請用）。
+//   - com.pandatimer.screenorders.<2-5>：4 秒後（組合單後面幾張還在路上）比對進行中鏡像，單數 < N → 通知＋statusJSON
+//     screenOrders/screenOrdersAt/screenOrdersActive（JS 首頁提示卡「補記一張」）；同 N 5 分鐘只通知一次。
+//   註冊：750＋120（tip）＋4（screenorders）＝874 個（< 1000）。
 final class DetectorHub {
   static let shared = DetectorHub()
 
@@ -97,6 +104,13 @@ final class DetectorHub {
   /// v1.1：「槽 → 訂單 id」保存鍵、有效時間（＝src/detector.ts SLOT_KEEP_MS）
   static let seqOrdersKey = "pandatimer.native.seqOrders.v1"
   static let seqKeepSeconds: TimeInterval = 4 * 3600
+  /// v1.2：小費訊號（值＝src/detector.ts TIP_SIGNAL_VALUES：1~100、110~300 每 10）、配對時間窗
+  static let tipPrefix = "com.pandatimer.tip."
+  static let tipValues: [Int] = Array(1...100) + stride(from: 110, through: 300, by: 10).map { $0 }
+  static let tipPairBefore: TimeInterval = 10
+  /// v1.2：送單畫面 N 筆訂單（2~5）、同 N 通知間隔
+  static let screenOrdersPrefix = "com.pandatimer.screenorders."
+  static let screenOrdersNoticeSeconds: TimeInterval = 300
   /// 「偵測停止了」通知最短間隔（秒）＝src/detector.ts STOP_NOTICE_REPEAT_SEC
   static let stopNoticeRepeatSeconds: TimeInterval = 60
   /// 通知 userInfo 的 pandatimer 值：點了 JS 自動叫出廣播視窗（＝src/detector.ts REDETECT_TAG）
@@ -119,6 +133,9 @@ final class DetectorHub {
     case extMode(away: Bool)
     case extMem(Int)
     case extPeak(Int)
+    /// v1.2
+    case tip(Int)
+    case screenOrders(Int)
   }
 
   /// 純數字、無前導 0（"0" 本身可以）、在 lo…hi 之間
@@ -151,6 +168,16 @@ final class DetectorHub {
     }
     if name.hasPrefix(extPeakPrefix) {
       return plainInt(String(name.dropFirst(extPeakPrefix.count)), 0, maxExtMB).map { Signal.extPeak($0) }
+    }
+    if name.hasPrefix(tipPrefix) {
+      let text = String(name.dropFirst(tipPrefix.count))
+      guard !text.isEmpty, text.count <= 3, !text.hasPrefix("0"), text.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+            let v = Int(text), tipValues.contains(v)
+      else { return nil }
+      return .tip(v)
+    }
+    if name.hasPrefix(screenOrdersPrefix) {
+      return plainInt(String(name.dropFirst(screenOrdersPrefix.count)), 2, 5).map { Signal.screenOrders($0) }
     }
     if name.hasPrefix(deliveredSeqPrefix) {
       return plainInt(String(name.dropFirst(deliveredSeqPrefix.count)), 0, seqMod - 1).map { Signal.deliveredSeq($0) }
@@ -196,6 +223,8 @@ final class DetectorHub {
     for m in 0...maxExtMB { names.append("\(extMemPrefix)\(m)") }
     for m in 0...maxExtMB { names.append("\(extPeakPrefix)\(m)") }
     for s in 0..<seqMod { names.append("\(deliveredSeqPrefix)\(s)") }
+    for v in tipValues { names.append("\(tipPrefix)\(v)") }
+    for n in 2...5 { names.append("\(screenOrdersPrefix)\(n)") }
     return names
   }
 
@@ -262,6 +291,10 @@ final class DetectorHub {
   private var extAt: Date?
   /// v1.1：order 訊號的槽 → 自動單 id（delivered.seq.<槽> 用）；nil＝還沒從 UserDefaults 載入
   private var seqOrders: [Int: (id: String, at: Date)]?
+  /// v1.2：最近收到、還沒配對的小費訊號；最近一次「畫面 N 筆、App 只有 active 張」；各 N 上次通知時間
+  private var pendingTip: (yuan: Int, at: Date)?
+  private var screenOrdersHint: (n: Int, active: Int, at: Date)?
+  private var screenOrdersNotified: [Int: Date] = [:]
 
   // MARK: - 對外（由 LiveActivityModule 呼叫）
 
@@ -443,6 +476,11 @@ final class DetectorHub {
       if let m = extMemMB { d["memMB"] = m }
       if let m = extPeakMB { d["peakMB"] = m }
       if let at = extAt { d["extAt"] = Self.ms(at) }
+      if let h = screenOrdersHint {
+        d["screenOrders"] = h.n
+        d["screenOrdersActive"] = h.active
+        d["screenOrdersAt"] = Self.ms(h.at)
+      }
       return d
     }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
@@ -595,7 +633,45 @@ final class DetectorHub {
     case .extPeak(let mb):
       extPeakMB = mb
       extAt = now
+    case .tip(let yuan):
+      pendingTip = (yuan: yuan, at: now)
+    case .screenOrders(let n):
+      // 組合單後面幾張訊號間隔 1.2 秒 → 等 4 秒再比對進行中鏡像
+      queue.asyncAfter(deadline: .now() + 4) { self.checkScreenOrders(n, at: now) }
     }
+  }
+
+  /// v1.2 只在 queue 上：畫面 N 筆訂單 vs 進行中鏡像單數
+  private func checkScreenOrders(_ n: Int, at: Date) {
+    let active = NativeSync.readArray(NativeSync.activeKey).count
+    var fields = appFields()
+    fields["note"] = "screenOrders"
+    fields["screenOrders"] = n
+    fields["orders"] = active
+    telemetry.log("sig", fields, urgent: active < n)
+    guard active < n else { return }
+    screenOrdersHint = (n: n, active: active, at: at)
+    let now = Date()
+    if let last = screenOrdersNotified[n], now.timeIntervalSince(last) < Self.screenOrdersNoticeSeconds { return }
+    screenOrdersNotified[n] = now
+    Task {
+      await DetectorNotify.post(
+        title: "🐼 畫面顯示 \(n) 筆訂單，App 只記到 \(active) 張",
+        body: "可能有疊單沒有邀請畫面（\(Self.hms(at))）。打開 App 首頁按「補記一張」選分鐘。",
+        passive: false)
+    }
+  }
+
+  /// v1.2 只在 queue 上：order 收到前 10 秒～後 2 秒內的小費訊號（取走就清掉；過期的也清掉）＝src/detector.ts pairedTip
+  private func takeTip(near: Date) -> Int? {
+    guard let p = pendingTip else { return nil }
+    let d = near.timeIntervalSince(p.at)
+    if d <= Self.tipPairBefore && d >= -Self.delayPairWindow {
+      pendingTip = nil
+      return p.yuan
+    }
+    if d > Self.tipPairBefore { pendingTip = nil }
+    return nil
   }
 
   static func clearReasonText(_ reason: String) -> String {
@@ -885,10 +961,13 @@ final class DetectorHub {
     lastOrderAt = now
     autoCount += 1
     lastOrderHow = "處理中…"
+    // v1.2 組合單：拆出來的分鐘 ≠ 邀請總分鐘 → JS 用 offerMin 收掉未確認邀請（只有第一張還看得到 offerPendingMinutes）
+    let offerMin = offerPendingMinutes
     clearOffer()
     offerNote = "已接單 \(minutes) 分（\(Self.hms(now))）"
     let pairedDelay = takeDelay(near: now)
     let pairedStacked = takeStacked(near: now)
+    let pairedTip = takeTip(near: now)
     let beat = lastBeat ?? now
     let diag = diagText(note: "自動新單 \(minutes) 分")
     let orderId = "\(Int64(Self.ms(now)))-a\(UUID().uuidString.prefix(4).lowercased())"
@@ -902,10 +981,12 @@ final class DetectorHub {
       var timeNote = ""
       var delayUsed: Int?
       var stacked = pairedStacked
+      var tip = pairedTip
       if wasSuspended {
         if let t = await DetectorNotify.detectedAt(minutes: minutes, seq: seq, notAfter: now) {
           acceptedAt = t.date
           stacked = stacked || t.stacked
+          if tip == nil { tip = t.tip }
           timeNote = "（App 曾被暫停，接單時間已改用偵測通知的 \(Self.hms(t.date))）"
         } else {
           timeNote = "（⚠️ App 曾被暫停，接單時間可能偏晚）"
@@ -920,6 +1001,7 @@ final class DetectorHub {
           delay = self.queue.sync { self.takeDelay(near: now) }
         }
         if !stacked { stacked = self.queue.sync { self.takeStacked(near: now) } }
+        if tip == nil { tip = self.queue.sync { self.takeTip(near: now) } }
         delayUsed = delay
         if let d = delay {
           acceptedAt = now.addingTimeInterval(-Double(d))
@@ -938,6 +1020,8 @@ final class DetectorHub {
         "notifIds": notifIds,
         "source": "auto",
       ]
+      // v1.2 小費（JS parseNativeEvents → Order.tip）
+      if let t = tip { order["tip"] = t }
       // v1.1 疊單：邀請寫「夾單」＝offer；接單時鏡像裡已有其他進行中單＝carry（統計「不含夾單」兩種都排除）
       let othersActive = !NativeSync.readArray(NativeSync.activeKey).isEmpty
       let stackKind: String? = stacked ? "offer" : (othersActive ? "carry" : nil)
@@ -951,6 +1035,7 @@ final class DetectorHub {
       let check = await Self.verifyCard(activityId: outcome.activityId, expect: outcome.expect)
       let how = outcome.text + timeNote
       let delayField = delayUsed
+      let tipField = tip
       self.queue.async {
         self.lastOrderHow = how
         self.islandCheck = check.text
@@ -963,14 +1048,18 @@ final class DetectorHub {
         if let d = delayField { fields["delay"] = d }
         if isStacked { fields["stacked"] = true }
         if let k = stackKind { fields["stackKind"] = k }
+        if let t = tipField { fields["tip"] = t }
         if let err = outcome.requestError { fields["reason"] = err }
         self.telemetry.log("order", fields, urgent: true)
-        self.emit(["type": "order", "minutes": minutes, "how": how, "check": check.text])
+        var body: [String: Any?] = ["type": "order", "minutes": minutes, "how": how, "check": check.text]
+        if let m = offerMin, m != minutes { body["offerMin"] = m }
+        self.emit(body)
       }
+      let tipNote = tip.map { "・小費 \($0) 元" } ?? ""
       let gapNote = gap > 0 ? "\n⚠️ 中間有 \(gap) 則新單訊號遺失（App 可能被暫停）" : ""
       await DetectorNotify.post(
         title: "App 已記錄自動新單：\(minutes) 分" + (stackKind == "offer" ? "（夾單）" : stackKind == "carry" ? "（疊單）" : "")
-          + (outcome.count > 1 ? "（進行中 \(outcome.count) 單）" : ""),
+          + (outcome.count > 1 ? "（進行中 \(outcome.count) 單）" : "") + tipNote,
         body: "\(check.text)\n\(how)\(gapNote)\n動態島沒變的話：點「偵測到新單」通知打開 App，或長按動態島按「開始倒數」",
         passive: true)
     }
@@ -1795,25 +1884,36 @@ enum DetectorNotify {
 
   /// extension 發的「偵測到新單」通知（userInfo pandatimer=detected）裡的偵測時間：
   /// 同分鐘數（v0.6 起再比對序號）、在 notAfter 之前 10 分鐘內的最新一則。找不到回 nil。v0.8 一併回傳 stacked
-  static func detectedAt(minutes: Int, seq: Int, notAfter: Date) async -> (date: Date, stacked: Bool)? {
+  /// v1.2：組合單一則通知帶 parts（每張 minutes/seq，小費只在第一張）→ 任一張對到就算，tip 取那張的
+  static func detectedAt(minutes: Int, seq: Int, notAfter: Date) async -> (date: Date, stacked: Bool, tip: Int?)? {
     let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
     var best: Date?
     var bestStacked = false
+    var bestTip: Int?
     for notification in delivered {
       let info = notification.request.content.userInfo
       guard (info["pandatimer"] as? String) == "detected",
-            (info["minutes"] as? NSNumber)?.intValue == minutes,
-            (info["seq"] as? NSNumber).map({ $0.intValue == seq }) ?? true,
             let ms = (info["detectedAt"] as? NSNumber)?.doubleValue
       else { continue }
+      var matched: [String: Any]?
+      if let parts = info["parts"] as? [[String: Any]] {
+        matched = parts.first { p in
+          (p["minutes"] as? NSNumber)?.intValue == minutes && (p["seq"] as? NSNumber).map({ $0.intValue == seq }) ?? true
+        }
+      } else if (info["minutes"] as? NSNumber)?.intValue == minutes,
+                (info["seq"] as? NSNumber).map({ $0.intValue == seq }) ?? true {
+        matched = [:]
+      }
+      guard let part = matched else { continue }
       let t = Date(timeIntervalSince1970: ms / 1000)
       guard t <= notAfter.addingTimeInterval(5), notAfter.timeIntervalSince(t) < 600 else { continue }
       if best.map({ t > $0 }) ?? true {
         best = t
         bestStacked = (info["stacked"] as? NSNumber)?.boolValue ?? false
+        bestTip = (part["tip"] as? NSNumber)?.intValue
       }
     }
-    return best.map { (date: $0, stacked: bestStacked) }
+    return best.map { (date: $0, stacked: bestStacked, tip: bestTip) }
   }
 }
 
