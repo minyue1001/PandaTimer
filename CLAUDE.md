@@ -108,3 +108,4 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - v1.2 實機待驗：送餐資訊兩區塊是否都在下半部 OCR 內、疊單時「N筆訂單」是否只算單店、組合單第二張 carry 標記。v1.1 實機待驗：單號在畫面上的位置（補掃範圍）、取消/捲走按鈕且畫面上看不到單號時會被當成按了確認（退路：遠端 `delivery.mode:"appear"`）、綁號時機。telemetry.keywords >40 列時 v0.7 App 整份改用內建白名單。
 - 免費帳號：每 7 天重簽、App ID 佔 **3** 個（主 App＋widget＋broadcast；免費帳號 7 天最多 10 個新 App ID）。動態島/通知權限需在 iPhone 允許。
 - **進行中的單別從雲端改回 active**（2026-11-14 踩坑）：雲端改的要等 App 同步（前景約 2 分鐘）才進原生進行中鏡像，期間真的送達 → 原生 `noActive` 訊號落空，同步回來又多一張進行中，畫面全亂。誤結的單一律**等送完再用管理 API 補 deliveredAt**（從 telemetry 找 `delivered_seen` 時間），不要先 reopen。
+- **不要在 JS 端自動 stopDetection()/收偵測卡**（v1.2.3 拿掉 v1.1 的回前景收卡補救）：廣播非預期停止後使用者常馬上重開，卡一收掉，背景無法再建卡（`Target is not foreground`）→ 動態島整段消失（11/15 08:56 實機）。偵測卡的生死只由原生 disarm／使用者按停止決定。
