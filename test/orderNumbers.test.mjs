@@ -331,7 +331,7 @@ test('Swift 與 TS 同規則：OrderNumbers/OrderNumberBook/DeliveryWatch、送�
   assert.ok(!/telemetry\.log\([^)]*\bno\b/.test(send), '單號不得進 telemetry');
   for (const s of ['static let deliveredSeqPrefix = "com.pandatimer.delivered.seq."', 'if sent { book.accepted(seq: seq, at: acceptedAt) }',
     'self.handleWatch(self.watch.finish(Date()), info: nil)', 'self.handleWatch(self.watch.tick(Date()), info: nil)',
-    'let deadlines = [tracker.deadline, deliveryEdge.deadline, watch.deadline].compactMap { $0 }', 'changed: why != "force"',
+    'let deadlines = [tracker.deadline, deliveryEdge.deadline, watch.deadline, gate.deadline].compactMap { $0 }', 'changed: why != "force"',
     'telemetry.log("offer_suspect", fields)', 'final: info.deliveredFinal || scan.finalHit', 'changed: why != "force", numbers: scan.numbers']) {
     assert.ok(ext.includes(s), s);
   }

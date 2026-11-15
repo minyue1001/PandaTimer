@@ -272,7 +272,9 @@
     "numberScanTop": 0.05,
     "numberScanBottom": 0.6,
     "bindWindowSec": 300,
-    "stackScreenGapSec": 120
+    "stackScreenGapSec": 120,
+    "sameDeliverySec": 30,
+    "plainHoldSec": 12
   },
   "ocr": {
     "memSkipMB": 36,

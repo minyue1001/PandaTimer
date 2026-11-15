@@ -44,6 +44,10 @@ export type DeliverySettings = {
   bindWindowSec: number;
   /** v1.2.2 疊單字樣距最近一次送達訊號要 >= 這麼久才算 2 筆（0~600） */
   stackScreenGapSec: number;
+  /** v1.2.3 同一次送達只結一張：送達訊號後這麼久內，沒單號的送達不送、同 seq 不送（0~120；0＝關） */
+  sameDeliverySec: number;
+  /** v1.2.3 沒單號的送達先暫緩這麼久，期間出現有單號的就只送有單號的（0~60；0＝不暫緩） */
+  plainHoldSec: number;
 };
 export type DeliveryMode = 'disappear' | 'appear';
 export const DELIVERY_MODES: readonly DeliveryMode[] = ['disappear', 'appear'];
@@ -60,6 +64,8 @@ export const DEFAULT_DELIVERY: Readonly<DeliverySettings> = Object.freeze({
   numberScanBottom: 0.6,
   bindWindowSec: 300,
   stackScreenGapSec: 120,
+  sameDeliverySec: 30,
+  plainHoldSec: 12,
 });
 
 /** 延遲訊號只編 0…60 秒 */
@@ -287,6 +293,87 @@ export class DeliveryWatch {
     this.no = null;
     this.lastSentAt = now;
     return { kind: 'send', delaySec, why, no };
+  }
+}
+
+/**
+ * v1.2.3 同一次送達只結一張（extension 端，DeliveryWatch/DeliveryEdge 送出前都過這一關；時間單位：秒）。
+ * 11/15 實機：一次送達常冒出兩個訊號（相隔 5~10 秒；先 seq 後 plain、或先 plain 後 seq 都有）→ 疊單時 plain 讓 App
+ * 退回「結截止最早」，把另一張還在送的結掉。規則：
+ *   - 最近一次送達（時間＝該訊號被判定的時間，暫緩的 plain 也是判定那刻）sameDeliverySec 內：plain 一律不送；同 seq 不送；
+ *     不同 seq 照送（真的連送兩張且都讀到號）。
+ *   - plain 先暫緩 plainHoldSec：期間來了 seq → 丟掉 plain、只送 seq；又來 plain → 丟後來的；到期（或廣播停止 finish）
+ *     才送，delay＝原 delay＋暫緩秒數（上限 60，App 記的送達時間仍是畫面消失那刻）。
+ * seq＝null 代表 plain（noNumber/unbound/slotReused）。
+ */
+export type GateSignal = { seq: number | null; delaySec: number };
+export type GateDropReason = 'sameDelivery' | 'sameSeq' | 'superseded' | 'heldPlain';
+export type GateAction<T extends GateSignal> =
+  /** 送出（delaySec＝原 delay＋暫緩秒數，上限 60；heldSec＝暫緩了幾秒） */
+  | { kind: 'send'; signal: T; delaySec: number; heldSec: number }
+  /** plain 暫緩中 */
+  | { kind: 'hold'; signal: T }
+  /** 丟掉（同一次送達的第二個訊號） */
+  | { kind: 'drop'; signal: T; reason: GateDropReason };
+
+export class DeliveryGate<T extends GateSignal = GateSignal> {
+  sameDeliverySec: number;
+  plainHoldSec: number;
+  private last: { at: number; seq: number | null } | null = null;
+  private held: { at: number; signal: T } | null = null;
+
+  constructor(sameDeliverySec = DEFAULT_DELIVERY.sameDeliverySec, plainHoldSec = DEFAULT_DELIVERY.plainHoldSec) {
+    this.sameDeliverySec = sameDeliverySec;
+    this.plainHoldSec = plainHoldSec;
+  }
+
+  /** 暫緩的 plain 到期時間（呼叫端排計時器；畫面靜止時不會有 OCR） */
+  get deadline(): number | null {
+    return this.held == null ? null : this.held.at + this.plainHoldSec;
+  }
+
+  offer(now: number, signal: T): GateAction<T>[] {
+    const out = this.tick(now);
+    if (signal.seq == null) {
+      if (this.held != null) return [...out, { kind: 'drop', signal, reason: 'heldPlain' }];
+      if (this.recent(now)) return [...out, { kind: 'drop', signal, reason: 'sameDelivery' }];
+      if (this.plainHoldSec <= 0) return [...out, this.emit(now, now, signal)];
+      this.held = { at: now, signal };
+      return [...out, { kind: 'hold', signal }];
+    }
+    if (this.held != null) {
+      out.push({ kind: 'drop', signal: this.held.signal, reason: 'superseded' });
+      this.held = null;
+    }
+    if (this.recent(now) && this.last?.seq === signal.seq) return [...out, { kind: 'drop', signal, reason: 'sameSeq' }];
+    return [...out, this.emit(now, now, signal)];
+  }
+
+  /** 計時器/每個訊號前：暫緩到期 → 送 */
+  tick(now: number): GateAction<T>[] {
+    if (this.held == null || now - this.held.at < this.plainHoldSec) return [];
+    return this.flush(now);
+  }
+
+  /** 廣播停止：暫緩中的 plain 立刻送（不能丟：可能是唯一的送達訊號） */
+  finish(now: number): GateAction<T>[] {
+    return this.held == null ? [] : this.flush(now);
+  }
+
+  private flush(now: number): GateAction<T>[] {
+    const h = this.held as { at: number; signal: T };
+    this.held = null;
+    return [this.emit(now, h.at, h.signal)];
+  }
+
+  private recent(now: number): boolean {
+    return this.last != null && now - this.last.at < this.sameDeliverySec;
+  }
+
+  private emit(now: number, decidedAt: number, signal: T): GateAction<T> {
+    const heldSec = Math.max(0, Math.round(now - decidedAt));
+    this.last = { at: decidedAt, seq: signal.seq };
+    return { kind: 'send', signal, delaySec: Math.min(MAX_DELIVERED_DELAY, signal.delaySec + heldSec), heldSec };
   }
 }
 

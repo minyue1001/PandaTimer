@@ -214,6 +214,10 @@ final class RemoteConfig {
     var bindWindowSec = 300
     /// v1.2.2：疊單字樣距最近一次送達訊號要 >= 這麼久才算 2 筆（剛送完單殘留字樣會誤報）
     var stackScreenGapSec = 120
+    /// v1.2.3：同一次送達只結一張（ext DeliveryGate）：送達訊號後 sameDeliverySec 內沒單號的不送、同 seq 不送；
+    ///   沒單號的先暫緩 plainHoldSec，期間出現有單號的就只送有單號的
+    var sameDeliverySec = 30
+    var plainHoldSec = 12
   }
 
   static func delivery(_ root: [String: Any]) -> DeliverySettings {
@@ -235,6 +239,8 @@ final class RemoteConfig {
     }
     out.bindWindowSec = int(d["bindWindowSec"], 30, 3600, out.bindWindowSec)
     out.stackScreenGapSec = int(d["stackScreenGapSec"], 0, 600, out.stackScreenGapSec)
+    out.sameDeliverySec = int(d["sameDeliverySec"], 0, 120, out.sameDeliverySec)
+    out.plainHoldSec = int(d["plainHoldSec"], 0, 60, out.plainHoldSec)
     return out
   }
 

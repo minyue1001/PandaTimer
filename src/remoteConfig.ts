@@ -164,6 +164,8 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'delivery.numberScanBottom': [0.1, 1, false],
   'delivery.bindWindowSec': [30, 3600, true],
   'delivery.stackScreenGapSec': [0, 600, true],
+  'delivery.sameDeliverySec': [0, 120, true], // v1.2.3 同一次送達只結一張
+  'delivery.plainHoldSec': [0, 60, true], // v1.2.3 沒單號的送達先暫緩（delay 只編 0~60 秒）
   'ocr.memSkipMB': [20, 60, false],
   'ocr.memHighMB': [25, 80, false],
   'ocr.rebuildEvery': [1, 1000, true],

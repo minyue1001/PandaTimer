@@ -294,3 +294,79 @@ final class DeliveryWatch {
     return .send(delay: delay, why: why, no: n)
   }
 }
+
+/// v1.2.3 同一次送達只結一張（同 TS DeliveryGate；DeliveryWatch/DeliveryEdge 送出前都過這一關，只在 workQueue 上用）。
+/// 最近一次送達（判定時間）sameDeliverySec 內：plain（沒單號：noNumber/unbound/slotReused）不送、同 seq 不送、不同 seq 照送；
+/// plain 先暫緩 plainHoldSec：期間來 seq → 丟 plain 只送 seq；又來 plain → 丟後來的；到期/廣播停止才送，delay＋暫緩秒數（≤60）。
+final class DeliveryGate {
+  struct Signal {
+    /// nil＝plain
+    let seq: Int?
+    let delay: Int
+    /// telemetry result（seq/noNumber/unbound/slotReused）與已組好的欄位
+    let result: String
+    let fields: [String: Any]
+  }
+
+  enum Action {
+    /// delay＝原 delay＋暫緩秒數（≤60）；held＝暫緩了幾秒
+    case send(Signal, delay: Int, held: Int)
+    case hold(Signal)
+    /// reason：sameDelivery / sameSeq / superseded / heldPlain
+    case drop(Signal, reason: String)
+  }
+
+  var sameDeliverySec: TimeInterval = 30
+  var plainHoldSec: TimeInterval = 12
+  private var last: (at: Date, seq: Int?)?
+  private var held: (at: Date, signal: Signal)?
+
+  /// 暫緩的 plain 到期時間（呼叫端排計時器）
+  var deadline: Date? { held.map { $0.at.addingTimeInterval(plainHoldSec) } }
+
+  func offer(_ now: Date, _ signal: Signal) -> [Action] {
+    var out = tick(now)
+    if signal.seq == nil {
+      if held != nil { return out + [.drop(signal, reason: "heldPlain")] }
+      if recent(now) { return out + [.drop(signal, reason: "sameDelivery")] }
+      if plainHoldSec <= 0 { return out + [emit(now, decidedAt: now, signal)] }
+      held = (at: now, signal: signal)
+      return out + [.hold(signal)]
+    }
+    if let h = held {
+      out.append(.drop(h.signal, reason: "superseded"))
+      held = nil
+    }
+    if recent(now), let l = last, l.seq == signal.seq { return out + [.drop(signal, reason: "sameSeq")] }
+    return out + [emit(now, decidedAt: now, signal)]
+  }
+
+  /// 計時器/每個訊號前：暫緩到期 → 送
+  func tick(_ now: Date) -> [Action] {
+    guard let h = held, now.timeIntervalSince(h.at) >= plainHoldSec else { return [] }
+    return flush(now)
+  }
+
+  /// 廣播停止：暫緩中的 plain 立刻送（可能是唯一的送達訊號）
+  func finish(_ now: Date) -> [Action] {
+    held == nil ? [] : flush(now)
+  }
+
+  private func flush(_ now: Date) -> [Action] {
+    guard let h = held else { return [] }
+    held = nil
+    return [emit(now, decidedAt: h.at, h.signal)]
+  }
+
+  private func recent(_ now: Date) -> Bool {
+    guard let l = last else { return false }
+    return now.timeIntervalSince(l.at) < sameDeliverySec
+  }
+
+  private func emit(_ now: Date, decidedAt: Date, _ signal: Signal) -> Action {
+    let d = now.timeIntervalSince(decidedAt).rounded()
+    let heldSec = d.isFinite ? max(0, Int(d)) : 0
+    last = (at: decidedAt, seq: signal.seq)
+    return .send(signal, delay: min(60, signal.delay + heldSec), held: heldSec)
+  }
+}

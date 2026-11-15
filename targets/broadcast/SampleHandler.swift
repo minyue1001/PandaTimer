@@ -46,6 +46,8 @@ import Vision
 //     避免同名 Darwin 合併、App 端卡片並行更新）；telemetry bundle=N。
 //   - 小費：「包含額外 N 元」→ 第一張的 order 之前先送 com.pandatimer.tip.<值>（值見 PandaSignal.tipValue；telemetry tip＝原值）。
 //   - 送單畫面「N 筆訂單／疊單」（沒有邀請進行中、連 2 次）→ com.pandatimer.screenorders.<N>（ScreenOrdersWatch 去抖）。
+// v1.2.3（11/15 實機：一次送達冒出兩個訊號 → 疊單另一張被提早結）：送達訊號都過 DeliveryGate（OrderNumbers.swift＝
+//   src/deliveryDetector.ts DeliveryGate）：sameDeliverySec 內 plain/同 seq 不送；plain 先暫緩 plainHoldSec 等 seq。
 //
 // 省記憶體（v0.4 實測峰值 43MB → v0.5 目標 ≤36MB；jetsam 約 50MB）：
 //  - 不用 CIContext：直接讀 pixel buffer 的亮度平面（420f 的 Y），只取畫面下方 50%，
@@ -344,6 +346,8 @@ final class BroadcastDetector {
   /// v1.1 單號 ↔ 接單 seq、送達對話框消失偵測（OrderNumbers.swift）；最近一次對話框單號（appear 模式用）、上方補掃時間/次數
   private let book = OrderNumberBook()
   private let watch = DeliveryWatch()
+  /// v1.2.3 同一次送達只結一張（跨 DeliveryWatch/DeliveryEdge 共用「最近送出的送達」與暫緩中的 plain）
+  private let gate = DeliveryGate()
   private var lastDialogNo: (no: String, at: Date)?
   private var lastUpperAt: Date?
   private var upperScans = 0
@@ -421,6 +425,8 @@ final class BroadcastDetector {
         // v1.1：對話框剛消失、還在確認 → 送；按鈕還在（沒按）→ 不送
         self.handleWatch(self.watch.finish(Date()), info: nil)
       }
+      // v1.2.3：暫緩中的 plain 送達照送（delay 含暫緩秒數），要在 stopped 之前
+      self.applyGate(self.gate.finish(Date()))
     }
     PandaSignal.post(PandaSignal.stopped)
     // 程序在這個方法 return 後就會被結束 → 等最後一則（靜音）摘要通知送出（最多 2 秒）
@@ -513,6 +519,8 @@ final class BroadcastDetector {
     deliveryEdge.pendingSec = TimeInterval(next.delivery.pendingSec)
     book.bindWindow = TimeInterval(next.delivery.bindWindowSec)
     screenOrders.stackGapSec = TimeInterval(next.delivery.stackScreenGapSec)
+    gate.sameDeliverySec = TimeInterval(next.delivery.sameDeliverySec)
+    gate.plainHoldSec = TimeInterval(next.delivery.plainHoldSec)
     ocr.configure(englishToo: next.ocrGuard.englishToo, rebuildEvery: next.ocrGuard.rebuildEvery)
     if old.heartbeatInterval != next.heartbeatInterval, let timer = heartbeatTimer {
       timer.schedule(
@@ -892,38 +900,65 @@ final class BroadcastDetector {
 
   /// v1.1 送出送達（只在 workQueue）：先送延遲；單號對到接單 seq → delivered.seq.<槽>，否則 delivered（App 退回截止最早）。
   /// 同一單號 1 小時內不重送。telemetry 只送 matched/result，**不送單號**
+  /// v1.2.3：送出前過 DeliveryGate（同一次送達只結一張；plain 先暫緩 plainHoldSec）
   private func sendDelivered(delay: Int, why: String, no: String?, fields base: [String: Any]) {
     var fields = base
     let now = Date()
     let resolution = book.resolve(now, no)
     fields["reason"] = why
     fields["delay"] = delay
-    if case .repeated = resolution {
+    let seq: Int?
+    let result: String
+    switch resolution {
+    case .repeated:
       fields["note"] = "repeatNo"
       fields["matched"] = false
       telemetry.log("delivered_seen", fields)
       return
-    }
-    deliveredCount += 1
-    screenOrders.delivered(now)  // v1.2.2：疊單字樣要距最近送達訊號 >= stackScreenGapSec 才算
-    PandaSignal.postDeliveredDelay(delay)
-    switch resolution {
-    case .seq(let seq, _):
-      PandaSignal.postDeliveredSeq(seq)
-      book.markSent(now, no: no, seq: seq)
-      fields["matched"] = true
-      fields["result"] = "seq"
-      fields["seq"] = seq % PandaSignal.seqMod
+    case .seq(let s, _):
+      seq = s
+      result = "seq"
     case .plain(let reason):
-      PandaSignal.post(PandaSignal.delivered)
-      book.markSent(now, no: no, seq: nil)
-      fields["matched"] = false
-      fields["result"] = reason
-    case .repeated:
-      break
+      seq = nil
+      result = reason
     }
-    fields["note"] = "signal"
-    telemetry.log("delivered_seen", fields, urgent: true)
+    // 號碼在判定當下就記為已送（被 gate 丟掉的也是同一次真的送達，不該 1 小時內再送）
+    book.markSent(now, no: no, seq: seq)
+    fields["matched"] = seq != nil
+    fields["result"] = result
+    if let s = seq { fields["seq"] = s % PandaSignal.seqMod }
+    applyGate(gate.offer(now, DeliveryGate.Signal(seq: seq, delay: delay, result: result, fields: fields)))
+  }
+
+  /// v1.2.3 套用 DeliveryGate 的決定（只在 workQueue）：send＝真的送 Darwin 訊號；hold/drop 只回報 telemetry
+  private func applyGate(_ actions: [DeliveryGate.Action]) {
+    for action in actions {
+      switch action {
+      case .send(let signal, let delay, let held):
+        var fields = signal.fields
+        deliveredCount += 1
+        screenOrders.delivered(Date())  // v1.2.2：疊單字樣要距最近送達訊號 >= stackScreenGapSec 才算
+        PandaSignal.postDeliveredDelay(delay)
+        if let seq = signal.seq {
+          PandaSignal.postDeliveredSeq(seq)
+        } else {
+          PandaSignal.post(PandaSignal.delivered)
+        }
+        fields["delay"] = delay
+        if held > 0 { fields["wait"] = held }
+        fields["note"] = "signal"
+        telemetry.log("delivered_seen", fields, urgent: true)
+      case .hold(let signal):
+        var fields = signal.fields
+        fields["note"] = "hold"
+        telemetry.log("delivered_seen", fields)
+      case .drop(let signal, let reason):
+        var fields = signal.fields
+        fields["note"] = "drop_\(reason)"
+        telemetry.log("delivered_seen", fields, urgent: true)
+      }
+    }
+    // hold 的到期計時器由呼叫端最後的 scheduleDecisionTimer() 排（OCR 路徑/計時器路徑都有；finish 時已 flush）
   }
 
   // MARK: - v0.7 邀請 → 接單判定（只在 workQueue）
@@ -932,7 +967,7 @@ final class BroadcastDetector {
   private func scheduleDecisionTimer() {
     decisionTimer?.cancel()
     decisionTimer = nil
-    let deadlines = [tracker.deadline, deliveryEdge.deadline, watch.deadline].compactMap { $0 }
+    let deadlines = [tracker.deadline, deliveryEdge.deadline, watch.deadline, gate.deadline].compactMap { $0 }
     guard let deadline = deadlines.min() else { return }
     let item = DispatchWorkItem { [weak self] in
       guard let self = self else { return }
@@ -942,6 +977,7 @@ final class BroadcastDetector {
         self.handleDelivery(self.deliveryEdge.tick(Date()), info: nil)
         self.handleWatch(self.watch.tick(Date()), info: nil)
       }
+      self.applyGate(self.gate.tick(Date()))
       self.lock.lock()
       self.offerActiveFlag = self.tracker.isActive
       self.lock.unlock()
