@@ -96,7 +96,7 @@ http_codes() {
 
 svc_states() {
   local s
-  for s in nginx wheat-server@a wheat-tw-tunnel "$SVC"; do
+  for s in nginx wheat-server@a wheat-server@b wheat-tw-tunnel "$SVC"; do
     printf '@@svc %s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || true)"
   done
 }
@@ -214,9 +214,13 @@ cmd_preflight() {
   else
     say "• 埠 $PORT：空閒"
   fi
-  for c in nginx wheat-server@a; do
-    systemctl is-active --quiet "$c" || die "$c 目前不是 active——現況就不健康，請先處理再部署"
-  done
+  systemctl is-active --quiet nginx || die "nginx 目前不是 active——現況就不健康，請先處理再部署"
+  # 保衛小麥是 a/b 兩槽藍綠部署（交接後只有一槽在跑）→ 至少一槽 active 即健康
+  if systemctl is-active --quiet wheat-server@a || systemctl is-active --quiet wheat-server@b; then
+    say "• 保衛小麥：$(for s in a b; do printf 'wheat-server@%s=%s ' "$s" "$(systemctl is-active "wheat-server@$s" 2>/dev/null || true)"; done)"
+  else
+    die "wheat-server@a/@b 都不是 active——現況就不健康，請先處理再部署"
+  fi
   svc_states
   nginx_real
   say "• nginx 站台實體檔：$NGINX_REAL（$NGINX_ENABLED 是$([[ -L "$NGINX_ENABLED" ]] && echo ' symlink' || echo '一般檔')）"
@@ -568,7 +572,7 @@ if (( DRY_RUN )); then
   6. 驗證：/、/wheat/、/wheat/admin/ 狀態碼與改前一致；$PUBLIC_URL/api/health = ok；
      manifest 經 nginx 回 noUpdateAvailable；/api/config 回 JSON；/api/telemetry 經 nginx：錯誤金鑰 401、讀取金鑰 200；
      /pandatimer/admin 200、/pandatimer/api/sync 無同步碼 401；
-     nginx / wheat-server@a / $SVC 皆 active；wheat-tw-tunnel 狀態不變
+     nginx / $SVC 皆 active；wheat-server@a/@b 與 wheat-tw-tunnel 狀態不變（a/b 至少一槽 active）
      任一失敗 → 還原 nginx；有上一版就換回並重啟，否則停用 $SVC；非零退出
 ✅ dry-run 完成（未改動任何東西）
 EOF
@@ -601,10 +605,18 @@ for p in / /wheat/ /wheat/admin/; do
   b="$(field "$PRE_OUT" @@code "$p")"; a="$(field "$POST_OUT" @@code "$p")"
   if [[ "$a" == "$b" ]]; then echo "• https://$DOMAIN$p：$b → $a ✓"; else echo "• https://$DOMAIN$p：$b → $a ✗"; bad=1; fi
 done
-for s in nginx wheat-server@a "$SVC"; do
+for s in nginx "$SVC"; do
   st="$(field "$POST_OUT" @@svc "$s")"
   if [[ "$st" == "active" ]]; then echo "• $s：active ✓"; else echo "• $s：$st ✗"; bad=1; fi
 done
+# 保衛小麥 a/b 藍綠槽：狀態要跟部署前一樣（不碰它），且至少一槽 active
+wa=0
+for s in wheat-server@a wheat-server@b; do
+  b="$(field "$PRE_OUT" @@svc "$s")"; a="$(field "$POST_OUT" @@svc "$s")"
+  [[ "$a" == "active" ]] && wa=1
+  if [[ "$a" == "$b" ]]; then echo "• $s：$b → $a ✓"; else echo "• $s：$b → $a ✗"; bad=1; fi
+done
+if (( wa )); then echo "• 保衛小麥至少一槽 active ✓"; else echo "• 保衛小麥 a/b 都不是 active ✗"; bad=1; fi
 st="$(field "$POST_OUT" @@svc wheat-tw-tunnel)"
 if [[ "$st" == "$TUNNEL_BEFORE" ]]; then echo "• wheat-tw-tunnel：$TUNNEL_BEFORE → $st ✓"; else echo "• wheat-tw-tunnel：$TUNNEL_BEFORE → $st ✗"; bad=1; fi
 h="$(awk '$1=="@@health"{print $2}' "$POST_OUT")"
