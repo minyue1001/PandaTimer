@@ -28,6 +28,8 @@ export type PaySample = {
   estAmount?: number | null;
   /** v1.2 小費（元）；沒有/0 不計 */
   tip?: number | null;
+  /** v1.2.4 不計時效（轉成其他訂單）：照領預估報酬＋小費，補錢 0、不算晚到 */
+  noTiming?: boolean;
 };
 
 export type OrderPay = { estPay: number; actPay: number; adjustment: number; late: boolean };
@@ -35,6 +37,7 @@ export type OrderPay = { estPay: number; actPay: number; adjustment: number; lat
 export function orderPay(s: PaySample, p: PayParams = DEFAULT_PAY): OrderPay {
   const act = Math.round(s.act);
   const estPay = s.estAmount != null && Number.isFinite(s.estAmount) && s.estAmount > 0 ? s.estAmount : fareFor(s.est, p);
+  if (s.noTiming) return { estPay, actPay: estPay, adjustment: 0, late: false };
   const actPay = fareFor(act, p);
   return { estPay, actPay, adjustment: Math.max(0, actPay - estPay), late: act > s.est };
 }
@@ -109,7 +112,7 @@ export function summarizeEarnings(
 export function paySamplesBetween(orders: readonly Order[], since: number, until: number): PaySample[] {
   return orders
     .filter((o) => o.status === 'delivered' && o.actualMin != null && o.acceptedAt >= since && o.acceptedAt < until)
-    .map((o) => ({ est: o.estimateMin, act: o.actualMin as number, ...(o.tip != null ? { tip: o.tip } : {}) }));
+    .map((o) => ({ est: o.estimateMin, act: o.actualMin as number, ...(o.tip != null ? { tip: o.tip } : {}), ...(o.noTiming ? { noTiming: true } : {}) }));
 }
 
 /** 本期（含同期補登收入）與今日（台北日，不含補登）的收入 */

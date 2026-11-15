@@ -1,6 +1,6 @@
 // 有副作用的確認流程（Alert＋controller），首頁與紀錄頁共用；文字沿用改版前
 import { Alert } from 'react-native';
-import { cancelOrder, previewPrune, pruneOrders, setOrderTip, startOrder } from '../controller';
+import { cancelOrder, previewPrune, pruneOrders, setOrderNoTiming, setOrderTip, startOrder } from '../controller';
 import { MAX_TIP, parseTipInput, type Order } from '../orders';
 import { money } from '../earnings';
 import { describePlan, formatTaipeiDateTime, type PruneCriteria } from '../prune';
@@ -36,6 +36,23 @@ export function confirmDeleteOne(o: Order, toast: Toast) {
     { text: '不要', style: 'cancel' },
     { text: '刪除', style: 'destructive', onPress: () => runPrune({ kind: 'ids', ids: [o.id] }, toast) },
   ]);
+}
+
+/** v1.2.4 紀錄列長按選單：不計時效／恢復計時效、刪除這筆（走 confirmDeleteOne 二次確認）、取消 */
+export function openRowMenu(o: Order, toast: Toast) {
+  const nt = !!o.noTiming;
+  Alert.alert(
+    `${formatTaipeiDateTime(o.acceptedAt)} 這筆`,
+    nt ? '目前「不計時效」：不算進準時率/超時率，收入照算、不補錢。' : '被平台轉成其他訂單？標「不計時效」後不算準時率/超時率，收入照算、不補錢。',
+    [
+      {
+        text: nt ? '恢復計時效' : '不計時效',
+        onPress: () => void setOrderNoTiming(o.id, !nt).then(() => toast(nt ? '已恢復計時效' : '已標為不計時效')),
+      },
+      { text: '刪除這筆', style: 'destructive', onPress: () => confirmDeleteOne(o, toast) },
+      { text: '取消', style: 'cancel' },
+    ],
+  );
 }
 
 /** v1.2 小費輸入（iOS 文字輸入對話框；存檔即寫入本機並排雲端同步）。空白或 0＝清除小費 */

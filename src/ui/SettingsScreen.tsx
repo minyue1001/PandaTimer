@@ -60,7 +60,7 @@ export function SettingsScreen(p: SettingsProps) {
         </Text>
         <Text style={S.text}>操作</Text>
         <Text style={S.small}>
-          進行中卡片上半部長按＝刪除那筆；紀錄頁任一列長按＝單筆刪除；批次刪除在紀錄頁「管理紀錄」。
+          進行中卡片上半部長按＝刪除那筆；紀錄頁任一列長按＝選單（不計時效／刪除）；批次刪除在紀錄頁「管理紀錄」。
           {'\n'}改時間/金額/補登：電腦或手機瀏覽器開 {ADMIN_URL} 直接編輯，App 會自動同步回來。
         </Text>
       </Collapsible>

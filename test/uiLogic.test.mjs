@@ -287,3 +287,25 @@ test('v1.3 紀錄列純函式：超時分鐘、狀態文字、預估→實際、
   const g = groupHistory([delivered('a', '2026-11-12T10:00:00', 20, 27, { tip: 15 })], { now: tp('2026-11-12T20:00:00') }).groups[0];
   assert.deepEqual([g.rows[0].statusText, g.rows[0].estActText], ['超 7 分', '20 分 → 27 分']);
 });
+
+test('v1.2.4 不計時效：列標記、狀態字「不計」、tags、日小計率排除但單數與收入照算', () => {
+  assert.equal(rowStatusText({ status: 'delivered', est: 22, act: 40, onTime: false, noTiming: true }), '不計');
+  assert.equal(rowStatusText({ status: 'canceled', est: 22, noTiming: true }), '已取消');
+  assert.deepEqual(orderTags({ source: 'auto', stacked: true, noTiming: true }), ['自動', '夾單', '不計時效']);
+  assert.deepEqual(orderTags({ source: 'auto' }), ['自動']);
+  assert.equal(daySubText({ overrunRate: 0, tip: 0, stacked: 0, noTiming: 2 }), '超時率 0% · 不計時效 2');
+  const orders = [
+    delivered('a', '2026-11-12T10:00:00', 20, 18),
+    delivered('b', '2026-11-12T11:00:00', 20, 40, { noTiming: true, tip: 5 }),
+  ];
+  const g = groupHistory(orders, { now: tp('2026-11-12T20:00:00') }).groups[0];
+  const rowB = g.rows.find((r) => r.order.id === 'b');
+  assert.equal(rowB.noTiming, true);
+  assert.equal(rowB.statusText, '不計');
+  assert.ok(rowB.tags.includes('不計時效'));
+  assert.equal(g.subtotal.count, 2);
+  assert.equal(g.subtotal.noTiming, 1);
+  assert.equal(g.subtotal.onTimeRate, 1, '準時率只看計時效的單');
+  assert.equal(g.subtotal.overrunRate, 0);
+  assert.ok(Math.abs(g.subtotal.payout - (2 * 81.67 + 5)) < 1e-6, '不計時效的單補錢 0、收入照算');
+});

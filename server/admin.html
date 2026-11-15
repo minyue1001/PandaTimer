@@ -168,15 +168,19 @@ const pct = (x) => (x == null ? '—' : `${Math.round(x * 1000) / 10}%`);
 const money = (x) => `$${(Math.round(x * 100) / 100).toLocaleString('zh-TW', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 function summarize(list) {
   const done = list.filter((o) => !o.deleted && o.status === 'delivered' && o.deliveredAt != null);
-  let ok = 0, over = 0, income = 0, guessed = 0, stacked = 0, tips = 0, tipN = 0;
+  let ok = 0, over = 0, income = 0, guessed = 0, stacked = 0, tips = 0, tipN = 0, nt = 0;
   for (const o of done) {
-    if (onTime(o)) ok++;
-    over += overrun(o);
+    // 不計時效（轉成其他訂單）：收入/小費照算，不進準時率/超時率/單數
+    if (o.noTiming) nt++;
+    else {
+      if (onTime(o)) ok++;
+      over += overrun(o);
+    }
     if (o.amount != null) income += o.amount; else { income += estPay(o); guessed++; }
     if (o.stacked) stacked++;
     if (o.tip != null && o.tip > 0) { tips += o.tip; tipN++; }
   }
-  return { n: done.length, ok, over, income, guessed, stacked, tips, tipN };
+  return { n: done.length - nt, nAll: done.length, nt, ok, over, income, guessed, stacked, tips, tipN };
 }
 
 // ── API ──
@@ -272,7 +276,7 @@ function render() {
   const incomeAll = s.income + (bl && bl.income != null ? bl.income : 0);
   const onTimeRate = n ? okAll / n : null, overRate = n ? overAll / n : null;
   $('pStats').replaceChildren(
-    h('div', {}, h('span', {}, '單數'), h('b', {}, `${n}`), h('span', {}, bl ? `App ${s.n}＋補登 ${n0}` : `夾單 ${s.stacked}`)),
+    h('div', {}, h('span', {}, '單數'), h('b', {}, `${n}`), h('span', {}, (bl ? `App ${s.n}＋補登 ${n0}` : `夾單 ${s.stacked}`) + (s.nt ? `・另 ${s.nt} 單不計時效` : ''))),
     h('div', {}, h('span', {}, '準時率'), h('b', { class: onTimeRate == null ? '' : onTimeRate >= 0.5 ? 'ok' : onTimeRate >= 0.4 ? 'warn' : 'late' }, pct(onTimeRate))),
     h('div', {}, h('span', {}, '超時率'), h('b', { class: overRate == null ? '' : overRate <= 0.2 ? 'ok' : 'late' }, pct(overRate))),
     h('div', {}, h('span', {}, '收入'), h('b', {}, money(incomeAll)), h('span', {}, s.guessed ? `含 ${s.guessed} 單估算` : '')),
@@ -291,6 +295,7 @@ function tagsOf(o) {
   const src = { auto: '自動', import: '匯入', confirm: '補認', admin: '管理頁' }[o.source];
   return [
     o.stacked ? '夾單' : null,
+    o.noTiming ? '不計時效' : null,
     src || null,
     o.status === 'canceled' ? '已取消' : o.status === 'active' ? '進行中' : null,
     o.deleted ? '已刪除' : null,
@@ -311,7 +316,7 @@ function renderList() {
     const d = new Date(`${k}T00:00:00Z`);
     out.push(h('h3', {},
       h('span', {}, `${k.slice(5).replace('-', '/')}（${WEEK[d.getUTCDay()]}）`),
-      h('span', {}, `${s.n} 單・準時 ${pct(s.n ? s.ok / s.n : null)}・超時 ${pct(s.n ? s.over / s.n : null)}・${money(s.income)}${s.tips > 0 ? `・小費 ${money(s.tips)}` : ''}`)));
+      h('span', {}, `${s.nAll} 單${s.nt ? `（${s.nt} 不計）` : ''}・準時 ${pct(s.n ? s.ok / s.n : null)}・超時 ${pct(s.n ? s.over / s.n : null)}・${money(s.income)}${s.tips > 0 ? `・小費 ${money(s.tips)}` : ''}`)));
     for (const o of list.sort((a, b) => b.acceptedAt - a.acceptedAt)) out.push(orderRow(o));
   }
   if (!out.length) out.push(h('div', { class: 'card dim' }, '這期沒有訂單'));
@@ -326,7 +331,7 @@ function orderRow(o) {
     h('div', { class: 'main', onclick: () => { openId = openId === o.id ? null : o.id; renderList(); } },
       h('div', {},
         h('div', { class: 't' }, `${hm(o.acceptedAt)} → ${o.deliveredAt != null ? hm(o.deliveredAt) : '—'}`,
-          done ? h('span', { class: `badge ${ok ? 'ok' : 'late'}` }, ok ? '準' : '超') : null),
+          done ? (o.noTiming ? h('span', { class: 'badge' }, '不計') : h('span', { class: `badge ${ok ? 'ok' : 'late'}` }, ok ? '準' : '超')) : null),
         h('div', { class: 'sub' }, `預估 ${o.estimateMin} 分${act != null ? `・實際 ${act} 分` : ''}`),
         h('div', {}, tagsOf(o).map((t) => h('span', { class: 'tag' }, t)), o.note ? h('span', { class: 'tag' }, `📝 ${o.note}`) : null)),
       h('div', {},
@@ -347,6 +352,8 @@ function fieldsForm(o, onSave, extraButtons) {
   const tipIn = h('input', { type: 'number', inputmode: 'decimal', min: '0', max: '2000', step: '0.01', placeholder: '可空', value: o.tip != null ? String(o.tip) : '' });
   const stk = h('input', { type: 'checkbox' });
   stk.checked = !!o.stacked;
+  const ntk = h('input', { type: 'checkbox' });
+  ntk.checked = !!o.noTiming;
   const note = h('input', { type: 'text', maxlength: '100', value: o.note || '', placeholder: '可空' });
   const err = h('div', { class: 'err' });
   const save = async () => {
@@ -363,7 +370,7 @@ function fieldsForm(o, onSave, extraButtons) {
     const tip = tipIn.value.trim() === '' ? null : Number(tipIn.value);
     if (tip != null && !(tip >= 0 && tip <= 2000)) return (err.textContent = '小費 0~2000');
     try {
-      await onSave({ acceptedAt, estimateMin, status: st.value, deliveredAt: st.value === 'active' ? null : deliveredAt, amount, tip, stacked: stk.checked, note: note.value });
+      await onSave({ acceptedAt, estimateMin, status: st.value, deliveredAt: st.value === 'active' ? null : deliveredAt, amount, tip, noTiming: ntk.checked, stacked: stk.checked, note: note.value });
     } catch (e) {
       err.textContent = e.message;
     }
@@ -376,6 +383,7 @@ function fieldsForm(o, onSave, extraButtons) {
     h('label', { class: 'f' }, '金額 $', amt),
     h('label', { class: 'f' }, '小費 $', tipIn),
     h('label', { class: 'f' }, '夾單', stk),
+    h('label', { class: 'f' }, '不計時效（轉成其他訂單）', ntk),
     h('label', { class: 'f' }, '備註', note),
     err,
     h('div', { class: 'row' }, h('button', { class: 'pink grow', onclick: save }, '儲存'), extraButtons));
@@ -406,7 +414,7 @@ function openNew() {
   const box = $('newForm');
   if (!box.classList.contains('hidden')) return box.classList.add('hidden');
   const now = Date.now();
-  const o = { acceptedAt: now - 20 * 60e3, estimateMin: 18, status: 'delivered', deliveredAt: now, amount: null, tip: null, stacked: false, note: '' };
+  const o = { acceptedAt: now - 20 * 60e3, estimateMin: 18, status: 'delivered', deliveredAt: now, amount: null, tip: null, noTiming: false, stacked: false, note: '' };
   box.replaceChildren(h('h2', {}, '新增一筆'), fieldsForm(o, async (f) => {
     const r = await api('POST', 'orders', f);
     box.classList.add('hidden');

@@ -1,11 +1,11 @@
-// 紀錄頁：收入摘要 → 管理紀錄（批次刪除，折疊）→ 依日期分組的歷史（日小計）；列長按＝單筆刪除
+// 紀錄頁：收入摘要 → 管理紀錄（批次刪除，折疊）→ 依日期分組的歷史（日小計）；列長按＝選單（不計時效／單筆刪除）
 import { memo, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { money, type EarningsSummary, type PayParams } from '../earnings';
 import type { Order } from '../orders';
 import { formatTaipeiDateTime, parseTaipeiDateTime } from '../prune';
 import type { StatsParams, Summary } from '../stats';
-import { confirmDeleteOne, confirmPrune, promptTip, runPrune, type Toast } from './actions';
+import { confirmPrune, openRowMenu, promptTip, runPrune, type Toast } from './actions';
 import { Btn, Collapsible } from './common';
 import { dayTitle, daySubText, daySummaryText, groupHistory, pctText, type DayGroup } from './logic';
 import { C, F, pressed, S } from './theme';
@@ -46,7 +46,7 @@ export const HistoryScreen = memo(function HistoryScreen(p: HistoryProps) {
       {hist.shown < hist.total && (
         <Btn kind="ghost" small title={`顯示更多（還有 ${hist.total - hist.shown} 筆）`} onPress={() => setLimit(limit + PAGE)} />
       )}
-      <Text style={S.small}>點任一筆可編輯小費，長按可單筆刪除。金額「約」＝依預估分鐘估算的報酬。</Text>
+      <Text style={S.small}>點任一筆可編輯小費；長按開選單（標「不計時效」＝被轉成其他訂單，不算準時率/超時率但收入照算；或刪除）。金額「約」＝依預估分鐘估算的報酬。</Text>
     </ScrollView>
   );
 });
@@ -127,7 +127,7 @@ function ManageCard({ toast }: { toast: Toast }) {
   };
   return (
     <Collapsible title="🗑 管理紀錄">
-      <Text style={S.small}>批次刪除含進行中與已取消的單；補登不受影響。長按下面任一筆可單筆刪除。</Text>
+      <Text style={S.small}>批次刪除含進行中與已取消的單；補登不受影響。長按下面任一筆可單筆刪除或標不計時效。</Text>
       <Btn
         kind="ghost"
         small
@@ -207,19 +207,19 @@ function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
         <Pressable
           key={r.order.id}
           onPress={() => promptTip(r.order, toast)}
-          onLongPress={() => confirmDeleteOne(r.order, toast)}
+          onLongPress={() => openRowMenu(r.order, toast)}
           delayLongPress={500}
-          accessibilityHint="點一下編輯小費，長按刪除"
+          accessibilityHint="點一下編輯小費，長按開選單（不計時效、刪除）"
           style={(st) => [rowStyle, pressed(st)]}
         >
           <Text style={timeStyle}>{r.time}</Text>
-          <View style={[barStyle, { backgroundColor: r.onTime ? C.green : C.red }]} />
+          <View style={[barStyle, { backgroundColor: r.noTiming ? C.dim : r.onTime ? C.green : C.red }]} />
           <View style={{ flex: 1, gap: 3 }}>
             <View style={S.row}>
               <Text style={estStyle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
                 {r.estActText}
               </Text>
-              <Text style={[statusStyle, { color: r.onTime ? C.green : C.red }]} numberOfLines={1}>
+              <Text style={[statusStyle, { color: r.noTiming ? C.dim : r.onTime ? C.green : C.red }]} numberOfLines={1}>
                 {r.statusText}
               </Text>
               <Text style={amountStyle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>

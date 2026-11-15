@@ -234,3 +234,19 @@ test('v0.8 不含夾單的準時率/超時率（本期與今日；不併補登�
   assert.equal(r.noStacked.today.count, 2);
   assert.ok(r.noStacked.period.overrunRate < r.own.overrunRate);
 });
+
+test('v1.2.4 不計時效：本期/今日/不含夾單的準時率、超時率、單數都排除，收入另算', () => {
+  const now = tp('2026-11-12T20:00:00');
+  const mk = (id, act, extra = {}) => ({ id, acceptedAt: tp('2026-11-12T10:00:00'), estimateMin: 20, deadline: 0, status: 'delivered', actualMin: act, ...extra });
+  const orders = [mk('a', 15), mk('b', 40, { noTiming: true }), mk('c', 40, { noTiming: true, stacked: true }), mk('d', 30, { stacked: true })];
+  const r = periodAndToday(orders, now);
+  assert.equal(r.own.count, 2); // a, d
+  assert.equal(r.today.count, 2);
+  assert.equal(r.own.onTime, 1);
+  assert.equal(r.noStacked.period.count, 1);
+  assert.equal(r.noStacked.stackedCount, 1, '夾單數不受不計時效的夾單影響');
+  // 全部不計時效 → 沒有時效樣本（率 null，不是 0%）
+  const none = periodAndToday([mk('x', 99, { noTiming: true })], now);
+  assert.equal(none.today.count, 0);
+  assert.equal(none.today.onTimeRate, null);
+});

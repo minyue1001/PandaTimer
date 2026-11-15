@@ -166,3 +166,23 @@ test('v1.2 periodAndTodayEarnings 帶入 order.tip', () => {
   near(r.period.tipTotal, 25);
   near(r.today.payout, r.today.estTotal + 25);
 });
+
+test('v1.2.4 不計時效：收入照算（預估報酬＋小費），補錢 0、不算晚到', () => {
+  const o = orderPay({ est: 20, act: 40, noTiming: true });
+  near(o.adjustment, 0);
+  assert.equal(o.late, false);
+  assert.equal(o.actPay, o.estPay);
+  const s = summarizeEarnings([{ est: 20, act: 40, tip: 10, noTiming: true }, { est: 20, act: 40 }], DEFAULT_PAY);
+  assert.equal(s.count, 2);
+  assert.equal(s.lateCount, 1);
+  near(s.adjustment, orderPay({ est: 20, act: 40 }).adjustment);
+  near(s.estTotal, 2 * fareFor(20));
+  near(s.payout, s.estTotal + 10); // 保守情境：預估＋小費
+  near(s.payoutOther, s.estTotal + s.adjustment + 10);
+  // 從訂單帶入
+  const now = Date.UTC(2026, 10, 12, 4, 0, 0);
+  const mk = (id, extra = {}) => ({ id, acceptedAt: now - 3_600_000, estimateMin: 20, deadline: 0, status: 'delivered', actualMin: 40, deliveredAt: now - 1_200_000, ...extra });
+  const r = periodAndTodayEarnings([mk('a', { noTiming: true }), mk('b')], now, DEFAULT_PAY, null);
+  assert.equal(r.today.count, 2);
+  assert.equal(r.today.lateCount, 1);
+});

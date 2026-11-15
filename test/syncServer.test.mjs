@@ -504,3 +504,49 @@ test('v1.2 小費：驗證（0~2000、兩位小數、非數字/負數/超額拒�
   assert.match(text, /準時,金額,小費,夾單/);
   assert.match(text, /,45,8,,管理頁|,45,8,/);
 });
+
+test('v1.2.4 不計時效：遷移冪等（舊庫補 noTiming 欄）、sync 往返、管理頁 PUT/POST、CSV 欄', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-mig2-test-'));
+  try {
+    const db = path.join(dir, 'orders.db');
+    const old = new DatabaseSync(db); // v1.2 的舊 schema（有 tip、沒有 noTiming）
+    old.exec(`CREATE TABLE orders(id TEXT PRIMARY KEY, acceptedAt INTEGER NOT NULL, estimateMin REAL NOT NULL, deliveredAt INTEGER,
+      status TEXT NOT NULL, amount REAL, stacked INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'manual',
+      note TEXT NOT NULL DEFAULT '', updatedAt INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+      editedBy TEXT NOT NULL DEFAULT 'app', syncAt INTEGER NOT NULL, tip REAL);
+      INSERT INTO orders VALUES('old2', ${T0}, 20, ${T0 + 600000}, 'delivered', 81.67, 0, 'auto', '', ${T0}, 0, 'app', 5, 12);`);
+    old.close();
+    for (let i = 0; i < 2; i++) {
+      const s = await openStore(db);
+      const o = s.getOrder('old2');
+      assert.equal(o.noTiming, null);
+      assert.equal(o.tip, 12);
+      s.close();
+    }
+    const s = await openStore(db);
+    const r = s.sync({ since: 0, orders: [order('old2', { noTiming: true, updatedAt: Date.now() - 1000 })] });
+    assert.equal(r.accepted.orders, 1);
+    assert.equal(s.getOrder('old2').noTiming, true);
+    s.close();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  const r = await sync({ since: 0, changes: { orders: [order('ntok', { noTiming: true, updatedAt: T0 + 40 * 60_000 }), order('ntno'), order('ntbad', { noTiming: 'x' })] } });
+  assert.equal(r.status, 200);
+  assert.ok(r.body.invalid.some((x) => x.id === 'ntbad' && x.error.startsWith('noTiming')));
+  const got = await sync({ since: 0 }, SEED);
+  const byId = Object.fromEntries(got.body.changes.orders.map((o) => [o.id, o]));
+  assert.equal(byId.ntok.noTiming, true);
+  assert.equal(byId.ntno.noTiming, null);
+  const { call } = await admin((await login()).cookie);
+  assert.equal((await call('PUT', 'orders/ntok', { note: 'x' })).body.order.noTiming, true, '沒帶 noTiming 的修改不清掉標記');
+  assert.equal((await call('PUT', 'orders/ntok', { noTiming: false })).body.order.noTiming, null);
+  assert.equal((await call('PUT', 'orders/ntok', { noTiming: true })).body.order.noTiming, true);
+  assert.equal((await call('PUT', 'orders/ntok', { noTiming: 'x' })).status, 400);
+  const created = await call('POST', 'orders', { acceptedAt: T0 + 9_000_000, estimateMin: 10, status: 'delivered', deliveredAt: T0 + 9_600_000, amount: 45, noTiming: true });
+  assert.equal(created.body.order.noTiming, true);
+  const res = await fetch(`${base}/api/admin/export.csv?from=2026-11-12&to=2026-11-12`, { headers: { 'x-pt-read': READ_KEY } });
+  assert.match(await res.text(), /夾單,不計時效,來源/);
+});

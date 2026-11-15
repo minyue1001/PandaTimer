@@ -209,12 +209,13 @@ export function orderAmount(o: Pick<Order, 'amount' | 'estimateMin'>, p: PayPara
 }
 
 /** 標籤：自動／匯入／夾單（v1.1 接單時已有進行中單＝疊單） */
-export function orderTags(o: Pick<Order, 'source' | 'stacked' | 'stackKind'>): string[] {
+export function orderTags(o: Pick<Order, 'source' | 'stacked' | 'stackKind'> & { noTiming?: boolean }): string[] {
   const t: string[] = [];
   if (o.source === 'auto') t.push('自動');
   if (o.source === 'import') t.push('匯入');
   if (o.source === 'confirm') t.push('補認');
   if (o.stacked) t.push(o.stackKind === 'carry' ? '疊單' : '夾單');
+  if (o.noTiming) t.push('不計時效');
   return t;
 }
 
@@ -229,8 +230,9 @@ export function overMinutes(est: number, act: number): number {
 }
 
 /** 一列的狀態文字：準時／超 N 分／進行中／已取消 */
-export function rowStatusText(r: { status?: 'delivered' | 'active' | 'canceled'; est: number; act?: number | null; onTime?: boolean }): string {
+export function rowStatusText(r: { status?: 'delivered' | 'active' | 'canceled'; est: number; act?: number | null; onTime?: boolean; noTiming?: boolean }): string {
   if (r.status === 'canceled') return '已取消';
+  if (r.noTiming) return '不計';
   if (r.status === 'active' || r.act == null) return '進行中';
   return r.onTime === false ? `超 ${overMinutes(r.est, r.act)} 分` : '準時';
 }
@@ -253,10 +255,11 @@ export function daySummaryText(s: { count: number; onTimeRate: number | null; pa
 }
 
 /** 日標題下第二行：超時率、小費合計、夾單數；全無則空字串 */
-export function daySubText(s: { overrunRate: number | null; tip: number; stacked: number }): string {
+export function daySubText(s: { overrunRate: number | null; tip: number; stacked: number; noTiming?: number }): string {
   const parts = [`超時率 ${pctText(s.overrunRate)}`];
   if (s.tip > 0) parts.push(`小費 ${money(s.tip)}`);
   if (s.stacked > 0) parts.push(`夾單 ${s.stacked}`);
+  if ((s.noTiming ?? 0) > 0) parts.push(`不計時效 ${s.noTiming}`);
   return parts.join(' · ');
 }
 
@@ -273,6 +276,8 @@ export type HistRow = {
   amountEstimated: boolean;
   /** v1.2 小費（元，0＝沒有） */
   tip: number;
+  /** v1.2.4 不計時效（灰色、狀態字「不計」） */
+  noTiming: boolean;
   tags: string[];
   /** 「準時」／「超 N 分」 */
   statusText: string;
@@ -280,7 +285,7 @@ export type HistRow = {
   estActText: string;
 };
 
-export type DaySubtotal = { count: number; onTimeRate: number | null; overrunRate: number | null; payout: number; stacked: number; tip: number };
+export type DaySubtotal = { count: number; onTimeRate: number | null; overrunRate: number | null; payout: number; stacked: number; tip: number; noTiming: number };
 
 export type DayGroup = {
   /** 台北日期 YYYY-MM-DD */
@@ -340,8 +345,9 @@ export function groupHistory(
   for (const key of keys) {
     if (shown >= limit) break;
     const list = byDay.get(key) as Order[];
-    const samples = list.map((o) => ({ est: o.estimateMin, act: o.actualMin as number, ...(o.tip != null ? { tip: o.tip } : {}) }));
-    const sum = summarize(samples, stats);
+    const samples = list.map((o) => ({ est: o.estimateMin, act: o.actualMin as number, ...(o.tip != null ? { tip: o.tip } : {}), ...(o.noTiming ? { noTiming: true } : {}) }));
+    // v1.2.4：準時率/超時率只算計時效的單；收入含全部（不計時效的單補錢 0）
+    const sum = summarize(samples.filter((s) => !s.noTiming), stats);
     const earn = summarizeEarnings(samples, pay);
     const take = list.slice(0, Math.max(0, limit - shown));
     shown += take.length;
@@ -363,18 +369,21 @@ export function groupHistory(
           amount: amt.value,
           amountEstimated: amt.estimated,
           tip: o.tip ?? 0,
+          noTiming: !!o.noTiming,
           tags: orderTags(o),
-          statusText: rowStatusText({ status: 'delivered', est: o.estimateMin, act, onTime }),
+          statusText: rowStatusText({ status: 'delivered', est: o.estimateMin, act, onTime, noTiming: o.noTiming }),
           estActText: estActText({ status: 'delivered', est: o.estimateMin, act }),
         };
       }),
       subtotal: {
-        count: sum.count,
+        // 日標題的「N 單」＝當天全部已送達（含不計時效）；準時率/超時率的分母才排除不計時效
+        count: list.length,
         onTimeRate: sum.onTimeRate,
         overrunRate: sum.overrunRate,
         payout: earn.payout,
         stacked: list.filter((o) => o.stacked).length,
         tip: earn.tipTotal,
+        noTiming: list.filter((o) => o.noTiming).length,
       },
       hidden: list.length - take.length,
     });

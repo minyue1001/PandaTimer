@@ -110,11 +110,12 @@ export function periodOf(ms: number): Period {
   return { index, start, end, label: `${taipeiMD(start)}–${taipeiMD(end - DAY_MS)}`, id: taipeiDate(start) };
 }
 
-/** 已送達、有實際分鐘、接單時間在 [since, until) 的單（取消/進行中不計）；v0.8 excludeStacked＝不含夾單 */
+/** 已送達、有實際分鐘、接單時間在 [since, until) 的單（取消/進行中不計）；v0.8 excludeStacked＝不含夾單；v1.2.4 一律排除 noTiming（不計時效） */
 export function samplesBetween(orders: readonly Order[], since: number, until: number, excludeStacked = false): Sample[] {
   return orders
     .filter((o) => o.status === 'delivered' && o.actualMin != null && o.acceptedAt >= since && o.acceptedAt < until)
     .filter((o) => !(excludeStacked && o.stacked))
+    .filter((o) => !o.noTiming) // v1.2.4 不計時效的單不進準時率/超時率/單數
     .map((o) => ({ est: o.estimateMin, act: o.actualMin as number }));
 }
 

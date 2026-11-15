@@ -117,6 +117,17 @@ export async function setOrderTip(id: string, tip: number | undefined): Promise<
   });
 }
 
+/** v1.2.4 設定／清除「不計時效」（false＝清除）；同 setOrderTip 走 mutate 蓋 updatedAt 並觸發雲端同步 */
+export async function setOrderNoTiming(id: string, noTiming: boolean): Promise<Order | undefined> {
+  return mutate<Order>((list) => {
+    const target = list.find((o) => o.id === id);
+    if (!target) return { orders: list };
+    const { noTiming: _old, ...rest } = target;
+    const updated: Order = noTiming ? { ...rest, noTiming: true } : rest;
+    return { orders: list.map((o) => (o.id === id ? updated : o)), result: updated };
+  });
+}
+
 export async function cancelOrder(id: string): Promise<void> {
   const canceled = await mutate<Order>((list) => {
     const target = list.find((o) => o.id === id && o.status === 'active');

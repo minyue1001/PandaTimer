@@ -369,3 +369,22 @@ test('v1.2 小費：orderToWire/wireToOrder 往返、舊資料（沒 tip）不�
   assert.deepEqual(parseTipInput('0'), { ok: true, tip: undefined });
   for (const bad of ['-5', 'abc', '1.234', '2001']) assert.deepEqual(parseTipInput(bad), { ok: false }, bad);
 });
+
+test('v1.2.4 noTiming：wire 往返、沒有就省略、指紋含 noTiming（改了會蓋 updatedAt）、伺服器 null/false 不帶欄位', () => {
+  const o = ord('nt1', { noTiming: true, updatedAt: T0 + 5 });
+  const w = orderToWire(o);
+  assert.equal(w.noTiming, true);
+  assert.equal(wireToOrder(w, o).noTiming, true);
+  assert.ok(!('noTiming' in orderToWire(ord('nt2'))), '沒標記不送欄位');
+  assert.ok(!('noTiming' in orderToWire(ord('nt3', { noTiming: false }))));
+  assert.equal(wireToOrder({ ...w, noTiming: null }).noTiming, undefined);
+  assert.equal(wireToOrder({ ...w, noTiming: false }).noTiming, undefined);
+  assert.equal(parseSyncResponse({ now: 1, dbId: 'x', changes: { orders: [{ ...w, noTiming: true }] } }).orders[0].noTiming, true);
+  assert.equal(parseSyncResponse({ now: 1, dbId: 'x', changes: { orders: [{ ...w, noTiming: null }] } }).orders[0].noTiming, undefined);
+  const prev = [ord('nt4', { updatedAt: T0 })];
+  const r = stampChanges(prev, [{ ...prev[0], noTiming: true }], T0 + 99_000);
+  assert.equal(r.changed, true);
+  assert.equal(r.orders[0].updatedAt, T0 + 99_000);
+  const m = mergeServerOrders([ord('nt5', { updatedAt: T0 })], {}, { nt5: T0 }, [{ ...orderToWire(ord('nt5')), updatedAt: T0 + 10, noTiming: true }]);
+  assert.equal(m.orders[0].noTiming, true);
+});

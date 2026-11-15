@@ -29,6 +29,8 @@ export type Order = {
   amount?: number;
   /** v1.2：小費（元，0~2000，兩位小數）；沒有＝0（舊資料沒這欄）。0 不存（normalizeTip → undefined） */
   tip?: number;
+  /** v1.2.4：不計時效（平台把單「轉成其他訂單」：照領錢、補錢 0，但不算進準時率/超時率）；false/undefined 不存 */
+  noTiming?: boolean;
   note?: string;
   /** 雲端同步：同步欄位最後修改時間 (ms)；store.mutate 自動蓋，LWW 用（'admin'＝管理網頁新增的單） */
   updatedAt?: number;
