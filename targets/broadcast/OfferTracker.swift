@@ -158,6 +158,9 @@ final class OfferTracker {
   /// v1.2 idle 時的畫面紀錄（常駐字/N筆訂單），只留 baselineSec 秒（＝TS BASELINE_SEC）
   static let baselineSec: TimeInterval = 120
   private var idleLog: [(at: Date, weak: Bool, orders: Int?)] = []
+  /// v1.2.4 offered 消失途中（misses < goneAfterMisses）第一個有證據的畫面（＝TS missEvidence；11/18 14:38、15:01
+  /// 接單後畫面正好是第一次沒接單鈕的那幀，只算 miss 沒看字 → 逾時判未接）
+  private var missEvidence: (accept: Bool, reject: Bool, kw: [String], hit: [String])?
 
   static func key(_ minutes: Int, _ amount: Double?) -> String {
     "\(minutes)/\(ScreenInfo.amountKey(amount))"
@@ -236,6 +239,7 @@ final class OfferTracker {
     let s = settings
     if o.accept {
       idleMisses = 0
+      missEvidence = nil
       let current: Offer?
       switch state {
       case .offered(let offer, _, _): current = offer
@@ -316,6 +320,11 @@ final class OfferTracker {
       let count = misses + 1
       let first = firstMissAt ?? now
       if count < s.goneAfterMisses {
+        // v1.2.4 還沒確定消失：這一幀的證據先記著（只留第一個）
+        let acc = Self.acceptEvidence(current, o)
+        if missEvidence == nil && (acc || o.offerRejected) {
+          missEvidence = (accept: acc, reject: o.offerRejected, kw: o.kw, hit: o.offerHit)
+        }
         state = .offered(current, misses: count, firstMissAt: first)
         return out
       }
@@ -326,13 +335,24 @@ final class OfferTracker {
       goneAt = gone
     }
     state = .deciding(offer, goneAt: goneAt, lastKw: o.kw)
-    let accepted = Self.acceptEvidence(offer, o)
-    if accepted && !o.offerRejected {
-      out.append(decide(now, offer, accept: true, reason: "accepted", goneAt: goneAt, kw: o.kw, hit: o.offerHit))
+    var accepted = Self.acceptEvidence(offer, o)
+    var rejected = o.offerRejected
+    var kw = o.kw
+    var hit = o.offerHit
+    let early = missEvidence
+    missEvidence = nil
+    if !accepted && !rejected, let e = early {
+      accepted = e.accept
+      rejected = e.reject
+      kw = e.kw
+      hit = e.hit
+    }
+    if accepted && !rejected {
+      out.append(decide(now, offer, accept: true, reason: "accepted", goneAt: goneAt, kw: kw, hit: hit))
       return out
     }
-    if o.offerRejected && !accepted {
-      out.append(decide(now, offer, accept: false, reason: "rejected", goneAt: goneAt, kw: o.kw, hit: o.offerHit))
+    if rejected && !accepted {
+      out.append(decide(now, offer, accept: false, reason: "rejected", goneAt: goneAt, kw: kw, hit: hit))
       return out
     }
     return tick(now)
@@ -368,6 +388,7 @@ final class OfferTracker {
   ) -> OfferEvent {
     state = .idle
     idleMisses = 0
+    missEvidence = nil
     if accept { recentAccepted.append((minutes: offer.minutes, amount: offer.amount, at: now)) }
     return .decided(
       OfferDecision(

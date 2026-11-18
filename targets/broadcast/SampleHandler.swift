@@ -747,6 +747,8 @@ final class BroadcastDetector {
     var panda = false
     // v1.1：單號摘要（號碼只在記憶體，不上傳）
     var scan = OrderNumbers.Scan.empty
+    // v1.2.4：還在送餐/抵達頁（按鈕被捲走不算按了確認）
+    var stay = false
     do {
       guard let image = frame.cgImage() else {
         ocrErrors += 1
@@ -757,6 +759,7 @@ final class BroadcastDetector {
       info = analyzed.summary
       panda = analyzed.panda
       scan = analyzed.scan
+      stay = analyzed.stay
     } catch {
       ocrErrors += 1
       return
@@ -831,7 +834,7 @@ final class BroadcastDetector {
         handleWatch(
           watch.observe(
             now, dialog: scan.dialog, final: info.deliveredFinal || scan.finalHit, panda: panda, dialogNo: scan.dialogNo,
-            changed: why != "force", numbers: scan.numbers),
+            changed: why != "force", numbers: scan.numbers, stay: stay),
           info: info)
       }
     }

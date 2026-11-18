@@ -17,7 +17,12 @@
     "INVITE_14": "每單收入\n57.17 $\n(3.3 公里)\n14 分鐘\n店名\n送餐資訊\n接受訂單",
     "DELIVERING_1": "即將抵達\n顧客地址\n1筆訂單\n取餐體驗如何呢?記得邀請店家給好評!",
     "DELIVERING_DIALOG_1": "送達\n無法聯繫顧客\n1筆訂單",
-    "PICKUP_STORE_2": "店名\n預計7分鐘後抵達店家・2筆訂單\n再 8 分鐘即將準備完成"
+    "PICKUP_STORE_2": "店名\n預計7分鐘後抵達店家・2筆訂單\n再 8 分鐘即將準備完成",
+    "INVITE_19": "每單收入\n77.59 $\n(6.9 公里)\n19 分鐘\n店名\n送餐資訊\n接受訂單",
+    "INVITE_10": "每單收入\n45.00 $\n(2.5 公里)\n10 分鐘\n店名\n送餐資訊\n接受訂單",
+    "AFTER_ACCEPT_1": "店名\n預計9分鐘後抵達店家・1筆訂單\n再 6 分鐘即將準備完成\n取餐體驗如何呢?記得邀請店家給好評!",
+    "MAP_KM": "4.2 公里",
+    "DELIVERING_CONTACT_1": "送達\n聯絡\n無法聯繫顧客\n1筆訂單"
   },
   "cases": [
     {
@@ -194,6 +199,51 @@
       "expect": [
         { "type": "seen", "minutes": 14 },
         { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 14 }
+      ]
+    },
+    {
+      "name": "v1.2.4 11/18 14:38 實機：邀請消失的第一幀就是接單後畫面（抵達店家），第二幀只剩地圖 → 仍判接單（acceptedAt＝第一幀）",
+      "settings": { "ambiguousAs": "reject", "decideWindowSec": 45 },
+      "steps": [[0, "DELIVERING_DIALOG_1"], [141, "INVITE_19"], [145.3, "AFTER_ACCEPT_1"], [150.5, "MAP_KM"], [151.9, "MAP_KM"], [190.7, "tick"]],
+      "expect": [
+        { "type": "seen", "minutes": 19 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 19, "acceptedAt": 145.3, "waitSec": 5.2, "hit": ["抵達", "抵達店家"] }
+      ]
+    },
+    {
+      "name": "v1.2.4 11/18 15:01 實機：剛送達上一張（邀請前畫面有「1筆訂單」）→ 邀請 → 接單後畫面＋地圖 → 抵達店家是強證據，判接單",
+      "settings": { "ambiguousAs": "reject", "decideWindowSec": 45 },
+      "steps": [[0, "DELIVERING_CONTACT_1"], [28.2, "DELIVERING_1"], [47.4, "INVITE_10"], [52.9, "AFTER_ACCEPT_1"], [58.8, "MAP_KM"], [98.1, "tick"]],
+      "expect": [
+        { "type": "seen", "minutes": 10 },
+        { "type": "decided", "result": "accept", "reason": "accepted", "minutes": 10, "acceptedAt": 52.9, "waitSec": 5.9 }
+      ]
+    },
+    {
+      "name": "v1.2.4 消失途中的證據：同一張邀請又出現 → 作廢；之後只有地圖 → 到期依 ambiguousAs(reject)",
+      "settings": { "ambiguousAs": "reject", "decideWindowSec": 45 },
+      "steps": [[0, "IDLE_MAP"], [5, "INVITE_19"], [6, "AFTER_ACCEPT_1"], [7, "INVITE_19"], [8, "MAP_KM"], [9, "MAP_KM"], [60, "tick"]],
+      "expect": [
+        { "type": "seen", "minutes": 19 },
+        { "type": "decided", "result": "reject", "reason": "timeout", "minutes": 19, "acceptedAt": null }
+      ]
+    },
+    {
+      "name": "v1.2.4 消失途中只看到常駐字（邀請前就有「1筆訂單」）→ 不是證據，到期依 ambiguousAs(reject)",
+      "settings": { "ambiguousAs": "reject", "decideWindowSec": 45 },
+      "steps": [[0, "DELIVERING_1"], [10, "INVITE_14"], [11.5, "DELIVERING_1"], [13, "MAP_KM"], [60, "tick"]],
+      "expect": [
+        { "type": "seen", "minutes": 14 },
+        { "type": "decided", "result": "reject", "reason": "timeout", "minutes": 14, "acceptedAt": null }
+      ]
+    },
+    {
+      "name": "v1.2.4 消失途中看到「已拒絕」、第二幀空白 → 判未接（rejected）",
+      "settings": { "ambiguousAs": "accept" },
+      "steps": [[0, "IDLE_MAP"], [5, "INVITE_27"], [6, "REJECTED"], [7.5, "BLANK"]],
+      "expect": [
+        { "type": "seen", "minutes": 27 },
+        { "type": "decided", "result": "reject", "reason": "rejected", "minutes": 27, "acceptedAt": null }
       ]
     }
   ]

@@ -81,7 +81,8 @@ test('Swift OfferTracker 與 TS 同結構（狀態、理由字串、預設值、
   const sw = read('../targets/broadcast/OfferTracker.swift');
   for (const reason of ['"accepted"', '"rejected"', '"timeout"', '"superseded"', '"replaced"', '"stopped"']) assert.ok(sw.includes(reason), reason);
   for (const s of ['case offered(Offer, misses: Int, firstMissAt: Date?)', 'case deciding(Offer, goneAt: Date, lastKw: [String])',
-    'if accepted && !o.offerRejected', 'if o.offerRejected && !accepted', 'acceptedAt: accept ? (goneAt ?? now) : nil',
+    'if accepted && !rejected {', 'if rejected && !accepted {', 'if !accepted && !rejected, let e = early {',
+    'if missEvidence == nil && (acc || o.offerRejected) {', 'acceptedAt: accept ? (goneAt ?? now) : nil',
     'if accept { recentAccepted.append((minutes: offer.minutes, amount: offer.amount, at: now)) }', 'return min(60, max(0, Int(d)))',
     'return a == 0 || b == 0 || a == b', 'var seen = Self.noted(Self.filled(offer, o.amount), o)',
     '"\\(minutes)/\\(ScreenInfo.amountKey(amount))"']) {

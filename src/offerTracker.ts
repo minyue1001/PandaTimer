@@ -26,6 +26,9 @@
 //        只有在「邀請出現前 BASELINE_SEC 秒內沒看過」或「N 比邀請前大」時才算接單，否則當沒命中（等到期走 ambiguousAs）。
 //     ③ 組合單/小費：邀請畫面「送餐資訊」出現次數（bundle，取最大）與「包含額外 N 元」（tip）記在 Offer，接單後由
 //        extension 拆單（src/offerBundle.ts splitBundle）。
+//   v1.2.4（11/18 14:38、15:01 實機）：邀請消失後「第一次」沒接單鈕的畫面就是接單後畫面（抵達店家…），但 goneAfterMisses=2
+//     時那一幀只算 miss、不看關鍵字；下一幀（地圖/空白）沒字 → 等到逾時判未接。→ 消失途中（未滿 goneAfterMisses）看到的
+//     接單/未接證據先記著（missEvidence），進 deciding 那一幀自己沒證據就用它（acceptedAt 仍＝goneAt）；接單鈕又出現就清掉。
 import { amountKey } from './ocrPick.ts';
 import {
   DEFAULT_ACCEPTED_KEYWORDS,
@@ -177,6 +180,8 @@ export class OfferTracker {
   private recentAccepted: { minutes: number; amount: number | null; at: number }[] = [];
   /** v1.2 idle 時的畫面紀錄（常駐字/N筆訂單），只留 BASELINE_SEC 秒 */
   private idleLog: { at: number; weak: boolean; orders: number | null }[] = [];
+  /** v1.2.4 offered 消失途中（misses < goneAfterMisses）第一個有證據的畫面 */
+  private missEvidence: { accept: boolean; reject: boolean; kw: string[]; hit: string[] } | null = null;
 
   constructor(settings: OfferSettings = DEFAULT_OFFER, dedupeSeconds = 90) {
     this.settings = { ...settings };
@@ -203,6 +208,7 @@ export class OfferTracker {
     const s = this.settings;
     if (o.accept) {
       this.idleMisses = 0;
+      this.missEvidence = null;
       const st = this.state;
       const current = st.kind === 'idle' ? null : st.offer;
       const suspect =
@@ -278,18 +284,36 @@ export class OfferTracker {
     if (st.kind === 'offered') {
       st.misses += 1;
       if (st.firstMissAt == null) st.firstMissAt = now;
-      if (st.misses < s.goneAfterMisses) return out;
+      if (st.misses < s.goneAfterMisses) {
+        // v1.2.4 還沒確定消失：這一幀的證據先記著（只留第一個）
+        const acc = acceptEvidence(st.offer, o);
+        if (!this.missEvidence && (acc || o.offerRejected)) {
+          this.missEvidence = { accept: acc, reject: o.offerRejected, kw: [...o.kw], hit: [...o.offerHit] };
+        }
+        return out;
+      }
       this.state = { kind: 'deciding', offer: st.offer, goneAt: st.firstMissAt, lastKw: o.kw };
     }
     const d = this.state as Extract<State, { kind: 'deciding' }>;
     d.lastKw = o.kw;
-    const accepted = acceptEvidence(d.offer, o);
-    if (accepted && !o.offerRejected) {
-      out.push(this.decide(now, 'accept', 'accepted', d.goneAt, o.kw, o.offerHit));
+    let accepted = acceptEvidence(d.offer, o);
+    let rejected = o.offerRejected;
+    let kw = o.kw;
+    let hit = o.offerHit;
+    const early = this.missEvidence;
+    this.missEvidence = null;
+    if (!accepted && !rejected && early) {
+      accepted = early.accept;
+      rejected = early.reject;
+      kw = early.kw;
+      hit = early.hit;
+    }
+    if (accepted && !rejected) {
+      out.push(this.decide(now, 'accept', 'accepted', d.goneAt, kw, hit));
       return out;
     }
-    if (o.offerRejected && !accepted) {
-      out.push(this.decide(now, 'reject', 'rejected', d.goneAt, o.kw, o.offerHit));
+    if (rejected && !accepted) {
+      out.push(this.decide(now, 'reject', 'rejected', d.goneAt, kw, hit));
       return out;
     }
     return out.concat(this.tick(now));
@@ -339,6 +363,7 @@ export class OfferTracker {
     const offer = st.offer;
     this.state = { kind: 'idle' };
     this.idleMisses = 0;
+    this.missEvidence = null;
     if (result === 'accept') this.recentAccepted.push({ minutes: offer.minutes, amount: offer.amount, at: now });
     return {
       type: 'decided',

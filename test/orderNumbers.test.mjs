@@ -15,7 +15,7 @@ import {
   scanNumbers,
   slotOf,
 } from '../src/orderNumbers.ts';
-import { DEFAULT_DELIVERY, DeliveryWatch, pickDeliveredOrder } from '../src/deliveryDetector.ts';
+import { DEFAULT_DELIVERY, DELIVERY_STAY_GONE_SEC, DeliveryWatch, pickDeliveredOrder } from '../src/deliveryDetector.ts';
 import { DEFAULT_OFFER, OfferTracker } from '../src/offerTracker.ts';
 import { summarizeScreen } from '../src/screenInfo.ts';
 import { DELIVERED_SEQ_PREFIX, deliveredSeqName, parseSignalName, slotTarget, slotsAfterOrder } from '../src/detector.ts';
@@ -141,7 +141,7 @@ test('DeliveryWatch：按鈕/對話框一直在 → 不送；消失（連 2 次�
   assert.equal(w.knowsNumber, true);
   for (let t = 10; t <= 120; t += 10) assert.equal(w.observe(t, W({ dialog: true })), null); // 等在門口 2 分鐘
   assert.equal(w.observe(130, W({ changed: false, panda: true })), null); // 第 1 次沒看到（同畫面重掃，不啟動計時）
-  assert.equal(w.deadline, null);
+  assert.equal(w.deadline, 130 + DELIVERY_STAY_GONE_SEC); // 沒有 1 秒計時，只剩 v1.2.4 退路
   assert.deepEqual(w.observe(132, W({})), { kind: 'send', delaySec: 2, why: 'disappear', no: '7318' });
   assert.equal(w.active, false);
 });
@@ -317,7 +317,7 @@ test('Swift 與 TS 同規則：OrderNumbers/OrderNumberBook/DeliveryWatch、送�
     'static let sentKeep: TimeInterval = 3600', 'static let entryKeep: TimeInterval = 4 * 3600', 'static let seqSlots = 4',
     'if entries.contains(where: { $0.seq > entry.seq && Self.slot($0.seq) == slot }) { return .plain("slotReused") }',
     'static let goneAfterMisses = 2', 'static let confirmSeconds: TimeInterval = 1', 'static let repeatSeconds: TimeInterval = 60',
-    'if !panda { return tick(now) }', 'if changed { timerArmed = true }', 'return send(now, why: "finalAfterDialog", delay: 0)',
+    'if !panda {\n        // 不在 pandarider', 'if changed { timerArmed = true }', 'return send(now, why: "finalAfterDialog", delay: 0)',
     'if let n = no, numbers.contains(n) {', 'finalHit: main.finalHit || e.finalHit', 'compact, finalPattern, fallback: RemoteConfig.DeliverySettings.defaultFinalKeywords) != nil',
     'let out: Action? = visible && firstMissAt != nil ? send(now, why: "stopped", delay: delayFrom(now)) : nil',
   ]) {

@@ -62,14 +62,27 @@ enum OrderNumbers {
     return Scan(numbers: extract(raw), dialogNo: deliveryNumber(raw), dialog: dialog, finalHit: isFinal)
   }
 
-  /// 主 OCR 原文 → 畫面摘要＋pandarider 與否＋號碼摘要（原文只進這一個函式；同 ScreenInfo.analyzeWithPresence）
+  /// v1.2.4 還在送餐/抵達頁（還沒按確認）的字樣／已離開送餐頁的字樣（＝TS DELIVERY_STAY_KEYWORDS / DELIVERY_LEAVE_KEYWORDS）
+  static let stayPattern = "即將抵達|即将抵达|抵達(?!店家|餐廳)|抵达(?!店家|餐厅)|已送達|已送达|目的地|樓層|楼层|付款方式|線上付款|线上付款|聯絡(?!店家)|联络(?!店家)|聯繫|联系(?!店家)|無法聯絡|上傳照片|上传照片|拍照|翻譯|翻译|夾單|夹单"
+  static let leavePattern = "抵達店家|抵达店家|抵達餐廳|抵达餐厅|前往取餐|即將準備完成|即将准备完成|取餐體驗|取餐体验|上線中|上线中|休息中|訂單完成|订单完成|完成訂單|完成订单|每單收入|每单收入|接受訂單|接受订单"
+
+  /// v1.2.4 這個畫面還是送餐/抵達頁？有接單鈕（新邀請）或離開字樣 → 否（＝TS deliveryStay）
+  static func stay(_ raw: String, accept: Bool) -> Bool {
+    if accept { return false }
+    let text = ScreenInfo.compact(raw)
+    return ScreenInfo.firstOfferMatch(text, stayPattern, fallback: stayPattern) != nil
+      && ScreenInfo.firstOfferMatch(text, leavePattern, fallback: leavePattern) == nil
+  }
+
+  /// 主 OCR 原文 → 畫面摘要＋pandarider 與否＋號碼摘要＋v1.2.4 還在送餐頁（原文只進這一個函式；同 ScreenInfo.analyzeWithPresence）
   static func analyze(_ raw: String, rules: ScreenRules, awayKeywords: String, delivery: RemoteConfig.DeliverySettings)
-    -> (summary: ScreenInfo.Summary, panda: Bool, scan: Scan)
+    -> (summary: ScreenInfo.Summary, panda: Bool, scan: Scan, stay: Bool)
   {
     let analyzed = ScreenInfo.analyzeWithPresence(raw, rules: rules, awayKeywords: awayKeywords)
     return (
       analyzed.summary, analyzed.panda,
-      scan(raw, dialogPattern: delivery.dialogKeywords, finalPattern: delivery.finalKeywords)
+      scan(raw, dialogPattern: delivery.dialogKeywords, finalPattern: delivery.finalKeywords),
+      stay(raw, accept: analyzed.summary.accept)
     )
   }
 
@@ -188,6 +201,9 @@ final class DeliveryWatch {
   static let goneAfterMisses = 2  // ＝DeliveryEdge.goneAfterMisses
   static let confirmSeconds: TimeInterval = 1
   static let repeatSeconds: TimeInterval = 60
+  /// v1.2.4 退路：對話框最後一次出現後這麼久都沒再出現（且在 pandarider 畫面）→ 照送 stayGone（＝TS DELIVERY_STAY_GONE_SEC）
+  static let stayGoneSeconds: TimeInterval = 180
+  var stayGoneSec: TimeInterval = DeliveryWatch.stayGoneSeconds
   private var visible = false
   private var misses = 0
   private var firstMissAt: Date?
@@ -196,40 +212,64 @@ final class DeliveryWatch {
   private var lastSentAt: Date?
   private var finalOn = false
   private var finalMisses = 0
+  /// v1.2.4 對話框最後一次出現後、第一次沒看到的時間（暫離也照算；對話框/同一單號再出現才清）
+  private var absentAt: Date?
+  /// v1.2.4 最近一次觀察是不是 pandarider 畫面（退路只在 pandarider 上送）
+  private var lastPanda = true
 
   var active: Bool { visible }
   var knowsNumber: Bool { no != nil }
 
   /// 剛消失、等確認的到期時間（呼叫端排計時器）
   var deadline: Date? {
-    guard visible, timerArmed, let at = firstMissAt else { return nil }
-    return at.addingTimeInterval(Self.confirmSeconds)
+    let quick: Date? = visible && timerArmed ? firstMissAt.map { $0.addingTimeInterval(Self.confirmSeconds) } : nil
+    guard let stay = stayDeadline else { return quick }
+    guard let q = quick else { return stay }
+    return min(q, stay)
+  }
+
+  private var stayDeadline: Date? {
+    guard visible, lastPanda, stayGoneSec > 0, let at = absentAt else { return nil }
+    return at.addingTimeInterval(stayGoneSec)
   }
 
   /// changed＝這次 OCR 是因為畫面變了（不是同畫面強制重掃）；numbers＝畫面上的 #單號（同一單號還在＝不算消失）
+  /// v1.2.4 stay＝還在送餐/抵達頁（OrderNumbers.stay）→ 不算消失
   func observe(
-    _ now: Date, dialog: Bool, final isFinal: Bool, panda: Bool, dialogNo: String?, changed: Bool, numbers: [String]
+    _ now: Date, dialog: Bool, final isFinal: Bool, panda: Bool, dialogNo: String?, changed: Bool, numbers: [String],
+    stay: Bool
   ) -> Action? {
     let finalEdge = edge(isFinal)
+    lastPanda = panda
     if dialog {
       let first = !visible
       visible = true
       misses = 0
       firstMissAt = nil
       timerArmed = false
+      absentAt = nil
       if let n = dialogNo { no = n }
       if isFinal { return send(now, why: "finalAfterDialog", delay: 0) }
       return first ? .visible : nil
     }
     if visible {
       if isFinal { return send(now, why: "finalAfterDialog", delay: delayFrom(now)) }
-      if !panda { return tick(now) }  // 不在 pandarider：不算消失
+      if absentAt == nil { absentAt = now }
+      if !panda {
+        // 不在 pandarider（切 App、主畫面）＝暫離：不算消失，已開始的確認（含 1 秒計時）也作廢，回來再看（v1.2.4）
+        resetMiss()
+        return nil
+      }
       if let n = no, numbers.contains(n) {
         // 同一單號還在畫面上（還在這張單的頁面）→ 不算消失，已開始的確認也取消
-        misses = 0
-        firstMissAt = nil
-        timerArmed = false
+        resetMiss()
+        absentAt = nil
         return nil
+      }
+      if stay {
+        // v1.2.4 還在送餐/抵達頁（按鈕被捲走/收合）→ 不算消失；久了沒再看到對話框才走退路
+        resetMiss()
+        return tick(now)
       }
       misses += 1
       if firstMissAt == nil { firstMissAt = now }
@@ -246,8 +286,20 @@ final class DeliveryWatch {
   }
 
   func tick(_ now: Date) -> Action? {
-    guard visible, timerArmed, let at = firstMissAt, now.timeIntervalSince(at) >= Self.confirmSeconds else { return nil }
-    return send(now, why: "disappear", delay: delayFrom(now))
+    if visible, timerArmed, let at = firstMissAt, now.timeIntervalSince(at) >= Self.confirmSeconds {
+      return send(now, why: "disappear", delay: delayFrom(now))
+    }
+    if let stay = stayDeadline, now >= stay, let at = absentAt {
+      let d = now.timeIntervalSince(at).rounded()
+      return send(now, why: "stayGone", delay: d.isFinite ? min(60, max(0, Int(d))) : 0)
+    }
+    return nil
+  }
+
+  private func resetMiss() {
+    misses = 0
+    firstMissAt = nil
+    timerArmed = false
   }
 
   /// 廣播停止：剛消失、還在確認 → 送；按鈕還在（沒按）→ 不送
@@ -258,6 +310,7 @@ final class DeliveryWatch {
     firstMissAt = nil
     timerArmed = false
     no = nil
+    absentAt = nil
     return out
   }
 
@@ -289,6 +342,7 @@ final class DeliveryWatch {
     misses = 0
     firstMissAt = nil
     timerArmed = false
+    absentAt = nil
     no = nil
     lastSentAt = now
     return .send(delay: delay, why: why, no: n)

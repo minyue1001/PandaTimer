@@ -21,7 +21,18 @@
 //   「訂單完成」：對話框顯示中/剛消失 → 立刻以它確認；60 秒內送過 → 不重送；從沒看到對話框 → 照舊送（退路）。
 //   對話框不見了但同一 #單號還在畫面上（聊天/拍照/捲動）→ 不算消失。
 //   "appear"＝v0.8 的 DeliveryEdge（completedKeywords＋pendingSec），遠端可切回。
+// v1.2.4（11/18 15:01 接的單 15:09~15:14 連送 5 次假送達、11/17 18:31/19:30 同型）：使用者在送餐/抵達頁還沒按確認，
+//   按鈕被捲走/收合或切去導航再切回來 → 「按鈕消失」被當成按了確認。改成：
+//   - 不是 pandarider 的畫面（切 App）＝暫離：已開始的消失確認整個作廢（含 1 秒計時），回來再重看；
+//   - 消失後的畫面仍是送餐/抵達頁（DELIVERY_STAY_KEYWORDS：即將抵達/抵達(非店家)/已送達(按鈕殘字)/聯絡/無法聯繫/
+//     付款方式/上傳照片/翻譯/夾單…）且沒有離開的跡象（DELIVERY_LEAVE_KEYWORDS：下一單取餐頁/上線中/訂單完成/邀請、或接單鈕）
+//     → 不算消失（同「同一單號還在畫面上」）；
+//   - 退路：對話框最後一次出現後 DELIVERY_STAY_GONE_SEC（180）秒都沒再出現、且目前在 pandarider 畫面 → 照送（stayGone，
+//     delay＝從第一次沒看到算，上限 60）。疊單時送完 A 直接進 B 的送餐頁（沒有離開字樣）、又沒讀到「訂單完成」就靠這條。
+//   真送達照舊：對話框後的「訂單完成」（finalAfterDialog）、消失後進到下一單/待命/新邀請（leave 或一般畫面連 2 次）。
+//   這些字樣先寫死（不加遠端鍵：CI 要求 server/config.json 齊全），＝Swift OrderNumbers.stayPattern/leavePattern。
 import { DEFAULT_COMPLETED_KEYWORDS, DEFAULT_FINAL_KEYWORDS } from './screenInfo.ts';
+import { normalizeOcrText } from './ocrPick.ts';
 import { DEFAULT_DIALOG_KEYWORDS } from './orderNumbers.ts';
 
 export type DeliverySettings = {
@@ -161,6 +172,27 @@ export class DeliveryEdge {
 /** v1.1 對話框消失後：再 1 次 OCR 沒看到、或 1 秒內沒再出現，就算消失 */
 export const DELIVERY_CONFIRM_SEC = 1;
 
+/** v1.2.4 還在送餐/抵達頁（還沒按確認）的字樣（去空白文字比對；＝Swift OrderNumbers.stayPattern） */
+export const DELIVERY_STAY_KEYWORDS =
+  '即將抵達|即将抵达|抵達(?!店家|餐廳)|抵达(?!店家|餐厅)|已送達|已送达|目的地|樓層|楼层|付款方式|線上付款|线上付款|' +
+  '聯絡(?!店家)|联络(?!店家)|聯繫|联系(?!店家)|無法聯絡|上傳照片|上传照片|拍照|翻譯|翻译|夾單|夹单';
+/** v1.2.4 已離開送餐頁的字樣（下一單取餐頁/待命/訂單完成/邀請；優先於 stay；＝Swift OrderNumbers.leavePattern） */
+export const DELIVERY_LEAVE_KEYWORDS =
+  '抵達店家|抵达店家|抵達餐廳|抵达餐厅|前往取餐|即將準備完成|即将准备完成|取餐體驗|取餐体验|上線中|上线中|休息中|' +
+  '訂單完成|订单完成|完成訂單|完成订单|每單收入|每单收入|接受訂單|接受订单';
+/** v1.2.4 對話框最後一次出現後這麼久都沒再出現（且在 pandarider 畫面）→ 照送（stayGone）；0＝不送 */
+export const DELIVERY_STAY_GONE_SEC = 180;
+
+const STAY_RX = new RegExp(DELIVERY_STAY_KEYWORDS);
+const LEAVE_RX = new RegExp(DELIVERY_LEAVE_KEYWORDS);
+
+/** v1.2.4 這個畫面還是送餐/抵達頁？（有接單鈕＝新邀請 → 否；原文不離開這裡；＝Swift OrderNumbers.stay） */
+export function deliveryStay(raw: string | null | undefined, accept = false): boolean {
+  if (!raw || accept) return false;
+  const compact = normalizeOcrText(raw).replace(/\s+/g, '');
+  return STAY_RX.test(compact) && !LEAVE_RX.test(compact);
+}
+
 export type WatchObservation = {
   /** 命中 dialogKeywords（是否已送達／確認已送達） */
   dialog: boolean;
@@ -174,18 +206,24 @@ export type WatchObservation = {
   changed?: boolean;
   /** 畫面上的 #單號（主畫面＋補掃）：對話框不見了但同一單號還在畫面上（聊天/拍照/捲動）→ 不算消失 */
   numbers?: readonly string[];
+  /** v1.2.4 還在送餐/抵達頁（deliveryStay）→ 不算消失（沒有這欄＝false＝舊行為） */
+  stay?: boolean;
 };
 
 export type WatchAction =
   /** 送 delivered（delaySec＝實際送達在幾秒前；no＝對話框上的單號，交給 OrderNumberBook.resolve） */
-  | { kind: 'send'; delaySec: number; why: 'disappear' | 'final' | 'finalAfterDialog' | 'stopped'; no: string | null }
+  | { kind: 'send'; delaySec: number; why: WatchWhy; no: string | null }
   /** 對話框/按鈕剛出現（不送，只回報） */
   | { kind: 'visible' }
   /** 「訂單完成」但 60 秒內送過 */
   | { kind: 'repeat' };
 
+export type WatchWhy = 'disappear' | 'final' | 'finalAfterDialog' | 'stopped' | 'stayGone';
+
 /** v1.1 extension 端（delivery.mode "disappear"）：對話框/按鈕消失＝按下確認（時間單位：秒） */
 export class DeliveryWatch {
+  /** v1.2.4 退路秒數（0＝不送） */
+  stayGoneSec: number;
   private visible = false;
   private misses = 0;
   private firstMissAt: number | null = null;
@@ -194,6 +232,14 @@ export class DeliveryWatch {
   private lastSentAt: number | null = null;
   private finalOn = false;
   private finalMisses = 0;
+  /** v1.2.4 對話框最後一次出現後、第一次沒看到的時間（暫離也照算；對話框/同一單號再出現才清） */
+  private absentAt: number | null = null;
+  /** v1.2.4 最近一次觀察是不是 pandarider 畫面（退路只在 pandarider 上送） */
+  private lastPanda = true;
+
+  constructor(stayGoneSec = DELIVERY_STAY_GONE_SEC) {
+    this.stayGoneSec = stayGoneSec;
+  }
 
   /** 對話框/按鈕顯示中（extension：補掃上方號碼、維持在 pandarider 模式） */
   get active(): boolean {
@@ -202,7 +248,13 @@ export class DeliveryWatch {
 
   /** 剛消失、等確認的到期時間（呼叫端排計時器：畫面靜止時 ReplayKit 不送幀） */
   get deadline(): number | null {
-    return this.visible && this.firstMissAt != null && this.timerArmed ? this.firstMissAt + DELIVERY_CONFIRM_SEC : null;
+    const quick = this.visible && this.firstMissAt != null && this.timerArmed ? this.firstMissAt + DELIVERY_CONFIRM_SEC : null;
+    const stay = this.stayDeadline();
+    return quick == null ? stay : stay == null ? quick : Math.min(quick, stay);
+  }
+
+  private stayDeadline(): number | null {
+    return this.visible && this.lastPanda && this.absentAt != null && this.stayGoneSec > 0 ? this.absentAt + this.stayGoneSec : null;
   }
 
   /** 顯示中已讀到單號（extension：讀到就不用再補掃） */
@@ -212,25 +264,36 @@ export class DeliveryWatch {
 
   observe(now: number, o: WatchObservation): WatchAction | null {
     const finalEdge = this.finalEdge(o.final);
+    this.lastPanda = o.panda;
     if (o.dialog) {
       const first = !this.visible;
       this.visible = true;
       this.misses = 0;
       this.firstMissAt = null;
       this.timerArmed = false;
+      this.absentAt = null;
       if (o.dialogNo) this.no = o.dialogNo;
       if (o.final) return this.send(now, 'finalAfterDialog', 0);
       return first ? { kind: 'visible' } : null;
     }
     if (this.visible) {
       if (o.final) return this.send(now, 'finalAfterDialog', this.delayFrom(now));
-      if (!o.panda) return this.tick(now); // 不在 pandarider（切 App、主畫面）：不算消失
+      if (this.absentAt == null) this.absentAt = now;
+      if (!o.panda) {
+        // 不在 pandarider（切 App、主畫面）＝暫離：不算消失，已開始的確認（含 1 秒計時）也作廢，回來再看（v1.2.4）
+        this.resetMiss();
+        return null;
+      }
       if (this.no != null && o.numbers?.includes(this.no)) {
         // 同一單號還在畫面上（還在這張單的頁面）→ 不算消失，已開始的確認也取消
-        this.misses = 0;
-        this.firstMissAt = null;
-        this.timerArmed = false;
+        this.resetMiss();
+        this.absentAt = null;
         return null;
+      }
+      if (o.stay) {
+        // v1.2.4 還在送餐/抵達頁（按鈕被捲走/收合）→ 不算消失；久了沒再看到對話框才走退路
+        this.resetMiss();
+        return this.tick(now);
       }
       this.misses += 1;
       if (this.firstMissAt == null) this.firstMissAt = now;
@@ -246,12 +309,20 @@ export class DeliveryWatch {
     return null;
   }
 
-  /** 計時器：消失後 1 秒內沒再出現 → 送（時間＝第一次消失） */
+  /** 計時器：消失後 1 秒內沒再出現 → 送（時間＝第一次消失）；v1.2.4 對話框 stayGoneSec 沒再出現 → 退路送 */
   tick(now: number): WatchAction | null {
     if (this.visible && this.firstMissAt != null && this.timerArmed && now - this.firstMissAt >= DELIVERY_CONFIRM_SEC) {
       return this.send(now, 'disappear', this.delayFrom(now));
     }
+    const stay = this.stayDeadline();
+    if (stay != null && now >= stay) return this.send(now, 'stayGone', delayOf(now, this.absentAt as number));
     return null;
+  }
+
+  private resetMiss(): void {
+    this.misses = 0;
+    this.firstMissAt = null;
+    this.timerArmed = false;
   }
 
   /** 廣播停止：剛消失、還在確認 → 送；按鈕還在（沒按）→ 不送 */
@@ -262,6 +333,7 @@ export class DeliveryWatch {
     this.firstMissAt = null;
     this.timerArmed = false;
     this.no = null;
+    this.absentAt = null;
     return out;
   }
 
@@ -284,12 +356,13 @@ export class DeliveryWatch {
     return false;
   }
 
-  private send(now: number, why: 'disappear' | 'final' | 'finalAfterDialog' | 'stopped', delaySec: number): WatchAction {
+  private send(now: number, why: WatchWhy, delaySec: number): WatchAction {
     const no = this.no;
     this.visible = false;
     this.misses = 0;
     this.firstMissAt = null;
     this.timerArmed = false;
+    this.absentAt = null;
     this.no = null;
     this.lastSentAt = now;
     return { kind: 'send', delaySec, why, no };
