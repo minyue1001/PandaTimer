@@ -88,6 +88,17 @@ label.f > input, label.f > select { min-width: 0; max-width: 100%; }
     </div>
   </div>
 
+  <div class="card">
+    <h2>今日對帳</h2>
+    <div class="dim">輸入平台當日完成單數、總金額（各單報酬＋小費，不含補錢）、小費總額（可空）→ 用偵測紀錄找漏記/記錯，逐條「套用」。</div>
+    <label class="f">日期<input id="rcDate" type="date"></label>
+    <label class="f">完成單數<input id="rcCount" type="number" inputmode="numeric" min="0" max="500" step="1"></label>
+    <label class="f">總金額 $<input id="rcAmount" type="number" inputmode="decimal" min="0" step="0.01"></label>
+    <label class="f">小費總額 $<input id="rcTips" type="number" inputmode="decimal" min="0" step="0.01" placeholder="可空"></label>
+    <button id="rcRun" class="pink">比對</button>
+    <div id="rcOut"></div>
+  </div>
+
   <div class="row">
     <button id="addBtn" class="pink grow">＋ 新增一筆</button>
     <button id="csvBtn" class="grow">匯出 CSV</button>
@@ -424,6 +435,68 @@ function openNew() {
   }, [h('button', { class: 'grow', onclick: () => box.classList.add('hidden') }, '取消')]));
   box.classList.remove('hidden');
 }
+
+// ── 今日對帳（POST /api/admin/reconcile 唯讀算提議；套用走既有 orders API） ──
+async function runReconcile() {
+  const out = $('rcOut');
+  const count = Number($('rcCount').value), amount = Number($('rcAmount').value);
+  const tipsRaw = $('rcTips').value.trim();
+  if (!Number.isInteger(count) || count < 0 || $('rcAmount').value.trim() === '' || !(amount >= 0)) return toast('單數要整數、金額要填');
+  const body = { date: $('rcDate').value, count, amount, ...(tipsRaw !== '' ? { tips: Number(tipsRaw) } : {}) };
+  $('rcRun').disabled = true;
+  try {
+    renderReconcile(await api('POST', 'reconcile', body));
+  } catch (e) {
+    out.replaceChildren(h('div', { class: 'err' }, e.message));
+  } finally {
+    $('rcRun').disabled = false;
+  }
+}
+function renderReconcile(r) {
+  const d = r.diff;
+  const items = [
+    h('div', { class: 'edit' }, `App ${r.app.count} 張 ${money(r.app.amount)}／平台 ${r.platform.count} 張 ${money(r.platform.amount)}：App 少 ${d.count} 張、${money(d.amount)}${d.tips != null ? `、小費差 ${money(d.tips)}` : ''}`),
+    ...r.info.map((t) => h('div', { class: 'dim' }, `・${t}`)),
+  ];
+  if (!r.proposals.length) items.push(h('div', { class: d.count === 0 && d.amount === 0 ? 'ok' : 'warn' }, d.count === 0 && d.amount === 0 ? '✅ 跟平台一致' : '找不到可自動補的證據，請手動修改'));
+  for (const p of r.proposals) items.push(proposalRow(p));
+  $('rcOut').replaceChildren(...items);
+}
+const RC_TYPE = { add: '補登', restore: '還原', tip: '小費', review: '檢查' };
+function proposalRow(p) {
+  const box = h('div', {});
+  const done = (msg) => { toast(msg); el.classList.add('deleted'); box.replaceChildren(h('div', { class: 'ok' }, '已套用')); load(); };
+  const fail = (e) => toast(e.message);
+  const id = p.orderId ? encodeURIComponent(p.orderId) : '';
+  const btns = [];
+  if (p.type === 'add') {
+    const open = (fields) => {
+      const f = { ...p.fields, ...(fields || {}) };
+      const o = { acceptedAt: f.acceptedAt ?? Date.now(), estimateMin: f.estimateMin ?? '', status: 'delivered', deliveredAt: f.deliveredAt, amount: f.amount, tip: f.tip ?? null, noTiming: false, stacked: false, note: f.note || '對帳補登' };
+      box.replaceChildren(fieldsForm(o, async (v) => { await api('POST', 'orders', v); done('已新增'); }, [h('button', { class: 'grow', onclick: () => box.replaceChildren() }, '收起')]));
+    };
+    for (const opt of p.options || []) btns.push(h('button', { class: 'small', onclick: () => open(opt.fields) }, opt.label));
+    btns.push(h('button', { class: 'small pink', onclick: () => open() }, '套用…'));
+  } else if (p.type === 'restore' && id) {
+    btns.push(h('button', { class: 'small pink', onclick: async () => { try { await api('PUT', `orders/${id}`, { status: 'delivered', deliveredAt: p.fields.deliveredAt }); done('已還原成已送達'); } catch (e) { fail(e); } } }, '套用'));
+  } else if (p.type === 'tip' && id) {
+    btns.push(h('button', { class: 'small pink', onclick: async () => { try { await api('PUT', `orders/${id}`, { tip: p.fields.tip }); done('已記小費'); } catch (e) { fail(e); } } }, '套用'));
+  } else if (p.type === 'review' && id) {
+    for (const a of p.actions || []) {
+      if (a === 'delete') btns.push(h('button', { class: 'small danger', onclick: async () => { if (!confirm('刪除這筆？')) return; try { await api('DELETE', `orders/${id}`); done('已刪除'); } catch (e) { fail(e); } } }, '刪除這筆'));
+      if (a === 'cancel') btns.push(h('button', { class: 'small', onclick: async () => { try { await api('PUT', `orders/${id}`, { status: 'canceled', deliveredAt: null }); done('已改成取消'); } catch (e) { fail(e); } } }, '改成取消'));
+      if (a === 'edit') btns.push(h('button', { class: 'small pink', onclick: async () => { try { await api('PUT', `orders/${id}`, { estimateMin: p.fields.estimateMin, amount: p.fields.amount }); done('已修改'); } catch (e) { fail(e); } } }, `改成 ${p.fields.estimateMin} 分 ${money(p.fields.amount)}`));
+    }
+  }
+  const el = h('div', { class: 'order' },
+    h('div', {}, h('span', { class: `badge ${p.confidence === 'high' ? 'ok' : 'late'}` }, `${RC_TYPE[p.type]}・${p.confidence === 'high' ? '把握高' : '請確認'}`), p.needs.length ? h('span', { class: 'tag' }, `待填：${p.needs.join(',')}`) : null),
+    h('div', { class: 'sub' }, p.text),
+    btns.length ? h('div', { class: 'row' }, btns) : null,
+    box);
+  return el;
+}
+$('rcDate').value = dateKey(Date.now());
+$('rcRun').addEventListener('click', runReconcile);
 
 function editBaseline() {
   const bl = baselines.get(period(pIndex).id);

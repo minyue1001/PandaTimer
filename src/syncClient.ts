@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 import { cleanupEnded } from './controller';
 import type { Order } from './orders';
+import { parseReconcileResponse, reconcileUrlFrom, type ReconcileResult } from './reconcile';
 import { periodOf } from './stats';
 import { loadBaselineSlot, saveBaselineSlot } from './statsConfig';
 import {
@@ -271,6 +272,46 @@ export async function pairWithCode(text: string): Promise<RunResult> {
     return lastRun ?? { ok: false, message: '同步沒有執行' };
   } finally {
     pairCode = null;
+  }
+}
+
+/**
+ * 今日對帳：先跑一次同步（伺服器要有最新紀錄），再 POST /api/reconcile（同一個同步碼）。唯讀，不改任何資料。
+ * input.date＝台北日期 YYYY-MM-DD；count/amount/tips＝平台當日完成單數、總金額（含小費）、小費總額（選填）。
+ */
+export async function requestReconcile(input: {
+  date: string;
+  count: number;
+  amount: number;
+  tips?: number | null;
+}): Promise<{ ok: true; result: ReconcileResult; syncMessage: string } | { ok: false; message: string }> {
+  const url = reconcileUrlFrom(SYNC_URL);
+  if (!url) return { ok: false, message: '這個版本沒有同步伺服器網址' };
+  const code = await loadSyncCode();
+  if (!code) return { ok: false, message: '還沒配對雲端同步：請先到「設定 → 雲端同步」輸入同步碼' };
+  await scheduler.now();
+  const synced = lastRun;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'content-type': 'application/json', accept: 'application/json', 'x-pt-sync': code },
+      body: JSON.stringify({ date: input.date, count: input.count, amount: input.amount, ...(input.tips != null ? { tips: input.tips } : {}) }),
+    });
+    if (res.status === 404) return { ok: false, message: '伺服器還沒更新（沒有對帳功能），請先部署伺服器' };
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+      return { ok: false, message: res.status === 400 && typeof body?.error === 'string' ? body.error : syncErrorText(res.status) };
+    }
+    const result = parseReconcileResponse(await res.json());
+    if (!result) return { ok: false, message: '伺服器回應格式不對' };
+    return { ok: true, result, syncMessage: synced ? `${synced.ok ? '已同步' : '同步失敗'}：${synced.message}` : '' };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error && e.name === 'AbortError' ? '連線逾時' : '連不上伺服器（離線？）' };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

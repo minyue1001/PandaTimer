@@ -496,12 +496,13 @@ trap on_exit EXIT
 # ---------------------------------------------------------------- 1. 本機檢查
 echo "== 1/5 本機檢查"
 cd "$REPO"
-[[ -f "$REPO/server/index.mjs" && -f "$REPO/server/orders.mjs" && -f "$REPO/server/admin.html" && -f "$REPO/server/certs/certificate.pem" && -f "$REPO/server/config.default.json" ]] \
-  || fail "缺 server/index.mjs、orders.mjs、admin.html、certs/certificate.pem 或 config.default.json"
+[[ -f "$REPO/server/index.mjs" && -f "$REPO/server/orders.mjs" && -f "$REPO/server/reconcile.mjs" && -f "$REPO/server/admin.html" && -f "$REPO/server/certs/certificate.pem" && -f "$REPO/server/config.default.json" ]] \
+  || fail "缺 server/index.mjs、orders.mjs、reconcile.mjs、admin.html、certs/certificate.pem 或 config.default.json"
 node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(!c||typeof c.version!=="string") process.exit(1)' "$REPO/server/config.default.json" \
   || fail "server/config.default.json 不是合法 JSON 或缺 version"
 node --check "$REPO/server/index.mjs" || fail "server/index.mjs 語法錯誤"
 node --check "$REPO/server/orders.mjs" || fail "server/orders.mjs 語法錯誤"
+node --check "$REPO/server/reconcile.mjs" || fail "server/reconcile.mjs 語法錯誤"
 [[ -f "$LOCAL_KEY" ]] || fail "找不到私鑰 $LOCAL_KEY"
 [[ "$(stat -c %a "$LOCAL_KEY")" == "600" ]] || fail "私鑰權限應為 600：$LOCAL_KEY"
 # 私鑰與憑證必須成對
@@ -559,7 +560,7 @@ if (( DRY_RUN )); then
   cat <<EOF
 
 == DRY RUN：以下動作「不會」執行，只是預告 ==
-  1. 打包 $REPO/server/{index.mjs,orders.mjs,admin.html,config.default.json,certs/certificate.pem,README.md} → $REMOTE:$BASE/server（舊版移到 server.prev）
+  1. 打包 $REPO/server/{index.mjs,orders.mjs,reconcile.mjs,admin.html,config.default.json,certs/certificate.pem,README.md} → $REMOTE:$BASE/server（舊版移到 server.prev）
      遠端設定 $BASE/config.json 不存在才由 config.default.json 建立（已存在不動；改設定用 scripts/push-config.sh）
   2. 上傳私鑰 $LOCAL_KEY → $REMOTE:$BASE/keys/private-key.pem（600，owner pandatimer）
      上傳回報金鑰（$WRITE_KEY_FILE、$READ_KEY_FILE）、管理密碼（$ADMIN_PW_FILE）、初始同步碼（$SYNC_CODE_FILE）
@@ -582,7 +583,7 @@ fi
 # ---------------------------------------------------------------- 3. 上傳
 STAGE="upload"
 echo "== 3/5 上傳程式與私鑰"
-tar -C "$REPO/server" --owner=0 --group=0 -czf - index.mjs orders.mjs admin.html config.default.json certs/certificate.pem README.md \
+tar -C "$REPO/server" --owner=0 --group=0 -czf - index.mjs orders.mjs reconcile.mjs admin.html config.default.json certs/certificate.pem README.md \
   | "${SSH[@]}" "set -euo pipefail; install -d -m 755 $BASE; rm -rf $BASE/server.incoming; install -d -m 755 $BASE/server.incoming; tar -xzf - -C $BASE/server.incoming --no-same-owner"
 "${SSH[@]}" "set -euo pipefail; umask 077; install -d -m 700 $BASE/keys; cat > $BASE/keys/private-key.pem.new" < "$LOCAL_KEY"
 "${SSH[@]}" "set -euo pipefail; umask 077; cat > $BASE/server.env.new" < "$ENV_FILE"

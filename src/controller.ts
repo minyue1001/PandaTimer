@@ -5,6 +5,7 @@ import { cancelReminders, scheduleReminders } from './notify';
 import { activeOrders, clampEstimate, DEFAULT_ESTIMATE, exactFare, normalizeTip, parseDeepLink, type Order } from './orders';
 import { addTombstones, applyPrune, dropTombstonedEvents, planPrune, type PruneCriteria, type PrunePlan } from './prune';
 import { planImport, type ImportPlan, type ImportRow } from './importLink';
+import { applyOps, type ReconcileOp } from './reconcile';
 import { getOrders, loadSyncCode, loadSyncState, loadTombstones, mutate, subscribe, updateTombstones } from './store';
 import { unsyncedTombstoneIds } from './sync';
 
@@ -153,6 +154,23 @@ export async function importOrders(rows: readonly ImportRow[]): Promise<ImportPl
     return { orders: [...p.add, ...list], result: p };
   });
   return plan ?? planImport([], []);
+}
+
+/**
+ * 今日對帳套用（src/reconcile.ts buildOps 的結果）：新增/還原/小費/改金額/取消在一次 mutate 內做完（蓋 updatedAt → 雲端同步），
+ * 刪除走 pruneOrders（墓碑）。只動已結束的單（新增的單是已送達），不碰動態島/通知。回傳 { done, skipped }。
+ */
+export async function applyReconcile(ops: readonly ReconcileOp[]): Promise<{ done: number; skipped: number }> {
+  const now = Date.now();
+  const rest = ops.filter((o) => o.kind !== 'delete');
+  const r = await mutate<{ done: number; skipped: number }>((list) => {
+    const out = applyOps(list, rest, (i) => `${now + i}-rc${Math.random().toString(36).slice(2, 6)}`);
+    return { orders: out.orders, result: { done: out.done, skipped: out.skipped.length } };
+  });
+  const delIds = ops.flatMap((o) => (o.kind === 'delete' ? [o.id] : []));
+  let deleted = 0;
+  if (delIds.length) deleted = (await pruneOrders({ kind: 'ids', ids: delIds })).count;
+  return { done: (r?.done ?? 0) + deleted, skipped: (r?.skipped ?? 0) + (delIds.length - deleted) };
 }
 
 /** 預覽：這個條件會刪哪些單（確認視窗用） */

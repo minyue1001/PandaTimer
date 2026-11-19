@@ -20,6 +20,10 @@
 //   /api/admin/*        login/logout/session、orders（列表/新增/編輯/刪除/還原）、baselines、sync-code/reset、export.csv
 //        寫入一律要 cookie＋x-pt-csrf＋JSON；GET orders/baselines/export.csv 也可用 x-pt-read（讀取金鑰）唯讀
 //        登入失敗 5 次 → 鎖 15 分鐘（全域：nginx 沒帶可信的來源 IP）；同步碼錯 10 次 → 鎖 15 分鐘
+//   今日對帳（邏輯在 reconcile.mjs，唯讀、不改資料）：body {date:'YYYY-MM-DD', count, amount, tips?, until?:'HH:mm'}
+//   POST /api/reconcile        header x-pt-sync（同 /api/sync）
+//   POST /api/admin/reconcile  cookie＋x-pt-csrf＋JSON（或 x-pt-read 讀取金鑰）
+//        → {date, until, app:{count,amount,tips}, platform, diff:{count,amount,tips}, proposals[], info[]}
 //
 // 資料目錄：UPDATES_DIR/<runtimeVersion>/<timestamp>/ = `npx expo export -p ios` 的 dist + expoConfig.json
 //   - 取數字最大的 timestamp；以 "." 開頭的目錄（上傳中）忽略
@@ -43,6 +47,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { formatSyncCode, normalizeSyncCode, openStore } from './orders.mjs';
+import { reconcile, taipeiDayStart } from './reconcile.mjs';
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 3970);
@@ -689,6 +694,61 @@ function maybeBackup(store, now) {
   }
 }
 
+// ── 今日對帳（唯讀：讀當日訂單＋telemetry，算提議；套用由 App／管理頁走既有寫入路徑） ──
+const RECONCILE_MAX_BODY = 4096;
+/** body → { date, platform:{count,amount,tips}, until(ms|null) }；不合法丟 400 */
+function parseReconcileBody(body, now) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Body must be an object');
+  const dayStart = taipeiDayStart(body.date);
+  if (!Number.isFinite(dayStart) || localDate(dayStart + 12 * 3_600_000) !== body.date) throw new HttpError(400, 'date 要是 YYYY-MM-DD');
+  if (dayStart > now + DAY_MS || dayStart < now - TELEMETRY_KEEP_DAYS * DAY_MS) throw new HttpError(400, `只能對最近 ${TELEMETRY_KEEP_DAYS} 天`);
+  const num = (x, max) => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= max;
+  if (!Number.isInteger(body.count) || !num(body.count, 500)) throw new HttpError(400, 'count 要是 0~500 的整數');
+  if (!num(body.amount, 100_000)) throw new HttpError(400, 'amount 要是 0~100000');
+  if (body.tips != null && !num(body.tips, 100_000)) throw new HttpError(400, 'tips 要是 0~100000');
+  let until = null;
+  if (body.until != null) {
+    const m = typeof body.until === 'string' ? /^(\d{1,2}):(\d{2})$/.exec(body.until) : null;
+    if (!m || Number(m[1]) > 24 || Number(m[2]) > 59) throw new HttpError(400, 'until 要是 HH:mm');
+    until = dayStart + (Number(m[1]) * 60 + Number(m[2])) * 60_000;
+  }
+  const r2 = (x) => Math.round(x * 100) / 100;
+  return { date: body.date, dayStart, until, platform: { count: body.count, amount: r2(body.amount), tips: body.tips == null ? null : r2(body.tips) } };
+}
+/** 當天與隔天的 telemetry 檔（深夜的事件可能隔天才送到） */
+async function readTelemetryRecords(dates) {
+  const out = [];
+  for (const date of dates) {
+    let text = '';
+    try { text = await fsp.readFile(telemetryFile(date), 'utf8'); } catch { continue; }
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      try { out.push(JSON.parse(line)); } catch { /* 壞行略過 */ }
+    }
+  }
+  return out;
+}
+async function runReconcile(store, body, now) {
+  const q = parseReconcileBody(body, now);
+  const orders = store.listOrders(q.dayStart - 6 * 3_600_000, q.dayStart + DAY_MS + 6 * 3_600_000);
+  const events = await readTelemetryRecords([q.date, localDate(q.dayStart + DAY_MS + 12 * 3_600_000)]);
+  return reconcile({ date: q.date, orders, events, platform: q.platform, until: q.until, now });
+}
+async function handleReconcile(req, res) {
+  const store = await getStore();
+  const now = Date.now();
+  const wait = syncLock.wait(now);
+  if (wait) throw lockedError(wait, '同步碼');
+  if (!windowAllow('reconcile', 30, now)) throw new HttpError(429, 'Rate limit: 30 reconciles/min');
+  const given = req.headers['x-pt-sync'];
+  if (!secretEqual(normalizeSyncCode(given), store.syncCode)) {
+    if (given) syncLock.fail(now);
+    throw new HttpError(401, 'Bad sync code');
+  }
+  syncLock.ok();
+  sendJson(res, 200, await runReconcile(store, await readJson(req, RECONCILE_MAX_BODY), now));
+}
+
 // ── 管理頁 session（簽章 cookie；金鑰＝資料庫裡的隨機 sessionKey × 管理密碼 → 改密碼或登出即全部登出） ──
 const SESSION_TTL_MS = 12 * 3_600_000;
 const COOKIE = 'pt_admin';
@@ -859,6 +919,10 @@ async function handleAdminApi(req, res, url) {
     console.log('[admin] 已重設同步碼');
     return sendJson(res, 200, { syncCode: formatSyncCode(code) });
   }
+  if (p === 'reconcile' && m === 'POST') {
+    requireAdmin(store, req, req.headers['x-pt-read'] != null ? 'read' : 'write');
+    return sendJson(res, 200, await runReconcile(store, await readJson(req, RECONCILE_MAX_BODY), now));
+  }
   if (p === 'orders' && m === 'GET') {
     requireAdmin(store, req, 'read');
     const { start, end } = dateRange(url);
@@ -948,6 +1012,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/sync') {
       if (req.method === 'POST') return await handleSync(req, res);
+      throw new HttpError(405, 'Method not allowed');
+    }
+    if (url.pathname === '/api/reconcile') {
+      if (req.method === 'POST') return await handleReconcile(req, res);
       throw new HttpError(405, 'Method not allowed');
     }
     if (url.pathname.startsWith('/api/admin/')) return await handleAdminApi(req, res, url);

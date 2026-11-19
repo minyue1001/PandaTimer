@@ -1,4 +1,4 @@
-// 紀錄頁：收入摘要 → 管理紀錄（批次刪除，折疊）→ 依日期分組的歷史（日小計）；列長按＝選單（不計時效／單筆刪除）
+// 紀錄頁：收入摘要 → 今日對帳（折疊）→ 管理紀錄（批次刪除，折疊）→ 依日期分組的歷史（日小計）；列長按＝選單（不計時效／單筆刪除）
 import { memo, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { money, type EarningsSummary, type PayParams } from '../earnings';
@@ -7,6 +7,7 @@ import { formatTaipeiDateTime, parseTaipeiDateTime } from '../prune';
 import type { StatsParams, Summary } from '../stats';
 import { confirmPrune, openRowMenu, promptTip, runPrune, type Toast } from './actions';
 import { Btn, Collapsible } from './common';
+import { ReconcileCard } from './ReconcileCard';
 import { dayTitle, daySubText, daySummaryText, groupHistory, pctText, type DayGroup } from './logic';
 import { C, F, pressed, S } from './theme';
 
@@ -34,6 +35,7 @@ export const HistoryScreen = memo(function HistoryScreen(p: HistoryProps) {
     <ScrollView contentContainerStyle={S.scroll} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
       <Text style={S.h1}>紀錄</Text>
       <IncomeCard earn={p.earn} periodLabel={p.periodLabel} noStacked={p.noStacked} />
+      <ReconcileCard toast={p.toast} />
       <ManageCard toast={p.toast} />
       {hist.groups.length === 0 && (
         <View style={[S.card, { alignItems: 'center' }]}>
