@@ -253,7 +253,8 @@
   },
   "stats": {
     "graceFactor": 1.05,
-    "overrunCap": 1
+    "overrunCap": 1,
+    "actualOffsetSec": 0
   },
   "pay": {
     "ratePerMinute": 4.083333333333333,

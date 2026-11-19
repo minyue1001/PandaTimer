@@ -117,6 +117,7 @@ function GoalsCard({ goals, onGoals, statsParams }: { goals: Goals; onGoals: (g:
       <Text style={S.small}>
         算法（依三期報酬單反推的近似）：彈性線＝預估 × {statsParams.graceFactor}；實際 ≤ 彈性線算準時；每單超時比例＝(實際−彈性線)/彈性線（0~
         {Math.round(statsParams.overrunCap * 100)}%）的平均＝超時率。取消單不計。每 14 天一期（台北時間週一 00:00 起）。
+        {statsParams.actualOffsetSec > 0 ? `實際時間另加 ${statsParams.actualOffsetSec} 秒（App 從偵測到接單起算，平台較早起算；依期中報告校正）。` : ''}
       </Text>
     </View>
   );

@@ -151,9 +151,9 @@ test('目標存取與輸入解析：壞資料 → 預設', () => {
 
 test('遠端設定 stats：預設 1.05/1、缺漏補預設、範圍外用預設', () => {
   assert.deepEqual(DEFAULT_CONFIG.stats, DEFAULT_STATS);
-  assert.deepEqual(DEFAULT_STATS, { graceFactor: 1.05, overrunCap: 1 });
+  assert.deepEqual(DEFAULT_STATS, { graceFactor: 1.05, overrunCap: 1, actualOffsetSec: 0 });
   assert.deepEqual(validateConfig({ version: 'x' }).config.stats, DEFAULT_STATS);
-  assert.deepEqual(validateConfig({ version: 'x', stats: { graceFactor: 1.1, overrunCap: 2 } }).config.stats, { graceFactor: 1.1, overrunCap: 2 });
+  assert.deepEqual(validateConfig({ version: 'x', stats: { graceFactor: 1.1, overrunCap: 2 } }).config.stats, { graceFactor: 1.1, overrunCap: 2, actualOffsetSec: 0 });
   const bad = validateConfig({ version: 'x', stats: { graceFactor: 0.9, overrunCap: 0 } });
   assert.deepEqual(bad.config.stats, DEFAULT_STATS);
   assert.ok(bad.problems.some((p) => p.startsWith('stats.graceFactor')));
@@ -249,4 +249,14 @@ test('v1.2.4 不計時效：本期/今日/不含夾單的準時率、超時率�
   const none = periodAndToday([mk('x', 99, { noTiming: true })], now);
   assert.equal(none.today.count, 0);
   assert.equal(none.today.onTimeRate, null);
+});
+
+test('v1.2.5 actualOffsetSec：實際時間加秒數再判準時/超時（對齊平台起算點）', async () => {
+  const { isOnTime: on, overrunRatio: ov } = await import('../src/stats.ts');
+  const p = { graceFactor: 1.05, overrunCap: 1, actualOffsetSec: 40 };
+  assert.equal(on({ est: 20, act: 20.5 }), true); // 不校正：20.5 ≤ 21
+  assert.equal(on({ est: 20, act: 20.5 }, p), false); // +40 秒＝21.17 > 21
+  assert.equal(on({ est: 20, act: 20.3 }, p), true); // 20.97 ≤ 21
+  assert.ok(Math.abs(ov({ est: 20, act: 21 }, p) - (21 + 40 / 60 - 21) / 21) < 1e-9);
+  assert.equal(on({ est: 20, act: 20.5 }, { graceFactor: 1.05, overrunCap: 1 }), true); // 舊參數（沒有 actualOffsetSec）照舊
 });

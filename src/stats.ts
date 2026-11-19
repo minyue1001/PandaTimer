@@ -8,8 +8,18 @@
 //   台灣沒有日光節約，固定 UTC+8，直接用毫秒運算（不依賴裝置時區）。
 import type { Order } from './orders';
 
-export type StatsParams = { graceFactor: number; overrunCap: number };
-export const DEFAULT_STATS: Readonly<StatsParams> = Object.freeze({ graceFactor: 1.05, overrunCap: 1 });
+/**
+ * v1.2.5 actualOffsetSec：App 記到的實際時間比平台短（App 從「偵測到接單」起算，平台約從派單起算）→ 算準時/超時前
+ * 先把實際分鐘加上這個秒數。依 11/09–11/22 期中報告（160 單、準時 39%）校正 ≈ 40 秒；報酬單（平台自己的實際時間）不加。
+ */
+export type StatsParams = { graceFactor: number; overrunCap: number; actualOffsetSec: number };
+export const DEFAULT_STATS: Readonly<StatsParams> = Object.freeze({ graceFactor: 1.05, overrunCap: 1, actualOffsetSec: 0 });
+
+/** App 紀錄的實際分鐘 → 對齊平台口徑的實際分鐘 */
+function platformAct(act: number, p: StatsParams): number {
+  const off = Number.isFinite(p.actualOffsetSec) ? p.actualOffsetSec : 0;
+  return act + off / 60;
+}
 
 /** 準時率兩層：目標（onTimeRate，預設 50%）與底線（onTimeFloor，預設 40%）；超時率單一門檻（≤ overrunRate，預設 20%） */
 export type Goals = { onTimeRate: number; onTimeFloor: number; overrunRate: number };
@@ -32,13 +42,13 @@ export function graceLine(est: number, p: StatsParams = DEFAULT_STATS): number {
 const EPS = 1e-9;
 
 export function isOnTime(s: Sample, p: StatsParams = DEFAULT_STATS): boolean {
-  return s.act <= graceLine(s.est, p) + EPS;
+  return platformAct(s.act, p) <= graceLine(s.est, p) + EPS;
 }
 
 export function overrunRatio(s: Sample, p: StatsParams = DEFAULT_STATS): number {
   const line = graceLine(s.est, p);
   if (!(line > 0)) return 0;
-  return Math.min(p.overrunCap, Math.max(0, (s.act - line) / line));
+  return Math.min(p.overrunCap, Math.max(0, (platformAct(s.act, p) - line) / line));
 }
 
 export type Summary = {

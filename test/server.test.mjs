@@ -267,7 +267,7 @@ test('v0.7 config：檔案沒有 offer/stats（例如 v0.6 時代的 config.json
   assert.deepEqual(body.offer, DEFAULT_CFG.offer);
   assert.equal(body.offer.decideWindowSec, 25);
   assert.equal(body.offer.ambiguousAs, 'accept');
-  assert.deepEqual(body.stats, { graceFactor: 1.05, overrunCap: 1 });
+  assert.deepEqual(body.stats, { graceFactor: 1.05, overrunCap: 1, actualOffsetSec: 0 });
   // 只覆寫部分 offer 欄位 → 其餘仍是預設
   fs.writeFileSync(cfgPath(), JSON.stringify({ version: 'v07-part', offer: { decideWindowSec: 40 } }));
   const part = await (await fetch(`${base}/api/config`)).json();

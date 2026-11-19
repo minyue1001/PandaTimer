@@ -156,6 +156,7 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'offer.maxBundle': [1, 4, true], // v1.2 組合單最多拆幾張（1＝不拆；order 槽 mod 4）
   'stats.graceFactor': [1, 2, false],
   'stats.overrunCap': [0.1, 10, false],
+  'stats.actualOffsetSec': [0, 300, true], // v1.2.5 實際時間校正（秒）
   'pay.ratePerMinute': [0.1, 100, false],
   'pay.minFare': [0, 1000, false],
   'delivery.minOrderAgeSec': [0, 1800, true],
