@@ -380,7 +380,7 @@ export class DeliveryWatch {
  * seq＝null 代表 plain（noNumber/unbound/slotReused）。
  */
 export type GateSignal = { seq: number | null; delaySec: number };
-export type GateDropReason = 'sameDelivery' | 'sameSeq' | 'superseded' | 'heldPlain';
+export type GateDropReason = 'sameDelivery' | 'sameSeq' | 'superseded' | 'heldPlain' | 'reappeared';
 export type GateAction<T extends GateSignal> =
   /** 送出（delaySec＝原 delay＋暫緩秒數，上限 60；heldSec＝暫緩了幾秒） */
   | { kind: 'send'; signal: T; delaySec: number; heldSec: number }
@@ -426,6 +426,14 @@ export class DeliveryGate<T extends GateSignal = GateSignal> {
   tick(now: number): GateAction<T>[] {
     if (this.held == null || now - this.held.at < this.plainHoldSec) return [];
     return this.flush(now);
+  }
+
+  /** v1.2.7 暫緩期間同一個送達確認畫面又出現（DeliveryWatch visible）＝剛才的「消失」只是閃爍 → 丟掉暫緩中的 plain */
+  cancelHeld(): GateAction<T>[] {
+    if (this.held == null) return [];
+    const signal = this.held.signal;
+    this.held = null;
+    return [{ kind: 'drop', signal, reason: 'reappeared' }];
   }
 
   /** 廣播停止：暫緩中的 plain 立刻送（不能丟：可能是唯一的送達訊號） */

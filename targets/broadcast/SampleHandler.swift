@@ -895,6 +895,8 @@ final class BroadcastDetector {
       fields["note"] = "visible"
       fields["matched"] = watch.knowsNumber
       telemetry.log("delivered_seen", fields)
+      // v1.2.7 暫緩中的 plain：確認畫面又出現＝剛才只是閃爍 → 丟掉（有單號的訊號不受影響）
+      applyGate(gate.cancelHeld())
     case .repeatSuppressed:
       fields["note"] = "repeat"
       telemetry.log("delivered_seen", fields)

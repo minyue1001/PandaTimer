@@ -366,7 +366,7 @@ final class DeliveryGate {
     /// delay＝原 delay＋暫緩秒數（≤60）；held＝暫緩了幾秒
     case send(Signal, delay: Int, held: Int)
     case hold(Signal)
-    /// reason：sameDelivery / sameSeq / superseded / heldPlain
+    /// reason：sameDelivery / sameSeq / superseded / heldPlain / reappeared
     case drop(Signal, reason: String)
   }
 
@@ -399,6 +399,13 @@ final class DeliveryGate {
   func tick(_ now: Date) -> [Action] {
     guard let h = held, now.timeIntervalSince(h.at) >= plainHoldSec else { return [] }
     return flush(now)
+  }
+
+  /// v1.2.7 暫緩期間同一個送達確認畫面又出現（DeliveryWatch visible）＝剛才的「消失」只是閃爍 → 丟掉暫緩中的 plain
+  func cancelHeld() -> [Action] {
+    guard let h = held else { return [] }
+    held = nil
+    return [.drop(h.signal, reason: "reappeared")]
   }
 
   /// 廣播停止：暫緩中的 plain 立刻送（可能是唯一的送達訊號）
