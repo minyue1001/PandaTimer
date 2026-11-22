@@ -123,6 +123,13 @@ enum ScreenInfo {
     /// v1.2：去掉常駐字（offer.weakAcceptedKeywords）後仍命中 acceptedKeywords＝強證據；命中常駐字
     let acceptStrong: Bool
     let acceptWeak: Bool
+    /// v1.2.8：去掉常駐字後命中 acceptedKeywords 的每一段字的摘要（termDigest；隱私：不留原文、不上傳）、
+    /// 每段字所有 ≥2 字子字串的摘要（邀請前紀錄用：OCR 少讀前後字也算看過）
+    let acceptTerms: [String]
+    let acceptTermParts: [String]
+    /// v1.2.8：取餐確認畫面（已取餐）；別的 pandarider 頁（有白名單字、沒有強接單字、不是邀請卡、沒有接單鈕）
+    let pickedUp: Bool
+    let otherPage: Bool
     /// v1.2：「N筆訂單」的 N（1~9）、畫面有「疊單」
     let orders: Int?
     let stackScreen: Bool
@@ -135,6 +142,9 @@ enum ScreenInfo {
   private static let tipPattern = "包含[額额]外(?:NT)?[$＄]?([0-9]{1,4}(?:[.．][0-9]{1,2})?)"
   private static let ordersPattern = "([1-9])(?:筆|笔)(?:訂單|订单)"
   private static let stackScreenPattern = "疊單|叠单"
+  /// v1.2.8（＝src/screenInfo.ts PICKED_UP_RX / OFFER_CARD_RX）
+  static let pickedUpPattern = "已取餐|已取单"
+  static let offerCardPattern = "每單收入|每单收入|夾單|夹单"
 
   /// 去空白文字 → 小費整數元（1~2000）；沒有 → nil（＝TS extractTip）
   static func extractTip(_ compactText: String) -> Int? {
@@ -167,6 +177,48 @@ enum ScreenInfo {
     let ns = compactText as NSString
     return regex.matches(in: compactText, options: [], range: NSRange(location: 0, length: ns.length))
       .filter { $0.range.length > 0 }.count
+  }
+
+  /// v1.2.8 字串 → 不可還原的短摘要（FNV-1a 32 位元、UTF-16 碼元、8 位小寫十六進位）（＝TS termDigest）
+  static func termDigest<C: Collection>(_ units: C) -> String where C.Element == UInt16 {
+    var h: UInt32 = 0x811c_9dc5
+    for u in units {
+      h ^= UInt32(u)
+      h = h &* 0x0100_0193
+    }
+    return String(format: "%08x", h)
+  }
+
+  /// v1.2.8 一段字所有 ≥2 碼元子字串的摘要（不重複；超過 16 碼元只算整段）（＝TS termParts）
+  static func termParts(_ term: String) -> [String] {
+    let u = Array(term.utf16)
+    if u.count > 16 { return [termDigest(u)] }
+    var out: [String] = []
+    for i in 0..<u.count {
+      var j = i + 2
+      while j <= u.count {
+        let d = termDigest(u[i..<j])
+        if !out.contains(d) { out.append(d) }
+        j += 1
+      }
+    }
+    return out
+  }
+
+  /// v1.2.8 去空白文字裡命中 pattern 的所有字（不重複、依出現順序；編不過 → fallback；空字串命中不算）（＝TS allOfferMatches）
+  static func allOfferMatches(_ compactText: String, _ pattern: String, fallback: String) -> [String] {
+    guard !compactText.isEmpty,
+          let regex = (try? NSRegularExpression(pattern: pattern, options: []))
+            ?? (try? NSRegularExpression(pattern: fallback, options: []))
+    else { return [] }
+    let ns = compactText as NSString
+    var out: [String] = []
+    for m in regex.matches(in: compactText, options: [], range: NSRange(location: 0, length: ns.length))
+    where m.range.location != NSNotFound && m.range.length > 0 {
+      let t = ns.substring(with: m.range)
+      if !out.contains(t) { out.append(t) }
+    }
+    return out
   }
 
   /// 常駐字換成分隔符「|」（＝TS stripWeak）
@@ -263,6 +315,20 @@ enum ScreenInfo {
       ? firstOfferMatch(
         stripWeak(text, rules.weakAcceptedKeywords), rules.acceptedKeywords, fallback: OfferSettings.defaultAcceptedKeywords)
       : acc
+    // v1.2.8：所有強接單字（邀請前看過的不算接單證據，見 OfferTracker.acceptEvidence）；原文只在這裡，立刻換成摘要
+    let rawTerms: [String] = strong == nil
+      ? []
+      : allOfferMatches(
+        weak != nil ? stripWeak(text, rules.weakAcceptedKeywords) : text, rules.acceptedKeywords,
+        fallback: OfferSettings.defaultAcceptedKeywords)
+    var terms: [String] = []
+    var parts: [String] = []
+    for r in rawTerms {
+      let d = termDigest(r.utf16)
+      if !terms.contains(d) { terms.append(d) }
+      for p in termParts(r) where !parts.contains(p) { parts.append(p) }
+    }
+    let offerCard = firstOfferMatch(text, offerCardPattern, fallback: offerCardPattern) != nil
     return Summary(
       accept: accept,
       minutes: minutes,
@@ -279,6 +345,10 @@ enum ScreenInfo {
       stacked: stacked,
       acceptStrong: strong != nil,
       acceptWeak: weak != nil,
+      acceptTerms: terms,
+      acceptTermParts: parts,
+      pickedUp: firstOfferMatch(text, pickedUpPattern, fallback: pickedUpPattern) != nil,
+      otherPage: !accept && !kw.isEmpty && terms.isEmpty && !offerCard,
       orders: extractOrderCount(text),
       stackScreen: firstOfferMatch(text, stackScreenPattern, fallback: stackScreenPattern) != nil,
       bundle: countMatches(text, rules.bundleKeywords, fallback: OfferSettings.defaultBundleKeywords),

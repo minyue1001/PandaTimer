@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { evenSplit, screenOrderCount, ScreenOrdersWatch, splitBundle } from '../src/offerBundle.ts';
-import { DEFAULT_OFFER, OfferTracker, acceptEvidence, fareCents, plausibleAmount, sameOffer } from '../src/offerTracker.ts';
+import { BASELINE_SEC, DEFAULT_OFFER, OfferTracker, acceptEvidence, fareCents, plausibleAmount, sameOffer } from '../src/offerTracker.ts';
 import { extractOrderCount, extractTip, summarizeScreen } from '../src/screenInfo.ts';
 import { exactFare } from '../src/orders.ts';
 import {
@@ -191,7 +191,7 @@ test('筆訂單/取餐體驗單獨命中不算接單證據；「取餐體驗」�
   assert.equal(acceptEvidence({ baseWeak: false, baseOrders: null }, { offerAccepted: false }), false);
 });
 
-test('11:53 實機重現：送前一張（畫面一直有 1筆訂單）時沒接 14 分邀請 → 不判 accepted；邀請前的紀錄只看 120 秒內', () => {
+test('11:53 實機重現：送前一張（畫面一直有 1筆訂單）時沒接 14 分邀請 → 不判 accepted；邀請前的紀錄只看 BASELINE_SEC（v1.2.8 600）秒內', () => {
   const s = (t) => summarizeScreen(t);
   const run = (gap) => {
     const t = new OfferTracker({ ...DEFAULT_OFFER, ambiguousAs: 'reject', decideWindowSec: 45 }, 90);
@@ -206,8 +206,8 @@ test('11:53 實機重現：送前一張（畫面一直有 1筆訂單）時沒接
   };
   const d = run(10);
   assert.deepEqual([d.result, d.reason], ['reject', 'timeout']);
-  // 常駐字是 3 分鐘前看到的（超過 BASELINE_SEC）→ 當作邀請前沒看過 → 算接單
-  const d2 = run(200);
+  // 常駐字是 BASELINE_SEC 以前看到的 → 當作邀請前沒看過 → 算接單
+  const d2 = run(BASELINE_SEC + 100);
   assert.deepEqual([d2.result, d2.reason], ['accept', 'accepted']);
 });
 
@@ -372,8 +372,8 @@ test('Darwin 名稱：v1.2 共 874 個（< 1000）；Swift DetectorHub/extension
     'max(4500, minutes * 24500 / 60 + 1)',
     'if !plausible(minutesA, amountA) || !plausible(minutesB, amountB) { return true }',
     'let better = !plausible(offer.minutes, offer.amount) && plausible(offer.minutes, amount)',
-    'static let baselineSec: TimeInterval = 120',
-    'if !offer.baseWeak { return true }',
+    `static let baselineSec: TimeInterval = ${BASELINE_SEC}`,
+    'if !o.acceptStrong { return !offer.baseWeak }',
     `static let defaultWeakAcceptedKeywords = "${DEFAULT_OFFER.weakAcceptedKeywords}"`,
     `static let defaultBundleKeywords = "${DEFAULT_OFFER.bundleKeywords}"`,
     `var maxBundle = ${DEFAULT_OFFER.maxBundle}`,

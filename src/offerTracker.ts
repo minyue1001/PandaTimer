@@ -29,6 +29,11 @@
 //   v1.2.4（11/18 14:38、15:01 實機）：邀請消失後「第一次」沒接單鈕的畫面就是接單後畫面（抵達店家…），但 goneAfterMisses=2
 //     時那一幀只算 miss、不看關鍵字；下一幀（地圖/空白）沒字 → 等到逾時判未接。→ 消失途中（未滿 goneAfterMisses）看到的
 //     接單/未接證據先記著（missEvidence），進 deciding 那一幀自己沒證據就用它（acceptedAt 仍＝goneAt）；接單鈕又出現就清掉。
+//   v1.2.8（11/22 09:17、09:19、09:31 實機：帶著單時沒接的邀請，消失後露出原本那張的「抵達店家/即將準備完成」→ 被判接單）：
+//     接單證據必須是「邀請前沒有的新東西」——②的規則推廣到所有接單字：邀請前 BASELINE_SEC 秒內的非邀請畫面（任何狀態，
+//     不只 idle）出現過的接單字（acceptTerms 摘要；OCR 少讀前後字也算看過：看過的字包含它即可）不算證據。仍成立：邀請前沒看過的接單字、
+//     「N筆訂單」比邀請前大、只剩常駐字且邀請前沒看過常駐字。送達/取餐確認/別的 pandarider 頁之前的紀錄過期（resetLevel、
+//     baselineOf）。證據不足 → 到期依 ambiguousAs（線上 reject）→ App「你有接嗎？」卡補記。
 import { amountKey } from './ocrPick.ts';
 import {
   DEFAULT_ACCEPTED_KEYWORDS,
@@ -71,8 +76,19 @@ export const DEFAULT_OFFER: Readonly<OfferSettings> = Object.freeze({
   maxBundle: 4,
 });
 
-/** v1.2：邀請出現前多少秒內的畫面算「邀請前」（常駐字判斷用） */
-export const BASELINE_SEC = 120;
+/** v1.2：邀請出現前多少秒內的畫面算「邀請前」；v1.2.8 120 → 600（11/22 09:17 帶單畫面在邀請前 123 秒、09:31 在 531 秒） */
+export const BASELINE_SEC = 600;
+/** v1.2.8：邀請前這麼多秒內看過「N筆訂單」N≥2（手上不只一張，另一家店的頁面隨時會再出現）→ 別的頁不讓紀錄過期 */
+export const MULTI_SEC = 300;
+/** v1.2 常駐字/「N筆訂單」：邀請前這麼多秒內看過就算（不受過期標記影響＝v1.2 原規則；過期標記只管店家頁的接單字） */
+export const WEAK_BASELINE_SEC = 120;
+/** v1.2.8 紀錄最多幾幀（記憶體上限；＝Swift OfferTracker.maxLog） */
+export const MAX_BASELINE_LOG = 800;
+
+/** v1.2.8 邀請前紀錄的一幀（非邀請畫面）；reset：0＝無、1＝別的頁（soft）、2＝送達/取餐確認（hard） */
+export type BaselineEntry = { at: number; weak: boolean; orders: number | null; terms: string[]; reset: 0 | 1 | 2 };
+
+export type Baseline = { weak: boolean; orders: number | null; terms: string[] };
 
 /** 狀態機只吃這些（ScreenSummary 的子集合）；OCR 原文不進來 */
 export type OfferObservation = {
@@ -91,6 +107,14 @@ export type OfferObservation = {
   acceptWeak?: boolean;
   /** v1.2：「N筆訂單」的 N */
   orders?: number | null;
+  /** v1.2.8：去掉常駐字後命中的接單字摘要（沒有這欄 → 強證據一律算新的＝舊行為）；子字串摘要（邀請前紀錄用，沒有 → 用 acceptTerms） */
+  acceptTerms?: string[];
+  acceptTermParts?: string[];
+  /** v1.2.8：送達畫面（delivery.completedKeywords）、取餐確認畫面（已取餐）→ 更早的紀錄過期（resetLevel 2） */
+  delivered?: boolean;
+  pickedUp?: boolean;
+  /** v1.2.8：別的 pandarider 頁（ScreenSummary.otherPage）→ 更早的紀錄過期（resetLevel 1） */
+  otherPage?: boolean;
   /** v1.2：「送餐資訊」出現次數 */
   bundle?: number;
   /** v1.2：小費（整數元） */
@@ -113,6 +137,8 @@ export type Offer = {
   /** v1.2 邀請出現前 BASELINE_SEC 秒內：有沒有看過常駐字、最大的「N筆訂單」 */
   baseWeak: boolean;
   baseOrders: number | null;
+  /** v1.2.8 邀請前看過的接單字（子字串摘要，見 baselineOf） */
+  baseTerms: string[];
 };
 
 export type DecisionReason = 'accepted' | 'rejected' | 'timeout' | 'superseded' | 'replaced' | 'stopped';
@@ -178,8 +204,8 @@ export class OfferTracker {
   private ignored: { minutes: number; amount: number | null } | null = null;
   private idleMisses = 0;
   private recentAccepted: { minutes: number; amount: number | null; at: number }[] = [];
-  /** v1.2 idle 時的畫面紀錄（常駐字/N筆訂單），只留 BASELINE_SEC 秒 */
-  private idleLog: { at: number; weak: boolean; orders: number | null }[] = [];
+  /** v1.2 非邀請畫面紀錄（常駐字/N筆訂單；v1.2.8 加接單字與過期標記、任何狀態都記），只留 BASELINE_SEC 秒 */
+  private idleLog: BaselineEntry[] = [];
   /** v1.2.4 offered 消失途中（misses < goneAfterMisses）第一個有證據的畫面 */
   private missEvidence: { accept: boolean; reject: boolean; kw: string[]; hit: string[] } | null = null;
 
@@ -260,11 +286,10 @@ export class OfferTracker {
         return out;
       }
       this.ignored = null;
-      const base = this.idleLog.filter((e) => now - e.at <= BASELINE_SEC);
-      const baseOrders = base.reduce<number | null>((m, e) => (e.orders != null && (m == null || e.orders > m) ? e.orders : m), null);
+      const base = baselineOf(this.idleLog, now);
       const offer: Offer = {
         minutes, amount: o.amount, key: offerKeyOf(minutes, o.amount), firstSeen: now, lastSeen: now, stacked: !!o.stacked,
-        bundle: 0, tip: null, baseWeak: base.some((e) => e.weak), baseOrders,
+        bundle: 0, tip: null, baseWeak: base.weak, baseOrders: base.orders, baseTerms: base.terms,
       };
       this.noteExtras(offer, o);
       this.state = { kind: 'offered', offer, misses: 0, firstMissAt: null };
@@ -272,13 +297,12 @@ export class OfferTracker {
       return out;
     }
 
-    // 畫面上沒有接單鈕
+    // 畫面上沒有接單鈕：v1.2.8 任何狀態都記進邀請前紀錄（判定中/消失途中的畫面對「下一張」也是邀請前）
+    this.noteScreen(now, o);
     const st = this.state;
     if (st.kind === 'idle') {
       this.idleMisses += 1;
       if (this.idleMisses >= s.goneAfterMisses) this.ignored = null;
-      this.idleLog = this.idleLog.filter((e) => now - e.at <= BASELINE_SEC);
-      this.idleLog.push({ at: now, weak: !!o.acceptWeak, orders: o.orders ?? null });
       return out;
     }
     if (st.kind === 'offered') {
@@ -345,6 +369,14 @@ export class OfferTracker {
     }
   }
 
+  /** v1.2.8 非邀請畫面進紀錄（只留 BASELINE_SEC 秒；過期標記見 resetLevel） */
+  private noteScreen(now: number, o: OfferObservation): void {
+    this.idleLog = this.idleLog.filter((e) => now - e.at <= BASELINE_SEC);
+    const terms = o.acceptTermParts ?? o.acceptTerms ?? [];
+    this.idleLog.push({ at: now, weak: !!o.acceptWeak, orders: o.orders ?? null, terms, reset: resetLevel(o) });
+    if (this.idleLog.length > MAX_BASELINE_LOG) this.idleLog.splice(0, this.idleLog.length - MAX_BASELINE_LOG);
+  }
+
   /** v1.2 組合單張數取最大、小費取最近讀到的 */
   private noteExtras(offer: Offer, o: OfferObservation): void {
     if (o.bundle != null && o.bundle > offer.bundle) offer.bundle = o.bundle;
@@ -380,14 +412,58 @@ export class OfferTracker {
 }
 
 /**
- * v1.2 判定中這次畫面算不算「接了」：沒命中 acceptedKeywords → 否；去掉常駐字還命中（強證據）→ 是；
- * 只剩常駐字 → 邀請前沒看過常駐字（例：空手接單後才出現「1筆訂單」）或 N 比邀請前大（疊單 1→2）才算。
+ * v1.2.8 這個非邀請畫面讓更早看過的接單字過期到什麼程度（這一幀自己照算）：
+ *   2（hard）送達畫面（delivered：完成訂單/已送達…，前一張結束）、取餐確認（pickedUp：已取餐，那家店的頁面不會再出現；
+ *     11/15 02:45、02:48 實機：剛按已取餐就接疊單）；
+ *   1（soft）別的 pandarider 頁（otherPage：送達$/取消/送餐段/地圖…；或「1筆訂單」且沒有強接單字）＝使用者離開過店家頁，
+ *     之後再出現店家頁＝App 換頁了（11/15 13:29、19:02、11/17 19:05、22:26、11/19 20:51 實機：取消上一張→接新單，
+ *     中間都有「送達 $金額」頁；11/22 10:05：8 分鐘前的抵達店家）。
  */
-export function acceptEvidence(offer: Pick<Offer, 'baseWeak' | 'baseOrders'>, o: OfferObservation): boolean {
+export function resetLevel(o: OfferObservation): 0 | 1 | 2 {
+  if (o.delivered || o.pickedUp) return 2;
+  if (o.otherPage || (o.orders === 1 && !(o.acceptTerms ?? []).length)) return 1;
+  return 0;
+}
+
+/**
+ * v1.2.8 邀請出現時（now）的「邀請前」：BASELINE_SEC 秒內從最新往回累積接單字/常駐字/最大 N，遇到過期標記就停（那一幀算進去）；
+ * 常駐字/N 另外 WEAK_BASELINE_SEC 秒內看過就算（v1.2 原規則，不看過期標記；11/15 02:02 實機：邀請滑入前一幀只有「夾單」）。
+ * hard 一定停；soft 只在「MULTI_SEC 秒內沒看過 N≥2」時停（手上兩張以上時另一家店的頁面會再出現：11/22 09:31 實機，
+ * 送餐段「2筆訂單」頁、「送達 $」頁之後跳邀請，消失後露出 9 分鐘前那家店的頁面）。
+ */
+export function baselineOf(log: readonly BaselineEntry[], now: number): Baseline {
+  const recent = log.filter((e) => e.at <= now && now - e.at <= BASELINE_SEC);
+  const multi = recent.some((e) => now - e.at <= MULTI_SEC && e.orders != null && e.orders >= 2);
+  const out: Baseline = { weak: false, orders: null, terms: [] };
+  const take = (e: BaselineEntry) => {
+    if (e.weak) out.weak = true;
+    if (e.orders != null && (out.orders == null || e.orders > out.orders)) out.orders = e.orders;
+  };
+  for (const e of recent) if (now - e.at <= WEAK_BASELINE_SEC) take(e);
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const e = recent[i];
+    take(e);
+    for (const t of e.terms) if (!out.terms.includes(t)) out.terms.push(t);
+    if (e.reset === 2 || (e.reset === 1 && !multi)) break;
+  }
+  return out;
+}
+
+/**
+ * 判定中這次畫面算不算「接了」：沒命中 acceptedKeywords → 否；「N筆訂單」比邀請前大（疊單 1→2）→ 是；
+ * v1.2.8 去掉常駐字還命中（強證據）→ 其中有邀請前沒看過的接單字才算（邀請前看過的字包含它＝看過：OCR 少讀前後字）；
+ * v1.2 只剩常駐字 → 邀請前沒看過常駐字（例：空手接單後才出現「1筆訂單」）才算。
+ */
+export function acceptEvidence(
+  offer: Pick<Offer, 'baseWeak' | 'baseOrders'> & { baseTerms?: string[] },
+  o: OfferObservation,
+): boolean {
   if (!o.offerAccepted) return false;
-  if (o.acceptStrong ?? true) return true;
-  if (!offer.baseWeak) return true;
-  return o.orders != null && offer.baseOrders != null && o.orders > offer.baseOrders;
+  if (o.orders != null && offer.baseOrders != null && o.orders > offer.baseOrders) return true;
+  if (!(o.acceptStrong ?? true)) return !offer.baseWeak;
+  if (!o.acceptTerms) return true;
+  const base = offer.baseTerms ?? [];
+  return o.acceptTerms.some((t) => !base.includes(t));
 }
 
 /** extension → App 的延遲秒數（App 用「收到時間 − 延遲」還原 acceptedAt）：四捨五入、夾在 0…60 */

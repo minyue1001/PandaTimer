@@ -129,6 +129,15 @@ export type ScreenSummary = {
   acceptStrong: boolean;
   /** v1.2：命中常駐字（送單中畫面本來就一直在的「N筆訂單」「取餐體驗」） */
   acceptWeak: boolean;
+  /** v1.2.8：去掉常駐字後命中 acceptedKeywords 的每一段字的摘要（termDigest，不重複；隱私：不留原文，只在記憶體比對
+   *  「邀請前有沒有看過」，不上傳）；acceptTermParts＝每段字所有 ≥2 字子字串的摘要（邀請前紀錄用：OCR 少讀前後字也算看過） */
+  acceptTerms: string[];
+  acceptTermParts: string[];
+  /** v1.2.8：取餐確認畫面（「已取餐」：是否已取餐?／確認已取餐）→ 邀請前紀錄過期（寫死、不加遠端鍵） */
+  pickedUp: boolean;
+  /** v1.2.8：別的 pandarider 頁（有白名單字、沒有任何強接單字、不是邀請卡「每單收入」、沒有接單鈕：送達/取消/送餐段/地圖…）
+   *  → 使用者離開過店家頁，之前看到的店家頁字樣過期 */
+  otherPage: boolean;
   /** v1.2：「N筆訂單」的 N（1~9；沒讀到數字 → null） */
   orders: number | null;
   /** v1.2：畫面有「疊單」字樣 */
@@ -163,6 +172,10 @@ const TIP_RX = /包含[額额]外(?:NT)?[$＄]?([0-9]{1,4}(?:[.．][0-9]{1,2})?)
 /** v1.2「預計7分鐘後抵達店家・2筆訂單」→ 2（數字緊接「筆訂單」） */
 const ORDERS_RX = /([1-9])(?:筆|笔)(?:訂單|订单)/;
 const STACK_SCREEN_RX = /疊單|叠单/;
+/** v1.2.8 取餐確認畫面（＝Swift ScreenInfo.pickedUpPattern） */
+const PICKED_UP_RX = /已取餐|已取单/;
+/** v1.2.8 邀請卡（滑入/滑出中、接單鈕還沒讀到：每單收入、夾單邀請上方的「夾單」）不算「別的頁」（＝Swift ScreenInfo.offerCardPattern） */
+const OFFER_CARD_RX = /每單收入|每单收入|夾單|夹单/;
 
 /** 去空白文字 → 小費整數元（1~2000）；沒有/不合理 → null */
 export function extractTip(compact: string): number | null {
@@ -248,6 +261,42 @@ function firstOfferMatch(compact: string, pattern: string | undefined, fallback:
   return m && m[0].length > 0 ? m[0] : null;
 }
 
+/** v1.2.8 字串 → 不可還原的短摘要（FNV-1a 32 位元、UTF-16 碼元、8 位小寫十六進位；＝Swift ScreenInfo.termDigest） */
+export function termDigest(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+/** v1.2.8 一段字所有 ≥2 碼元子字串的摘要（不重複；超過 16 碼元只算整段）（＝Swift ScreenInfo.termParts） */
+export function termParts(term: string): string[] {
+  if (term.length > 16) return [termDigest(term)];
+  const out: string[] = [];
+  for (let i = 0; i < term.length; i++) {
+    for (let j = i + 2; j <= term.length; j++) {
+      const d = termDigest(term.slice(i, j));
+      if (!out.includes(d)) out.push(d);
+    }
+  }
+  return out;
+}
+
+/** v1.2.8 去空白文字裡命中 pattern 的所有字（不重複、依出現順序；編不過 → fallback；空字串命中不算） */
+export function allOfferMatches(compact: string, pattern: string | undefined, fallback: string): string[] {
+  let r: RegExp;
+  try {
+    r = new RegExp(pattern ?? fallback, 'g');
+  } catch {
+    r = new RegExp(fallback, 'g');
+  }
+  const out: string[] = [];
+  for (const m of compact.matchAll(r)) if (m[0].length > 0 && !out.includes(m[0])) out.push(m[0]);
+  return out;
+}
+
 /** OCR 文字 → 結構化摘要（Swift 版 ScreenInfo.analyze）。minutes 只在有接單鈕時才挑（同 OrderDetector.detect）。
  *  v0.6：規則可用遠端設定覆寫（picker / detector.acceptPattern / telemetry.keywords） */
 export function summarizeScreen(raw: string | null | undefined, rules: ScreenRules = DEFAULT_SCREEN_RULES): ScreenSummary {
@@ -263,6 +312,12 @@ export function summarizeScreen(raw: string | null | undefined, rules: ScreenRul
   const minutes = accept ? pickMinutes(raw, rules.picker) : null;
   const weak = compact && acc ? firstOfferMatch(compact, rules.weakAcceptedKeywords, DEFAULT_WEAK_ACCEPTED_KEYWORDS) : null;
   const strong = acc && weak ? firstOfferMatch(stripWeak(compact, rules.weakAcceptedKeywords), rules.acceptedKeywords, DEFAULT_ACCEPTED_KEYWORDS) : acc;
+  // v1.2.8：原文只在這裡，立刻換成摘要
+  const raw8 = strong
+    ? allOfferMatches(weak ? stripWeak(compact, rules.weakAcceptedKeywords) : compact, rules.acceptedKeywords, DEFAULT_ACCEPTED_KEYWORDS)
+    : [];
+  const terms = [...new Set(raw8.map(termDigest))];
+  const parts = [...new Set(raw8.flatMap(termParts))];
   return {
     accept,
     minutes,
@@ -279,6 +334,10 @@ export function summarizeScreen(raw: string | null | undefined, rules: ScreenRul
     stacked,
     acceptStrong: strong != null,
     acceptWeak: weak != null,
+    acceptTerms: terms,
+    acceptTermParts: parts,
+    pickedUp: compact ? PICKED_UP_RX.test(compact) : false,
+    otherPage: !accept && kw.length > 0 && terms.length === 0 && !OFFER_CARD_RX.test(compact),
     orders: compact ? extractOrderCount(compact) : null,
     stackScreen: compact ? STACK_SCREEN_RX.test(compact) : false,
     bundle: compact ? countMatches(compact, rules.bundleKeywords, DEFAULT_BUNDLE_KEYWORDS) : 0,

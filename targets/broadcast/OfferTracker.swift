@@ -24,6 +24,10 @@ import Foundation
 //     ② 判定時只命中常駐字（offer.weakAcceptedKeywords：筆訂單/取餐體驗）→ 邀請前 baselineSec 秒內沒看過常駐字、
 //        或「N筆訂單」比邀請前大才算接單，否則當沒命中。
 //     ③ Offer 記「送餐資訊」最大次數（bundle）與小費（tip）；接單後 BundleSplit 拆單。ScreenOrdersWatch：送單畫面 N 筆訂單去抖。
+//   v1.2.8（11/22 09:17、09:19、09:31 實機：帶著單時沒接的邀請，消失後露出原本那張的店家頁 → 被判接單；＝TS，以 TS 測試為準）：
+//     接單證據要是「邀請前沒有的新東西」：邀請前 baselineSec 秒內非邀請畫面（任何狀態）看過的接單字（acceptTerms，看過的字
+//     包含它就算看過）不算；「N筆訂單」變大、只剩常駐字且邀請前沒看過常駐字照舊算。紀錄從最新往回累積，遇送達/取餐確認（hard）
+//     停、遇別的 pandarider 頁（soft）在 multiSec 秒內沒看過 N≥2 時停（resetLevel / baselineOf）。
 
 /// 遠端設定 "offer" 區塊（預設＝src/offerTracker.ts 的 DEFAULT_OFFER＝server/config.default.json；範圍同 RANGES）
 struct OfferSettings {
@@ -84,6 +88,12 @@ struct OfferObservation {
   let orders: Int?
   let bundle: Int
   let tip: Int?
+  /// v1.2.8
+  let acceptTerms: [String]
+  let acceptTermParts: [String]
+  let delivered: Bool
+  let pickedUp: Bool
+  let otherPage: Bool
 
   init(_ s: ScreenInfo.Summary) {
     accept = s.accept
@@ -99,6 +109,11 @@ struct OfferObservation {
     orders = s.orders
     bundle = s.bundle
     tip = s.tip
+    acceptTerms = s.acceptTerms
+    acceptTermParts = s.acceptTermParts
+    delivered = s.delivered
+    pickedUp = s.pickedUp
+    otherPage = s.otherPage
   }
 }
 
@@ -116,6 +131,17 @@ struct Offer {
   var tip: Int?
   var baseWeak = false
   var baseOrders: Int?
+  /// v1.2.8 邀請前看過的接單字（子字串摘要）
+  var baseTerms: [String] = []
+}
+
+/// v1.2.8 邀請前紀錄的一幀（非邀請畫面）；reset：0＝無、1＝別的頁（soft）、2＝送達/取餐確認（hard）（＝TS BaselineEntry）
+struct BaselineEntry {
+  let at: Date
+  let weak: Bool
+  let orders: Int?
+  let terms: [String]
+  let reset: Int
 }
 
 struct OfferDecision {
@@ -155,9 +181,15 @@ final class OfferTracker {
   private var ignored: (minutes: Int, amount: Double?)?
   private var idleMisses = 0
   private var recentAccepted: [(minutes: Int, amount: Double?, at: Date)] = []
-  /// v1.2 idle 時的畫面紀錄（常駐字/N筆訂單），只留 baselineSec 秒（＝TS BASELINE_SEC）
-  static let baselineSec: TimeInterval = 120
-  private var idleLog: [(at: Date, weak: Bool, orders: Int?)] = []
+  /// v1.2 非邀請畫面紀錄（常駐字/N筆訂單；v1.2.8 加接單字與過期標記、任何狀態都記），只留 baselineSec 秒（＝TS BASELINE_SEC）
+  static let baselineSec: TimeInterval = 600
+  /// v1.2.8 邀請前這麼多秒內看過 N≥2 → 別的頁不讓紀錄過期（＝TS MULTI_SEC）
+  static let multiSec: TimeInterval = 300
+  /// v1.2 常駐字/「N筆訂單」：邀請前這麼多秒內看過就算（不受過期標記影響）（＝TS WEAK_BASELINE_SEC）
+  static let weakBaselineSec: TimeInterval = 120
+  /// v1.2.8 紀錄最多幾幀（記憶體上限；OCR 最快 0.6 秒一次 → 600 秒約 1000 幀）（＝TS MAX_BASELINE_LOG）
+  static let maxLog = 800
+  private var idleLog: [BaselineEntry] = []
   /// v1.2.4 offered 消失途中（misses < goneAfterMisses）第一個有證據的畫面（＝TS missEvidence；11/18 14:38、15:01
   /// 接單後畫面正好是第一次沒接單鈕的那幀，只算 miss 沒看字 → 逾時判未接）
   private var missEvidence: (accept: Bool, reject: Bool, kw: [String], hit: [String])?
@@ -206,13 +238,41 @@ final class OfferTracker {
     return out
   }
 
-  /// v1.2 判定中這次畫面算不算「接了」（＝TS acceptEvidence）
+  /// 判定中這次畫面算不算「接了」（＝TS acceptEvidence）：N 變大＝是；v1.2.8 強接單字要有邀請前沒看過的
+  /// （邀請前看過的字包含它＝看過：baseTerms 是子字串摘要）；v1.2 只剩常駐字 → 邀請前沒看過常駐字才算
   static func acceptEvidence(_ offer: Offer, _ o: OfferObservation) -> Bool {
     guard o.offerAccepted else { return false }
-    if o.acceptStrong { return true }
-    if !offer.baseWeak { return true }
-    guard let n = o.orders, let base = offer.baseOrders else { return false }
-    return n > base
+    if let n = o.orders, let base = offer.baseOrders, n > base { return true }
+    if !o.acceptStrong { return !offer.baseWeak }
+    return o.acceptTerms.contains { !offer.baseTerms.contains($0) }
+  }
+
+  /// v1.2.8 這一幀讓更早的紀錄過期到什麼程度：2＝送達/取餐確認、1＝別的頁或「1筆訂單」沒強接單字、0＝無（＝TS resetLevel）
+  static func resetLevel(_ o: OfferObservation) -> Int {
+    if o.delivered || o.pickedUp { return 2 }
+    if o.otherPage || (o.orders == 1 && o.acceptTerms.isEmpty) { return 1 }
+    return 0
+  }
+
+  /// v1.2.8 邀請出現時的「邀請前」：baselineSec 內從最新往回累積，hard 一定停、soft 在 multiSec 內沒看過 N≥2 時停
+  /// （停的那一幀算進去）；常駐字/N 另外 weakBaselineSec 內看過就算（＝TS baselineOf）
+  static func baselineOf(_ log: [BaselineEntry], _ now: Date) -> (weak: Bool, orders: Int?, terms: [String]) {
+    let recent = log.filter { $0.at <= now && now.timeIntervalSince($0.at) <= Self.baselineSec }
+    let multi = recent.contains { now.timeIntervalSince($0.at) <= Self.multiSec && ($0.orders ?? 0) >= 2 }
+    var weak = false
+    var orders: Int?
+    var terms: [String] = []
+    func take(_ e: BaselineEntry) {
+      if e.weak { weak = true }
+      if let n = e.orders, orders.map({ n > $0 }) ?? true { orders = n }
+    }
+    for e in recent where now.timeIntervalSince(e.at) <= Self.weakBaselineSec { take(e) }
+    for e in recent.reversed() {
+      take(e)
+      for t in e.terms where !terms.contains(t) { terms.append(t) }
+      if e.reset == 2 || (e.reset == 1 && !multi) { break }
+    }
+    return (weak, orders, terms)
   }
 
   static func round1(_ x: Double) -> Double {
@@ -294,27 +354,30 @@ final class OfferTracker {
         return out
       }
       ignored = nil
-      let base = idleLog.filter { now.timeIntervalSince($0.at) <= Self.baselineSec }
+      let base = Self.baselineOf(idleLog, now)
       var offer = Offer(
         minutes: minutes, amount: o.amount, key: Self.key(minutes, o.amount), firstSeen: now, lastSeen: now,
         stacked: o.stacked)
-      offer.baseWeak = base.contains { $0.weak }
-      offer.baseOrders = base.compactMap { $0.orders }.max()
+      offer.baseWeak = base.weak
+      offer.baseOrders = base.orders
+      offer.baseTerms = base.terms
       offer = Self.noted(offer, o)
       state = .offered(offer, misses: 0, firstMissAt: nil)
       out.append(.seen(offer))
       return out
     }
 
-    // 畫面上沒有接單鈕
+    // 畫面上沒有接單鈕：v1.2.8 任何狀態都記進邀請前紀錄（判定中/消失途中的畫面對「下一張」也是邀請前）
+    idleLog.removeAll { now.timeIntervalSince($0.at) > Self.baselineSec }
+    idleLog.append(
+      BaselineEntry(at: now, weak: o.acceptWeak, orders: o.orders, terms: o.acceptTermParts, reset: Self.resetLevel(o)))
+    if idleLog.count > Self.maxLog { idleLog.removeFirst(idleLog.count - Self.maxLog) }
     let offer: Offer
     let goneAt: Date
     switch state {
     case .idle:
       idleMisses += 1
       if idleMisses >= s.goneAfterMisses { ignored = nil }
-      idleLog.removeAll { now.timeIntervalSince($0.at) > Self.baselineSec }
-      idleLog.append((at: now, weak: o.acceptWeak, orders: o.orders))
       return out
     case .offered(let current, let misses, let firstMissAt):
       let count = misses + 1
