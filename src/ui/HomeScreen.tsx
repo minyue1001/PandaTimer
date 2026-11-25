@@ -37,6 +37,8 @@ export type HomeProps = {
   };
   gp: GoalProgress;
   goals: Goals;
+  /** v1.3 星號風險單數（本期/今日） */
+  stars: { period: number; today: number };
   todayEarn: EarningsSummary;
   estimateText: string;
   onEstimateChange: (t: string) => void;
@@ -102,8 +104,12 @@ export const HomeScreen = memo(function HomeScreen(p: HomeProps) {
         noStacked={p.stats.noStacked}
         gp={p.gp}
         goals={p.goals}
+        now={p.now}
+        todayCount={p.stats.today.count}
+        periodStar={p.stars.period}
+        todayStar={p.stars.today}
       />
-      <TodayCard today={p.stats.today} earn={p.todayEarn} />
+      <TodayCard today={p.stats.today} earn={p.todayEarn} todayStar={p.stars.today} />
 
       <Collapsible title="✋ 手動開始倒數">
         <Text style={S.label}>預估分鐘</Text>

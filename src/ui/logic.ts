@@ -10,9 +10,11 @@ import { DEFAULT_PAY, fareFor, money, summarizeEarnings, type PayParams } from '
 import {
   DEFAULT_STATS,
   isOnTime,
+  starRisk,
   summarize,
   taipeiDate,
   taipeiDayStart,
+  type CountProgress,
   type GoalProgress,
   type Goals,
   type StatsParams,
@@ -127,7 +129,33 @@ export function powerLine(pw: NonNullable<DetectorStatus['power']>): string {
 
 // ── 本期成績的行動提示 ──
 
-export type Hint = { main: string; tone: Tone; overrun: string | null };
+export type Hint = { main: string; tone: Tone; overrun: string | null; /** v1.3 星號提示（今日有星號風險才有） */ star?: string | null };
+
+/** v1.3 件數＋星號為主的行動提示（準時率/超時率只保留在 overrun 槽的警示） */
+export function countHint(prog: CountProgress, todayStar: number, gp: GoalProgress, goals: Goals): Hint {
+  let main: string;
+  let tone: Tone;
+  if (prog.done) {
+    main = '本期件數已達標 🎉';
+    tone = 'green';
+  } else if (prog.todayLeft > 0) {
+    main = `今天還要 ${prog.todayLeft} 單`;
+    tone = 'yellow';
+  } else {
+    main = `今天的量跑完了（每天 ${prog.perDay} 單），多跑就是賺到`;
+    tone = 'green';
+  }
+  const star = todayStar > 0 ? `今天有 ${todayStar} 張星號風險：單接盯倒數，歸零前送到就不會被打星` : null;
+  let overrun: string | null = null;
+  if (gp.onTimeLevel === 'below') overrun = `準時率低於底線 ${pctText(Math.min(goals.onTimeFloor, goals.onTimeRate))}`;
+  else if (gp.overrunMet === false) overrun = `超時率超過上限 ${pctText(goals.overrunRate)}`;
+  return { main, tone, overrun, star };
+}
+
+/** 「還剩 D 天，平均每天要 X 單」／「已達標 🎉」 */
+export function countPaceText(prog: CountProgress): string {
+  return prog.done ? '已達標 🎉' : `還剩 ${prog.daysLeft} 天，平均每天要 ${prog.perDay} 單`;
+}
 
 /** 一行行動提示（準時率）＋超時率未達標時的第二行 */
 export function actionHint(gp: GoalProgress, goals: Goals): Hint {
@@ -209,7 +237,7 @@ export function orderAmount(o: Pick<Order, 'amount' | 'estimateMin'>, p: PayPara
 }
 
 /** 標籤：自動／匯入／補認／補登（管理頁或對帳新增）／夾單（v1.1 接單時已有進行中單＝疊單） */
-export function orderTags(o: Pick<Order, 'source' | 'stacked' | 'stackKind'> & { noTiming?: boolean }): string[] {
+export function orderTags(o: Pick<Order, 'source' | 'stacked' | 'stackKind'> & { noTiming?: boolean }, star = false): string[] {
   const t: string[] = [];
   if (o.source === 'auto') t.push('自動');
   if (o.source === 'import') t.push('匯入');
@@ -217,6 +245,7 @@ export function orderTags(o: Pick<Order, 'source' | 'stacked' | 'stackKind'> & {
   if (o.source === 'admin') t.push('補登');
   if (o.stacked) t.push(o.stackKind === 'carry' ? '疊單' : '夾單');
   if (o.noTiming) t.push('不計時效');
+  if (star) t.push('星號風險');
   return t;
 }
 
@@ -251,8 +280,8 @@ export function dayTitle(g: { label: string; relative: string }): string {
 }
 
 /** 日標題右側：「11 單 · 準時 45% · $657.80」（金額含小費） */
-export function daySummaryText(s: { count: number; onTimeRate: number | null; payout: number }): string {
-  return `${s.count} 單 · 準時 ${pctText(s.onTimeRate)} · ${money(s.payout)}`;
+export function daySummaryText(s: { count: number; onTimeRate: number | null; payout: number; star?: number }): string {
+  return `${s.count} 單 · 準時 ${pctText(s.onTimeRate)} · ${money(s.payout)}${s.star ? ` · ⭐${s.star}` : ''}`;
 }
 
 /** 日標題下第二行：超時率、小費合計、夾單數；全無則空字串 */
@@ -279,6 +308,8 @@ export type HistRow = {
   tip: number;
   /** v1.2.4 不計時效（灰色、狀態字「不計」） */
   noTiming: boolean;
+  /** v1.3 星號風險（單接又超過預估分鐘） */
+  star: boolean;
   tags: string[];
   /** 「準時」／「超 N 分」 */
   statusText: string;
@@ -286,7 +317,7 @@ export type HistRow = {
   estActText: string;
 };
 
-export type DaySubtotal = { count: number; onTimeRate: number | null; overrunRate: number | null; payout: number; stacked: number; tip: number; noTiming: number };
+export type DaySubtotal = { count: number; onTimeRate: number | null; overrunRate: number | null; payout: number; stacked: number; tip: number; noTiming: number; star: number };
 
 export type DayGroup = {
   /** 台北日期 YYYY-MM-DD */
@@ -350,6 +381,7 @@ export function groupHistory(
     // v1.2.4：準時率/超時率只算計時效的單；收入含全部（不計時效的單補錢 0）
     const sum = summarize(samples.filter((s) => !s.noTiming), stats);
     const earn = summarizeEarnings(samples, pay);
+    const stars = new Set(list.filter((o) => starRisk(o, orders, opts.now)).map((o) => o.id));
     const take = list.slice(0, Math.max(0, limit - shown));
     shown += take.length;
     groups.push({
@@ -371,7 +403,8 @@ export function groupHistory(
           amountEstimated: amt.estimated,
           tip: o.tip ?? 0,
           noTiming: !!o.noTiming,
-          tags: orderTags(o),
+          star: stars.has(o.id),
+          tags: orderTags(o, stars.has(o.id)),
           statusText: rowStatusText({ status: 'delivered', est: o.estimateMin, act, onTime, noTiming: o.noTiming }),
           estActText: estActText({ status: 'delivered', est: o.estimateMin, act }),
         };
@@ -385,6 +418,7 @@ export function groupHistory(
         stacked: list.filter((o) => o.stacked).length,
         tip: earn.tipTotal,
         noTiming: list.filter((o) => o.noTiming).length,
+        star: stars.size,
       },
       hidden: list.length - take.length,
     });

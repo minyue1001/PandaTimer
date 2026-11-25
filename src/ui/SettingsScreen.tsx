@@ -6,7 +6,7 @@ import { OtaBox, type OtaState } from '../OtaBox';
 import { formatClock, type Order } from '../orders';
 import { formatTaipeiDateTime } from '../prune';
 import type { CloudSync } from '../syncClient';
-import { parsePercentInput, type Baseline, type Goals, type StatsParams } from '../stats';
+import { parsePercentInput, parsePeriodOrdersInput, MIN_PERIOD_ORDERS, MAX_PERIOD_ORDERS, type Baseline, type Goals, type StatsParams } from '../stats';
 import { saveBaseline, saveGoals } from '../statsConfig';
 import { Btn, Collapsible, KV } from './common';
 import { BEAT_STALE_SEC, pctText, powerLine } from './logic';
@@ -69,7 +69,7 @@ export function SettingsScreen(p: SettingsProps) {
 }
 
 function GoalsCard({ goals, onGoals, statsParams }: { goals: Goals; onGoals: (g: Goals) => void; statsParams: StatsParams }) {
-  const [draft, setDraft] = useState<{ onTime: string; floor: string; overrun: string } | null>(null);
+  const [draft, setDraft] = useState<{ onTime: string; floor: string; overrun: string; orders: string } | null>(null);
   const onSave = () => {
     if (!draft) return;
     const onTime = parsePercentInput(draft.onTime);
@@ -83,7 +83,12 @@ function GoalsCard({ goals, onGoals, statsParams }: { goals: Goals; onGoals: (g:
       Alert.alert('底線不能高於目標', '例如 準時率目標 50、底線 40');
       return;
     }
-    const next = { onTimeRate: onTime, onTimeFloor: floor, overrunRate: overrun };
+    const periodOrders = parsePeriodOrdersInput(draft.orders);
+    if (periodOrders == null) {
+      Alert.alert('件數目標格式不對', `請輸入 ${MIN_PERIOD_ORDERS}~${MAX_PERIOD_ORDERS} 的整數，例如 375`);
+      return;
+    }
+    const next = { onTimeRate: onTime, onTimeFloor: floor, overrunRate: overrun, periodOrders };
     onGoals(next);
     setDraft(null);
     void saveGoals(next);
@@ -93,6 +98,7 @@ function GoalsCard({ goals, onGoals, statsParams }: { goals: Goals; onGoals: (g:
       <Text style={S.h2}>目標</Text>
       {draft ? (
         <>
+          <Field label="本期件數目標（單）" value={draft.orders} onChange={(t) => setDraft({ ...draft, orders: t })} />
           <Field label="準時率目標 %" value={draft.onTime} onChange={(t) => setDraft({ ...draft, onTime: t })} />
           <Field label="準時率底線 %" value={draft.floor} onChange={(t) => setDraft({ ...draft, floor: t })} />
           <Field label="超時率上限 %" value={draft.overrun} onChange={(t) => setDraft({ ...draft, overrun: t })} />
@@ -103,6 +109,7 @@ function GoalsCard({ goals, onGoals, statsParams }: { goals: Goals; onGoals: (g:
         </>
       ) : (
         <>
+          <KV k="本期件數目標" v={`${goals.periodOrders} 單`} color={C.text} />
           <KV k="準時目標" v={pctText(goals.onTimeRate)} color={C.green} />
           <KV k="準時底線" v={pctText(Math.min(goals.onTimeFloor, goals.onTimeRate))} color={C.yellow} />
           <KV k="超時上限" v={pctText(goals.overrunRate)} color={C.red} />
@@ -110,10 +117,11 @@ function GoalsCard({ goals, onGoals, statsParams }: { goals: Goals; onGoals: (g:
             small
             kind="ghost"
             title="改目標"
-            onPress={() => setDraft({ onTime: r1(goals.onTimeRate), floor: r1(goals.onTimeFloor), overrun: r1(goals.overrunRate) })}
+            onPress={() => setDraft({ orders: String(goals.periodOrders), onTime: r1(goals.onTimeRate), floor: r1(goals.onTimeFloor), overrun: r1(goals.overrunRate) })}
           />
         </>
       )}
+      <Text style={S.small}>分組主要看件數；準時率守 40% 底線；單接晚到會被打星（沒有補錢）</Text>
       <Text style={S.small}>
         算法（依三期報酬單反推的近似）：彈性線＝預估 × {statsParams.graceFactor}；實際 ≤ 彈性線算準時；每單超時比例＝(實際−彈性線)/彈性線（0~
         {Math.round(statsParams.overrunCap * 100)}%）的平均＝超時率。取消單不計。每 14 天一期（台北時間週一 00:00 起）。

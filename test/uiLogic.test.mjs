@@ -95,7 +95,7 @@ const sum = (onTime, late, lateRatio = 0.5) =>
   ]);
 
 test('actionHint：達標（還能晚 N 單）／黃（再準時 N 單＋還能晚 M 單守底線）／紅（連續準時 N 單）／零單', () => {
-  const g = DEFAULT_GOALS; // 50 / 40 / 20
+  const g = { ...DEFAULT_GOALS, onTimeRate: 0.5 }; // 50 / 40 / 20
   assert.deepEqual(actionHint(goalProgress(summarize([]), g), g), { main: '本期還沒有單', tone: 'gray', overrun: null });
   // 6 準 4 晚 → 60%：6/(10+k) ≥ 0.5 → k ≤ 2
   const met = actionHint(goalProgress(sum(6, 4, 0), g), g);
@@ -112,12 +112,12 @@ test('actionHint：達標（還能晚 N 單）／黃（再準時 N 單＋還能�
   assert.equal(low.main, '要連續準時 2 單回到 40%');
   assert.equal(low.tone, 'red');
   // 底線 100% 且有晚到 → 回不去
-  const strict = { onTimeRate: 1, onTimeFloor: 1, overrunRate: 0.2 };
+  const strict = { onTimeRate: 1, onTimeFloor: 1, overrunRate: 0.2, periodOrders: 375 };
   assert.equal(actionHint(goalProgress(sum(3, 1, 0), strict), strict).main, '低於底線 100%，本期回不去了');
 });
 
 test('actionHint：超時率未達標 → 第二行；顏色函式', () => {
-  const g = DEFAULT_GOALS;
+  const g = { ...DEFAULT_GOALS, onTimeRate: 0.5 };
   // 1 準 1 晚（超時比例 0.5）→ 超時率 25% > 20%：sum 0.5 / 0.2 − 2 = 0.5 → 1 單
   const gp = goalProgress(sum(1, 1, 0.5), g);
   const h = actionHint(gp, g);
@@ -192,7 +192,9 @@ test('groupHistory：依台北日分組（新→舊）、今天/昨天、日小�
   assert.equal(today.label, '11/12（四）');
   assert.deepEqual(today.rows.map((x) => x.order.id), ['t2', 't1', 't3']); // 依送達時間新→舊
   assert.equal(today.rows[2].time, '00:10');
-  assert.deepEqual(today.rows[0].tags, ['自動', '夾單']);
+  assert.deepEqual(today.rows[0].tags, ['自動', '夾單', '星號風險']); // v1.3 t2 單接晚到＝星號風險
+  assert.equal(today.rows[0].star, true);
+  assert.equal(today.subtotal.star, 1);
   assert.equal(today.rows[0].onTime, false);
   assert.equal(today.rows[0].overMin, 5);
   assert.equal(today.rows[1].onTime, true);

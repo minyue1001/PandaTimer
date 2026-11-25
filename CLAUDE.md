@@ -108,6 +108,7 @@ Expo SDK 58 + TypeScript；使用者**無 Mac、無付費 Apple 開發者帳號*
 - 底部自製分頁列（`TabBar`，不用 react-navigation）：**首頁**（騎車用：偵測膠囊 `StatusPill`→進行中卡 `OrderCard`（最早截止在上、長按刪、取消、大送達）→本期大卡/今日小卡 `StatCard`→手動開始（折疊））／**紀錄**（收入摘要→管理紀錄（折疊，三種批次刪除）→依台北日分組歷史＋日小計，60 筆一頁）／**設定**（目標→補登→偵測診斷→OTA→說明與捷徑）。
 - 三頁都掛著、非目前頁 `display:'none'`（保留捲動/草稿）；**BroadcastPicker 只在首頁膠囊裡** → `onStartDetect`/redetect 通知流程一律先 `setTab('home')`。上次分頁存 `pandatimer.ui.tab.v1`；膠囊「變成」🔴/🟡或進行中單數變多 → 自動切回首頁（`shouldJumpHome`，邊緣觸發）。
 - 純函式在 `src/ui/logic.ts`（`detectPill`/`actionHint`/`groupHistory`/`orderCountdown`…，測試 `test/uiLogic.test.mjs`）；顏色字級在 `src/ui/theme.ts`（暗底 #121212、卡 #1E1E1E、粉 #FF2B85；最小字 16、按鈕高 ≥56）；Alert 流程在 `src/ui/actions.ts`。OTA 狀態 `useOtaUpdate()` 掛在 App 頂層（首頁有新版橫條、設定頁有檢查/套用按鈕）。
+- **v1.3 件數＋星號**（純 JS OTA，runtime 仍 1.2；`src/stats.ts`＋`test/starRisk.test.mjs`）：`Goals.periodOrders`（本期件數目標，預設 375，50~1000，舊存檔補預設；準時率目標預設＝底線 40%，存檔有值照用）；`starRisk(order, all, now)`＝已送達、非 noTiming、實際分>預估分（不是×1.05）且接單~送達期間沒有其他非取消單重疊→被打星沒補錢（報酬單驗證：單接晚到 59/69 被打星、疊單晚到 31/32 沒被打）；首頁本期卡以「件數/目標＋每天要幾單＋星號風險」為主、準時/超時縮成次要一行；紀錄頁星號列加 ⭐＋tag「星號風險」。
 - 膠囊「省電中/放慢辨識」與診斷「省電/記憶體」（`powerLine`）讀 `DetectorStatus.power`：v1.0 statusJSON 帶 App 的 `lowPower/thermal/saver/batt/charging`＋ext 的 `extMode/memMB/peakMB/extAt`（v0.9 原生沒帶 → 無 key）。v1.0 `userInterfaceStyle:"dark"`（系統 Alert/鍵盤也暗色）。
 ## 已知風險
 - Swift 只在 CI 編譯；CI 失敗先看 `xcodebuild.log` 的 error 行。runner `macos-26`（fileSystemSynchronizedGroups 需 Xcode 16+）。定位保活下背景 update、alertConfiguration 本地 update 都**沒有官方文件**，以實機為準。

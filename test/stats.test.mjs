@@ -89,8 +89,8 @@ test('periodAndToday：本期/今日只算已送達、取消/進行中不計、�
 const sum = (onTime, count, overrunSum = 0) => ({ count, onTime, onTimeRate: count ? onTime / count : null, overrunSum, overrunRate: count ? overrunSum / count : null });
 
 test('準時率三層（目標 50%／底線 40%）：達標、介於中間、低於底線；超時率單一門檻 ≤20%', () => {
-  const g = DEFAULT_GOALS;
-  assert.deepEqual(g, { onTimeRate: 0.5, onTimeFloor: 0.4, overrunRate: 0.2 });
+  const g = { ...DEFAULT_GOALS, onTimeRate: 0.5 };
+  assert.deepEqual(g, { onTimeRate: 0.5, onTimeFloor: 0.4, overrunRate: 0.2, periodOrders: 375 });
   // 達標 8/10 → 8/(10+k) ≥ 0.5 → 還能晚 6 單
   let gp = goalProgress(sum(8, 10, 0.5), g);
   assert.equal(gp.onTimeLevel, 'met');
@@ -138,11 +138,11 @@ test('準時率三層（目標 50%／底線 40%）：達標、介於中間、低
 test('目標存取與輸入解析：壞資料 → 預設', () => {
   assert.deepEqual(parseGoals(null), DEFAULT_GOALS);
   assert.deepEqual(parseGoals('not json'), DEFAULT_GOALS);
-  assert.deepEqual(parseGoals('{"onTimeRate":0.6,"onTimeFloor":0.45,"overrunRate":0.15}'), { onTimeRate: 0.6, onTimeFloor: 0.45, overrunRate: 0.15 });
+  assert.deepEqual(parseGoals('{"onTimeRate":0.6,"onTimeFloor":0.45,"overrunRate":0.15}'), { onTimeRate: 0.6, onTimeFloor: 0.45, overrunRate: 0.15, periodOrders: 375 });
   assert.deepEqual(parseGoals({ onTimeRate: 2, overrunRate: 'x' }), DEFAULT_GOALS);
   // v0.7 初版只存兩個欄位 → 底線補預設；底線高於目標 → 底線＝目標
-  assert.deepEqual(parseGoals({ onTimeRate: 0.6, overrunRate: 0.2 }), { onTimeRate: 0.6, onTimeFloor: 0.4, overrunRate: 0.2 });
-  assert.deepEqual(parseGoals({ onTimeRate: 0.3, onTimeFloor: 0.4, overrunRate: 0.2 }), { onTimeRate: 0.3, onTimeFloor: 0.3, overrunRate: 0.2 });
+  assert.deepEqual(parseGoals({ onTimeRate: 0.6, overrunRate: 0.2 }), { onTimeRate: 0.6, onTimeFloor: 0.4, overrunRate: 0.2, periodOrders: 375 });
+  assert.deepEqual(parseGoals({ onTimeRate: 0.3, onTimeFloor: 0.4, overrunRate: 0.2 }), { onTimeRate: 0.3, onTimeFloor: 0.3, overrunRate: 0.2, periodOrders: 375 });
   assert.equal(parsePercentInput('50'), 0.5);
   assert.equal(parsePercentInput(' 47.5 % '), 0.475);
   assert.equal(parsePercentInput('101'), null);
@@ -177,7 +177,7 @@ test('本期補登：N0=0 → 原樣；只有補登；補登＋App 紀錄加權�
   assert.ok(Math.abs(m.onTimeRate - 19 / 42) < 1e-12);
   assert.ok(Math.abs(m.overrunRate - 8.1 / 42) < 1e-12);
   // 目標推算用合併值：19/42≈45.2% → 介於；再準時 n：(19+n)/(42+n) ≥ 0.5 → n=4
-  const gp = goalProgress(m, DEFAULT_GOALS);
+  const gp = goalProgress(m, { ...DEFAULT_GOALS, onTimeRate: 0.5 });
   assert.deepEqual([gp.onTimeLevel, gp.needToGoal], ['between', 4]);
   // periodAndToday：同期的補登才合併；今日不含補登；換期失效
   const o = (at, est, act) => ({ id: at, acceptedAt: tp(at), estimateMin: est, deadline: 0, status: 'delivered', actualMin: act });

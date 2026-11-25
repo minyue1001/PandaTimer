@@ -1,8 +1,8 @@
-// 首頁成績卡：本期大卡（準時率/超時率大字＋行動提示）、今日小卡
+// 首頁成績卡：本期大卡（件數進度＋星號風險為主，準時/超時一行次要）、今日小卡
 import { Text, View } from 'react-native';
 import { money, type EarningsSummary } from '../earnings';
-import type { GoalProgress, Goals, Period, Summary } from '../stats';
-import { actionHint, onTimeTone, overrunTone, pctText } from './logic';
+import { countProgress, type GoalProgress, type Goals, type Period, type Summary } from '../stats';
+import { countHint, countPaceText, onTimeTone, overrunTone, pctText } from './logic';
 import { C, F, S, TONE } from './theme';
 
 export function PeriodCard({
@@ -12,6 +12,10 @@ export function PeriodCard({
   noStacked,
   gp,
   goals,
+  now,
+  todayCount,
+  periodStar,
+  todayStar,
 }: {
   period: Period;
   current: Summary & { baselineCount: number };
@@ -19,54 +23,56 @@ export function PeriodCard({
   noStacked: { period: Summary; stackedCount: number };
   gp: GoalProgress;
   goals: Goals;
+  now: number;
+  todayCount: number;
+  periodStar: number;
+  todayStar: number;
 }) {
-  const hint = actionHint(gp, goals);
+  const prog = countProgress(current.count, goals.periodOrders, now, todayCount);
+  const hint = countHint(prog, todayStar, gp, goals);
   const otColor = TONE[onTimeTone(gp)].fg;
   const orColor = TONE[overrunTone(gp)].fg;
   return (
     <View style={S.card}>
       <View style={S.rowBetween}>
-        <Text style={S.h2}>本期成績</Text>
+        <Text style={S.h2}>本期件數</Text>
         <Text style={S.label}>{period.label}</Text>
       </View>
-      <View style={S.row}>
-        <View style={{ flex: 1 }}>
-          <Text style={S.label}>準時率</Text>
-          <Text style={[S.bigNum, { color: otColor }]} adjustsFontSizeToFit numberOfLines={1}>
-            {pctText(current.onTimeRate)}
-          </Text>
-          <Text style={S.small}>
-            目標 {pctText(goals.onTimeRate)}・底線 {pctText(Math.min(goals.onTimeFloor, goals.onTimeRate))}
-          </Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={S.label}>超時率</Text>
-          <Text style={[S.bigNum, { color: orColor }]} adjustsFontSizeToFit numberOfLines={1}>
-            {pctText(current.overrunRate)}
-          </Text>
-          <Text style={S.small}>上限 {pctText(goals.overrunRate)}</Text>
-        </View>
-      </View>
-      <Text style={[S.textBold, { fontSize: F.label, color: TONE[hint.tone].fg }]}>{hint.main}</Text>
-      {!!hint.overrun && <Text style={[S.textBold, { color: C.red }]}>{hint.overrun}</Text>}
-      <Text style={S.text}>
-        本期 {current.count} 單
-        {current.baselineCount > 0 ? `（含補登 ${current.baselineCount}・App ${ownCount}）` : ''}
-      </Text>
-      {noStacked.stackedCount > 0 && (
-        <Text style={S.small}>
-          不含夾單 {noStacked.stackedCount} 單：準時 {pctText(noStacked.period.onTimeRate)}・超時 {pctText(noStacked.period.overrunRate)}（App 紀錄）
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8 }}>
+        <Text style={[S.bigNum, { color: prog.done ? C.green : C.text, flexShrink: 1 }]} adjustsFontSizeToFit minimumFontScale={0.5} numberOfLines={1}>
+          {current.count}
         </Text>
-      )}
+        <Text style={[S.textBold, { fontSize: F.label, color: C.sub, flex: 1 }]} adjustsFontSizeToFit minimumFontScale={0.6} numberOfLines={1}>
+          / 目標 {prog.target} 單
+        </Text>
+      </View>
+      <Text style={[S.textBold, { color: prog.done ? C.green : C.text }]} adjustsFontSizeToFit minimumFontScale={0.7} numberOfLines={1}>
+        {countPaceText(prog)}
+      </Text>
+      <Text style={[S.textBold, { fontSize: F.label, color: periodStar > 0 ? C.yellow : C.sub }]} adjustsFontSizeToFit minimumFontScale={0.7} numberOfLines={1}>
+        ⭐ 本期預估星號 {periodStar} 張（單接又超過預估）・今日 {todayStar} 張
+      </Text>
+      <Text style={[S.textBold, { fontSize: F.label, color: TONE[hint.tone].fg }]}>{hint.main}</Text>
+      {!!hint.star && <Text style={[S.textBold, { color: C.yellow }]}>{hint.star}</Text>}
+      {!!hint.overrun && <Text style={[S.textBold, { color: C.red }]}>{hint.overrun}</Text>}
+      <Text style={S.small} adjustsFontSizeToFit minimumFontScale={0.8} numberOfLines={1}>
+        <Text style={{ color: otColor }}>準時 {pctText(current.onTimeRate)}（底線 {pctText(Math.min(goals.onTimeFloor, goals.onTimeRate))}）</Text>
+        {'　'}
+        <Text style={{ color: orColor }}>超時 {pctText(current.overrunRate)}（上限 {pctText(goals.overrunRate)}）</Text>
+      </Text>
+      <Text style={S.small}>
+        {current.baselineCount > 0 ? `含補登 ${current.baselineCount}・App ${ownCount}・` : ''}不含不計時效單
+        {noStacked.stackedCount > 0 ? `・夾單 ${noStacked.stackedCount} 單（不含夾單準時 ${pctText(noStacked.period.onTimeRate)}）` : ''}
+      </Text>
     </View>
   );
 }
 
-export function TodayCard({ today, earn }: { today: Summary; earn: EarningsSummary }) {
+export function TodayCard({ today, earn, todayStar }: { today: Summary; earn: EarningsSummary; todayStar: number }) {
   return (
     <View style={[S.card, { flexDirection: 'row', gap: 8 }]}>
       <Cell label="今日單數" value={String(today.count)} />
-      <Cell label="今日準時" value={pctText(today.onTimeRate)} />
+      <Cell label="今日星號風險" value={`⭐${todayStar}`} color={todayStar > 0 ? C.yellow : undefined} />
       <Cell label={earn.tipTotal > 0 ? `預計收入（含小費 ${money(earn.tipTotal)}）` : '預計收入'} value={money(earn.payout)} color={C.green} />
     </View>
   );

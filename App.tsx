@@ -21,7 +21,7 @@ import { describeImport, parseImportLink } from './src/importLink';
 import { ensurePermission } from './src/notify';
 import { OtaBanner, useOtaUpdate } from './src/OtaBox';
 import { clampEstimate, DEFAULT_ESTIMATE, type Order } from './src/orders';
-import { DEFAULT_GOALS, DEFAULT_STATS, goalProgress, periodAndToday, periodOf, type Baseline, type Goals, type StatsParams } from './src/stats';
+import { DEFAULT_GOALS, DEFAULT_STATS, goalProgress, periodAndToday, periodOf, periodStarCount, todayStarCount, type Baseline, type Goals, type StatsParams } from './src/stats';
 import { DEFAULT_PAY, periodAndTodayEarnings, type PayParams } from './src/earnings';
 import { fetchRemoteParams, loadBaseline, loadCachedOfferWaitSec, loadCachedPayParams, loadCachedStatsParams, loadGoals } from './src/statsConfig';
 import { subscribe } from './src/store';
@@ -388,6 +388,10 @@ function Main() {
     [orders, minuteTick, payParams, baseline],
   );
   const gp = useMemo(() => goalProgress(st.current, goals), [st, goals]);
+  const stars = useMemo(
+    () => ({ period: periodStarCount(orders, minuteTick * 60_000), today: todayStarCount(orders, minuteTick * 60_000) }),
+    [orders, minuteTick],
+  );
   const laSupported = useMemo(() => LiveActivity.isSupported(), []);
   // 原生偵測狀態每秒讀一次（同步、很便宜）
   const det = useMemo(() => LiveActivity.detectorStatus(), [now]);
@@ -429,6 +433,7 @@ function Main() {
             stats={st}
             gp={gp}
             goals={goals}
+            stars={stars}
             todayEarn={earn.today}
             estimateText={estimateText}
             onEstimateChange={onEstimateChange}

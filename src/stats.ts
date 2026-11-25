@@ -22,8 +22,14 @@ function platformAct(act: number, p: StatsParams): number {
 }
 
 /** 準時率兩層：目標（onTimeRate，預設 50%）與底線（onTimeFloor，預設 40%）；超時率單一門檻（≤ overrunRate，預設 20%） */
-export type Goals = { onTimeRate: number; onTimeFloor: number; overrunRate: number };
-export const DEFAULT_GOALS: Readonly<Goals> = Object.freeze({ onTimeRate: 0.5, onTimeFloor: 0.4, overrunRate: 0.2 });
+export type Goals = { onTimeRate: number; onTimeFloor: number; overrunRate: number; periodOrders: number };
+/**
+ * v1.3：分組主要看件數 → 加 periodOrders（本期件數目標，預設 375，範圍 50~1000）；準時率目標預設改成＝底線 40%。
+ * 舊存檔（只有三個率）沒有 periodOrders → 補預設 375；存檔裡有 onTimeRate（＝使用者自訂過才會存）照用，不存在才用新預設。
+ */
+export const DEFAULT_GOALS: Readonly<Goals> = Object.freeze({ onTimeRate: 0.4, onTimeFloor: 0.4, overrunRate: 0.2, periodOrders: 375 });
+export const MIN_PERIOD_ORDERS = 50;
+export const MAX_PERIOD_ORDERS = 1000;
 export const GOALS_STORAGE_KEY = 'pandatimer.goals.v1';
 
 const DAY_MS = 86_400_000;
@@ -293,7 +299,95 @@ export function parseGoals(raw: unknown): Goals {
     onTimeRate,
     onTimeFloor: Math.min(floorRaw, onTimeRate),
     overrunRate: ok(r.overrunRate) ? (r.overrunRate as number) : DEFAULT_GOALS.overrunRate,
+    periodOrders:
+      typeof r.periodOrders === 'number' && Number.isFinite(r.periodOrders) && r.periodOrders >= MIN_PERIOD_ORDERS && r.periodOrders <= MAX_PERIOD_ORDERS
+        ? Math.round(r.periodOrders)
+        : DEFAULT_GOALS.periodOrders,
   };
+}
+
+/** 使用者輸入的本期件數目標（「375」）→ 整數 50~1000；不合法 → null */
+export function parsePeriodOrdersInput(text: string): number | null {
+  if (!/^\s*\d{1,4}\s*$/.test(text)) return null;
+  const v = parseInt(text, 10);
+  return v >= MIN_PERIOD_ORDERS && v <= MAX_PERIOD_ORDERS ? v : null;
+}
+
+// ── v1.3 件數進度 ──
+
+export type CountProgress = {
+  count: number;
+  target: number;
+  /** 還差幾單（≥0） */
+  remaining: number;
+  /** 本期剩餘天數（含今天，≥1） */
+  daysLeft: number;
+  /** 平均每天要幾單＝ceil(remaining / daysLeft)；已達標 0 */
+  perDay: number;
+  done: boolean;
+  /** 今天還要幾單（以「今天開始時的件數」算今日配額：ceil((目標−今天前件數)/剩餘天數) − 今日已跑，≥0） */
+  todayLeft: number;
+};
+
+/** count＝本期件數（含補登、不含 noTiming）；todayCount＝今日件數（不含補登） */
+export function countProgress(count: number, target: number, now: number, todayCount = 0): CountProgress {
+  const period = periodOf(now);
+  const daysLeft = Math.max(1, Math.round((period.end - taipeiDayStart(now)) / DAY_MS));
+  const remaining = Math.max(0, target - count);
+  const before = Math.max(0, count - todayCount);
+  const quota = Math.max(0, Math.ceil((target - before) / daysLeft));
+  return {
+    count,
+    target,
+    remaining,
+    daysLeft,
+    perDay: Math.ceil(remaining / daysLeft),
+    done: remaining === 0,
+    todayLeft: remaining === 0 ? 0 : Math.max(0, quota - todayCount),
+  };
+}
+
+// ── v1.3 星號風險 ──
+// 被打星＝單接（接單到送達期間沒有其他單重疊）且實際分鐘 > 預估分鐘（不是 ×1.05）→ 沒有補錢。
+// 報酬單驗證：單接晚到 59/69 被打星，疊單期間晚到 31/32 沒被打星。
+
+function endOf(o: Order, now: number): number {
+  if (o.deliveredAt != null) return o.deliveredAt;
+  if (o.status === 'delivered' && o.actualMin != null) return o.acceptedAt + o.actualMin * 60_000;
+  return Math.max(now, o.acceptedAt);
+}
+
+/** order 是否「星號風險」；now 只用在進行中的其他單（區間算到 now） */
+export function starRisk(order: Order, allOrders: readonly Order[], now: number = Date.now()): boolean {
+  if (order.status !== 'delivered' || order.noTiming || order.actualMin == null) return false;
+  if (!(order.actualMin > order.estimateMin)) return false;
+  const a0 = order.acceptedAt;
+  const a1 = endOf(order, now);
+  for (const o of allOrders) {
+    if (o.id === order.id || o.status === 'canceled') continue;
+    if (o.acceptedAt < a1 && a0 < endOf(o, now)) return false;
+  }
+  return true;
+}
+
+function starCountBetween(orders: readonly Order[], since: number, until: number, now: number): number {
+  let n = 0;
+  for (const o of orders) {
+    if (o.acceptedAt >= since && o.acceptedAt < until && starRisk(o, orders, now)) n += 1;
+  }
+  return n;
+}
+
+/** 本期（台北報酬週期）星號風險單數（補登不算） */
+export function periodStarCount(orders: readonly Order[], now: number): number {
+  const p = periodOf(now);
+  return starCountBetween(orders, p.start, p.end, now);
+}
+
+/** 今日（台北日）星號風險單數 */
+export function todayStarCount(orders: readonly Order[], now: number): number {
+  const d = taipeiDayStart(now);
+  return starCountBetween(orders, d, d + DAY_MS, now);
 }
 
 /** 使用者輸入的百分比字串（「50」「47.5」「50%」）→ 0~1；不合法 → null */

@@ -223,6 +223,7 @@ function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
               </Text>
               <Text style={[statusStyle, { color: r.noTiming ? C.dim : r.onTime ? C.green : C.red }]} numberOfLines={1}>
                 {r.statusText}
+                {r.star ? ' ⭐' : ''}
               </Text>
               <Text style={amountStyle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>
                 {r.amountEstimated ? '約' : ''}
@@ -258,6 +259,6 @@ const rowStyle = {
 } as const;
 const timeStyle = { width: 52, fontSize: 16, fontWeight: '700', color: C.sub, fontVariant: ['tabular-nums'] } as const;
 const barStyle = { width: 4, borderRadius: 2 } as const;
-const estStyle = { width: 118, fontSize: 18, fontWeight: '700', color: C.text, fontVariant: ['tabular-nums'] } as const;
-const statusStyle = { width: 70, fontSize: 16, fontWeight: '800' } as const;
+const estStyle = { width: 108, fontSize: 18, fontWeight: '700', color: C.text, fontVariant: ['tabular-nums'] } as const;
+const statusStyle = { width: 84, fontSize: 16, fontWeight: '800' } as const;
 const amountStyle = { flex: 1, textAlign: 'right', fontSize: 18, fontWeight: '700', color: C.text, fontVariant: ['tabular-nums'] } as const;
