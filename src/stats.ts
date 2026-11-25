@@ -425,3 +425,16 @@ export function goalText(gp: GoalProgress, goals: Goals): { onTime: string; over
   }
   return { onTime, overrun };
 }
+
+/**
+ * v1.3.1 一次性遷移（使用者 2026-11-26 要求）：準時率底線 45%、目標 50%；件數目標若仍是預設 375 → 260（本期計畫）。
+ * 超時上限與使用者自訂過的件數目標保留。
+ */
+export function migrateGoalsV131(g: Goals): Goals {
+  return {
+    ...g,
+    onTimeRate: 0.5,
+    onTimeFloor: 0.45,
+    periodOrders: g.periodOrders === DEFAULT_GOALS.periodOrders ? 260 : g.periodOrders,
+  };
+}

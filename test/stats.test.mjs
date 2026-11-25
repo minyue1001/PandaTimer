@@ -260,3 +260,10 @@ test('v1.2.5 actualOffsetSec：實際時間加秒數再判準時/超時（對齊
   assert.ok(Math.abs(ov({ est: 20, act: 21 }, p) - (21 + 40 / 60 - 21) / 21) < 1e-9);
   assert.equal(on({ est: 20, act: 20.5 }, { graceFactor: 1.05, overrunCap: 1 }), true); // 舊參數（沒有 actualOffsetSec）照舊
 });
+
+test('v1.3.1 migrateGoalsV131：底線 45%、目標 50%，預設件數 375→260，自訂件數保留', async () => {
+  const { migrateGoalsV131, DEFAULT_GOALS: D } = await import('../src/stats.ts');
+  assert.deepEqual(migrateGoalsV131({ ...D }), { ...D, onTimeRate: 0.5, onTimeFloor: 0.45, periodOrders: 260 });
+  assert.equal(migrateGoalsV131({ ...D, periodOrders: 300 }).periodOrders, 300);
+  assert.equal(migrateGoalsV131({ ...D, overrunRate: 0.15 }).overrunRate, 0.15);
+});

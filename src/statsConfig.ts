@@ -14,6 +14,7 @@ import {
   DEFAULT_STATS,
   GOALS_STORAGE_KEY,
   parseBaseline,
+  migrateGoalsV131,
   parseGoals,
   type Baseline,
   type Goals,
@@ -99,9 +100,19 @@ export async function fetchRemoteParams(): Promise<{ stats: StatsParams; pay: Pa
   }
 }
 
+/** v1.3.1 一次性遷移旗標：使用者要求「底線 45%、目標 50%」（社群歸納：本期準時率 <45% 時晚到單會被打星） */
+const GOALS_MIGRATION_KEY = 'pandatimer.goals.migrated.v131';
+
 export async function loadGoals(): Promise<Goals> {
   try {
-    return parseGoals(await AsyncStorage.getItem(GOALS_STORAGE_KEY));
+    const goals = parseGoals(await AsyncStorage.getItem(GOALS_STORAGE_KEY));
+    if ((await AsyncStorage.getItem(GOALS_MIGRATION_KEY)) == null) {
+      const next = migrateGoalsV131(goals);
+      await AsyncStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(next));
+      await AsyncStorage.setItem(GOALS_MIGRATION_KEY, '1');
+      return next;
+    }
+    return goals;
   } catch {
     return { ...DEFAULT_GOALS };
   }
