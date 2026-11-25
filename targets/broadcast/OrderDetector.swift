@@ -46,7 +46,7 @@ struct ScreenRules {
 
 // v0.6 遠端狀態回報用的畫面摘要：只產生結構化欄位，**OCR 原文不離開這個函式**。
 // ⚠️ 與 src/screenInfo.ts 同一套規則；白名單另與 server/index.mjs 的 TELEMETRY_KEYWORDS 一致（test 比對）。
-// 隱私鐵律：不得上傳 OCR 原文、地址、店名、顧客資訊。
+// 隱私鐵律：不得上傳 OCR 原文、地址、顧客資訊。v1.4 唯一例外：邀請畫面的店家名稱（store，≤40 字）。
 enum ScreenInfo {
   /// [正式名稱, ...OCR 可能辨成的寫法（簡體）]；回報只用正式名稱
   static let keywords: [[String]] = [
@@ -136,6 +136,64 @@ enum ScreenInfo {
     /// v1.2：「送餐資訊」出現次數（邀請畫面 ≥2＝組合單）、「包含額外 N 元」小費（整數元 1~2000）
     let bundle: Int
     let tip: Int?
+    /// v1.4：邀請畫面（有接單鈕）的店家名稱（extractStoreName，≤40 字；隱私例外只有這一欄）；不是邀請/找不到 → nil
+    let store: String?
+  }
+
+  // v1.4 店家名稱（＝src/screenInfo.ts STORE_*／extractStoreName，改一邊改兩邊）。只看第一個「送餐資訊」之前；
+  // 客人地址/姓名在送餐資訊之後，絕不看。
+  static let storeStopPattern = "送餐資訊|送餐资讯|送餐資讯|送餐资訊"
+  static let storeAddrMarkPattern = "^[(（\\[【〔][^\\s()（）\\[\\]【】〔〕\\x{4e00}-\\x{9fff}]{1,2}[)）\\]】〕]"
+  static let storeAddrTextPattern = "[市縣县].{1,5}?[區鄉鎮区乡镇]|[路街道巷段弄].{0,10}?[號号]"
+  static let storeRejectPattern =
+    "[0-9]+(?:\\.[0-9]+)?(?:分鐘|分钟|公里|km|KM)|[$＄]|每單收入|每单收入|接受訂單|接受订单|夾單|夹单|訂單|订单|包含[額额]外|樓層|楼层|預計|预计"
+  static let storeNumericPattern = "^[0-9.,:+\\-()（）%]*$"
+  static let storeMax = 40
+
+  private static func matches(_ pattern: String, _ text: String) -> Bool {
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return false }
+    return regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: (text as NSString).length)) != nil
+  }
+
+  private static func squeeze(_ s: String) -> String {
+    s.components(separatedBy: .whitespacesAndNewlines).joined()
+  }
+
+  /// 去空白後的一行是不是店家地址行（＝TS isStoreAddressLine）
+  static func isStoreAddressLine(_ compactLine: String) -> Bool {
+    matches(storeAddrMarkPattern, compactLine) || matches(storeAddrTextPattern, compactLine)
+  }
+
+  /// 店名清理：去控制字元、空白收成一個、去頭尾、最多 40 個字（code point）；空 → nil（＝TS cleanStoreName）
+  static func cleanStoreName(_ s: String) -> String? {
+    var scalars = String.UnicodeScalarView()
+    for u in s.unicodeScalars {
+      scalars.append((u.value < 0x20 || u.value == 0x7f) ? " " : u)
+    }
+    let words = String(scalars).components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+    let t = words.joined(separator: " ")
+    guard !t.isEmpty else { return nil }
+    let cut = String(String.UnicodeScalarView(t.unicodeScalars.prefix(storeMax)))
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return cut.isEmpty ? nil : cut
+  }
+
+  /// OCR 原文（\n 分行、由上到下）→ 店名；找不到 → nil（＝TS extractStoreName）
+  static func extractStoreName(_ raw: String) -> String? {
+    let lines = MinutePicker.normalize(raw).components(separatedBy: "\n")
+    guard let stop = lines.firstIndex(where: { matches(storeStopPattern, squeeze($0)) }) else { return nil }
+    let head = Array(lines[0..<stop])
+    guard let addr = head.firstIndex(where: { isStoreAddressLine(squeeze($0)) }), addr > 0 else { return nil }
+    var i = addr - 1
+    while i >= 0 && head[i].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { i -= 1 }
+    guard i >= 0 else { return nil }
+    let compactLine = squeeze(head[i])
+    if compactLine.isEmpty || matches(storeRejectPattern, compactLine) || matches(storeNumericPattern, compactLine)
+      || isStoreAddressLine(compactLine)
+    {
+      return nil
+    }
+    return cleanStoreName(head[i])
   }
 
   // v1.2（＝src/screenInfo.ts TIP_RX / ORDERS_RX / STACK_SCREEN_RX）
@@ -352,7 +410,8 @@ enum ScreenInfo {
       orders: extractOrderCount(text),
       stackScreen: firstOfferMatch(text, stackScreenPattern, fallback: stackScreenPattern) != nil,
       bundle: countMatches(text, rules.bundleKeywords, fallback: OfferSettings.defaultBundleKeywords),
-      tip: extractTip(text))
+      tip: extractTip(text),
+      store: accept ? extractStoreName(raw) : nil)
   }
 
   /// v0.9：摘要＋「畫面上有沒有 pandarider」（特徵詞 away.keywords 或接單鈕；away 模式用，同 src/powerSaver.ts pandaPresent）。

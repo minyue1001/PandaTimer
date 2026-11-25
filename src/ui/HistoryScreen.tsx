@@ -1,5 +1,6 @@
 // 紀錄頁：收入摘要 → 今日對帳（折疊）→ 管理紀錄（批次刪除，折疊）→ 依日期分組的歷史（日小計）；列長按＝選單（不計時效／單筆刪除）
 import { memo, useMemo, useState } from 'react';
+import { declinedByDay, declinedRowText, type DeclinedOffer } from '../declined';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { money, type EarningsSummary, type PayParams } from '../earnings';
 import type { Order } from '../orders';
@@ -23,6 +24,8 @@ export type HistoryProps = {
   periodLabel: string;
   noStacked: { period: Summary; today: Summary; stackedCount: number; stackedToday: number };
   toast: Toast;
+  /** v1.4 本期拒單（null＝沒抓到 → 不顯示） */
+  declined?: DeclinedOffer[] | null;
 };
 
 export const HistoryScreen = memo(function HistoryScreen(p: HistoryProps) {
@@ -31,6 +34,7 @@ export const HistoryScreen = memo(function HistoryScreen(p: HistoryProps) {
     () => groupHistory(p.orders, { now: p.now, limit, stats: p.stats, pay: p.pay }),
     [p.orders, p.now, limit, p.stats, p.pay],
   );
+  const declinedDays = useMemo(() => (p.declined ? declinedByDay(p.declined) : null), [p.declined]);
   return (
     <ScrollView contentContainerStyle={S.scroll} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
       <Text style={S.h1}>紀錄</Text>
@@ -43,7 +47,7 @@ export const HistoryScreen = memo(function HistoryScreen(p: HistoryProps) {
         </View>
       )}
       {hist.groups.map((g) => (
-        <DayCard key={g.key} g={g} toast={p.toast} />
+        <DayCard key={g.key} g={g} toast={p.toast} declined={declinedDays?.get(g.key)} />
       ))}
       {hist.shown < hist.total && (
         <Btn kind="ghost" small title={`顯示更多（還有 ${hist.total - hist.shown} 筆）`} onPress={() => setLimit(limit + PAGE)} />
@@ -185,8 +189,9 @@ function ManageCard({ toast }: { toast: Toast }) {
   );
 }
 
-function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
+function DayCard({ g, toast, declined }: { g: DayGroup; toast: Toast; declined?: DeclinedOffer[] }) {
   const s = g.subtotal;
+  const [showDeclined, setShowDeclined] = useState(false);
   return (
     <View style={[S.card, { gap: 0, paddingVertical: 12, paddingHorizontal: 14 }]}>
       <View style={S.rowBetween}>
@@ -232,6 +237,8 @@ function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
             </View>
             <View style={S.row}>
               <Text style={[S.small, { flex: 1 }]} numberOfLines={1}>
+                {r.store ? <Text style={{ color: C.text }}>{r.store}</Text> : null}
+                {r.store && r.tags.length ? ' · ' : ''}
                 {r.tags.join(' · ')}
               </Text>
               {r.tip > 0 && (
@@ -244,6 +251,26 @@ function DayCard({ g, toast }: { g: DayGroup; toast: Toast }) {
         </Pressable>
       ))}
       {g.hidden > 0 && <Text style={[S.small, { paddingTop: 6 }]}>這天還有 {g.hidden} 筆，按下面「顯示更多」</Text>}
+      {!!declined?.length && (
+        <View style={{ borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, paddingTop: 8 }}>
+          <Pressable
+            onPress={() => setShowDeclined(!showDeclined)}
+            hitSlop={8}
+            accessibilityHint="展開/收起這天沒接的邀請"
+            style={(st) => [{ minHeight: 40, justifyContent: 'center' }, pressed(st)]}
+          >
+            <Text style={S.small}>
+              {showDeclined ? '▾' : '▸'} 拒單 {declined.length} 張（偵測到沒接的邀請）
+            </Text>
+          </Pressable>
+          {showDeclined &&
+            declined.map((d) => (
+              <Text key={`${d.t}-${d.min}`} style={[S.small, { paddingLeft: 16 }]} numberOfLines={2}>
+                {declinedRowText(d)}
+              </Text>
+            ))}
+        </View>
+      )}
     </View>
   );
 }

@@ -78,7 +78,7 @@ test('extractKm', () => {
   assert.equal(extractKm('沒有距離'), null);
 });
 
-test('summarizeScreen：新單畫面 → 結構化欄位，沒有任何原文（店名/地址）', () => {
+test('summarizeScreen：新單畫面 → 結構化欄位，除了店名（v1.4 唯一例外）沒有任何原文（地址/客人資訊）', () => {
   const s = summarizeScreen(NEW_ORDER);
   // 邀請畫面本身就有「上線中」（rejectedKeywords 命中）——只在邀請消失後才拿來判斷，見 OfferTracker
   assert.deepEqual(s, {
@@ -86,9 +86,9 @@ test('summarizeScreen：新單畫面 → 結構化欄位，沒有任何原文（
     offerAccepted: false, offerRejected: true, offerHit: ['上線中'],
     delivered: false, deliveredHit: [], deliveredFinal: false, stacked: false,
     acceptStrong: false, acceptWeak: false, acceptTerms: [], acceptTermParts: [], pickedUp: false, otherPage: false,
-    orders: null, stackScreen: false, bundle: 1, tip: null,
+    orders: null, stackScreen: false, bundle: 1, tip: null, store: '鬍鬚張魯肉飯 (台北美食文化館)',
   });
-  const json = JSON.stringify(s);
+  const json = JSON.stringify({ ...s, store: null });
   for (const leak of ['鬍鬚張', '台北市', 'XX路', '現金', '送餐資訊']) assert.ok(!json.includes(leak), leak);
   // 沒有接單鈕 → 不挑分鐘數
   assert.equal(summarizeScreen('送餐資訊\n預計送達 18 分鐘\n已取餐').minutes, null);

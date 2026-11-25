@@ -23,6 +23,9 @@
 //   今日對帳（邏輯在 reconcile.mjs，唯讀、不改資料）：body {date:'YYYY-MM-DD', count, amount, tips?, until?:'HH:mm'}
 //   POST /api/reconcile        header x-pt-sync（同 /api/sync）
 //   POST /api/admin/reconcile  cookie＋x-pt-csrf＋JSON（或 x-pt-read 讀取金鑰）
+//   v1.4 拒單紀錄（邏輯在 reconcile.mjs declinedOffers，唯讀）：POST /api/declined（x-pt-sync）body {from, to?}；
+//        GET /api/admin/declined?from=&to=（cookie 或 x-pt-read）→ {from, to, count, declined:[{t, min, amt, km, store, reason}]}
+//   v1.4 telemetry 的 store（店名）→ 訂單資料庫店名線索（store_hints），補同分鐘、接單 ±120 秒的單
 //        → {date, until, app:{count,amount,tips}, platform, diff:{count,amount,tips}, proposals[], info[]}
 //
 // 資料目錄：UPDATES_DIR/<runtimeVersion>/<timestamp>/ = `npx expo export -p ios` 的 dist + expoConfig.json
@@ -46,8 +49,8 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { formatSyncCode, normalizeSyncCode, openStore } from './orders.mjs';
-import { reconcile, taipeiDayStart } from './reconcile.mjs';
+import { cleanStore, formatSyncCode, normalizeSyncCode, openStore } from './orders.mjs';
+import { declinedOffers, reconcile, taipeiDayStart } from './reconcile.mjs';
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 3970);
@@ -427,6 +430,8 @@ const FIELD_RULES = {
   matched: B, stackKind: S,
   // v1.2：組合單張數、小費（整數元）、送單畫面「N 筆訂單」
   bundle: N, tip: N, screenOrders: N,
+  // v1.4：邀請畫面的店家名稱（隱私例外只有這一欄：去控制字元、空白收一個、≤40 字；其他 OCR 文字照舊不收）
+  store: 'store',
 };
 const MAX_STR = 80;
 
@@ -440,6 +445,7 @@ function sanitizeRecord(r) {
     if (type === N) { if (typeof v === 'number' && Number.isFinite(v)) out[k] = v; }
     else if (type === B) { if (typeof v === 'boolean') out[k] = v; }
     else if (type === S) { if (typeof v === 'string' && v.length) out[k] = v.slice(0, MAX_STR); }
+    else if (type === 'store') { const st = cleanStore(v); if (st) out[k] = st; }
     else if (type === 'kw') {
       if (Array.isArray(v)) out[k] = [...new Set(v.filter((x) => typeof x === 'string' && x.length <= 12 && keywordAllowed(x)))];
     }
@@ -532,8 +538,36 @@ async function handleTelemetryPost(req, res) {
   writeChain = run.catch(() => undefined);
   await run;
   void pruneTelemetry(now);
+  await applyStoreHints(list, now);
   res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify({ ok: true, accepted: list.length }));
+}
+
+/**
+ * v1.4 telemetry 裡的店名 → 訂單資料庫的店名線索（補同分鐘、接單時間 ±120 秒的單）。
+ *   ext `order`（接單）：接單時間＝t − delay 秒；ext `offer_decided` result=reject：t − wait 秒（只補 confirm 單＝「你有接嗎？」按有接）。
+ *   t（手機時鐘）離伺服器時間超過 2 天/未來 10 分 → 用伺服器時間。資料庫失敗只記 log，不影響 telemetry 寫入。
+ */
+function storeHintsFrom(list, now) {
+  const out = [];
+  for (const r of list) {
+    if (r.src !== 'ext' || !r.store || typeof r.min !== 'number') continue;
+    const t = typeof r.t === 'number' && r.t > now - 2 * DAY_MS && r.t < now + 10 * 60_000 ? r.t : now;
+    if (r.ev === 'order') out.push({ at: t - Math.max(0, Math.min(120, r.delay ?? 0)) * 1000, min: r.min, store: r.store, kind: 'order' });
+    else if (r.ev === 'offer_decided' && (r.result ?? r.note) === 'reject') {
+      out.push({ at: t - Math.max(0, Math.min(120, r.wait ?? 0)) * 1000, min: r.min, store: r.store, kind: 'offer' });
+    }
+  }
+  return out;
+}
+async function applyStoreHints(list, now) {
+  const hints = storeHintsFrom(list, now);
+  if (!hints.length) return;
+  try {
+    (await getStore()).noteStoreHints(hints, now);
+  } catch (e) {
+    console.error(`[db] 店名線索寫入失敗：${e.message}`);
+  }
 }
 
 async function handleTelemetryGet(req, res, url) {
@@ -749,6 +783,43 @@ async function handleReconcile(req, res) {
   sendJson(res, 200, await runReconcile(store, await readJson(req, RECONCILE_MAX_BODY), now));
 }
 
+// ── v1.4 拒單紀錄（唯讀：telemetry 的未接判定，去掉誤讀重複與其實有接的；見 reconcile.mjs declinedOffers） ──
+const DECLINED_MAX_DAYS = 16;
+/** {from, to}（台北日 YYYY-MM-DD；to 省略＝from）→ 拒單清單；範圍最多 16 天、只能查 telemetry 還留著的日子 */
+async function runDeclined(store, q, now) {
+  const from = q?.from;
+  const to = q?.to ?? from;
+  const start = taipeiDayStart(from);
+  const endDay = taipeiDayStart(to);
+  if (!Number.isFinite(start) || !Number.isFinite(endDay) || localDate(start + 12 * 3_600_000) !== from || localDate(endDay + 12 * 3_600_000) !== to) {
+    throw new HttpError(400, 'from/to 要是 YYYY-MM-DD');
+  }
+  const end = endDay + DAY_MS;
+  if (end <= start || end - start > DECLINED_MAX_DAYS * DAY_MS) throw new HttpError(400, `範圍要在 1~${DECLINED_MAX_DAYS} 天`);
+  if (start > now + DAY_MS) throw new HttpError(400, '不能查未來');
+  const dates = [];
+  const firstKept = now - TELEMETRY_KEEP_DAYS * DAY_MS;
+  for (let d = Math.max(start, taipeiDayStart(localDate(firstKept))); d <= end; d += DAY_MS) dates.push(localDate(d + 12 * 3_600_000));
+  const events = await readTelemetryRecords(dates);
+  const orders = store.listOrders(start - 3_600_000, end + 3_600_000);
+  const list = declinedOffers({ events, orders, from: start, to: end }).map(({ decidedAt: _d, ...r }) => r);
+  return { from, to, count: list.length, declined: list };
+}
+async function handleDeclined(req, res) {
+  const store = await getStore();
+  const now = Date.now();
+  const wait = syncLock.wait(now);
+  if (wait) throw lockedError(wait, '同步碼');
+  if (!windowAllow('declined', 30, now)) throw new HttpError(429, 'Rate limit: 30 requests/min');
+  const given = req.headers['x-pt-sync'];
+  if (!secretEqual(normalizeSyncCode(given), store.syncCode)) {
+    if (given) syncLock.fail(now);
+    throw new HttpError(401, 'Bad sync code');
+  }
+  syncLock.ok();
+  sendJson(res, 200, await runDeclined(store, await readJson(req, RECONCILE_MAX_BODY), now));
+}
+
 // ── 管理頁 session（簽章 cookie；金鑰＝資料庫裡的隨機 sessionKey × 管理密碼 → 改密碼或登出即全部登出） ──
 const SESSION_TTL_MS = 12 * 3_600_000;
 const COOKIE = 'pt_admin';
@@ -840,7 +911,7 @@ function csvCell(v) {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 function ordersCsv(rows, graceFactor) {
-  const head = ['id', '接單(台北)', '預估分', '送達(台北)', '實際分', '狀態', '準時', '金額', '小費', '夾單', '不計時效', '來源', '備註', '修改時間(台北)', '修改者', '已刪除'];
+  const head = ['id', '接單(台北)', '預估分', '送達(台北)', '實際分', '狀態', '準時', '金額', '小費', '夾單', '不計時效', '來源', '備註', '修改時間(台北)', '修改者', '已刪除', '店名'];
   const status = { active: '進行中', delivered: '已送達', canceled: '已取消' };
   const lines = [head.join(',')];
   for (const o of rows) {
@@ -848,7 +919,7 @@ function ordersCsv(rows, graceFactor) {
     const ok = o.status === 'delivered' && act != null ? (act <= o.estimateMin * graceFactor + 1e-9 ? '準' : '超') : '';
     lines.push([
       o.id, taipeiText(o.acceptedAt), o.estimateMin, taipeiText(o.deliveredAt), act ?? '', status[o.status] ?? o.status, ok,
-      o.amount ?? '', o.tip ?? '', o.stacked ? '是' : '', o.noTiming ? '是' : '', o.source, o.note, taipeiText(o.updatedAt), o.editedBy, o.deleted ? '是' : '',
+      o.amount ?? '', o.tip ?? '', o.stacked ? '是' : '', o.noTiming ? '是' : '', o.source, o.note, taipeiText(o.updatedAt), o.editedBy, o.deleted ? '是' : '', o.store ?? '',
     ].map(csvCell).join(','));
   }
   return '﻿' + lines.join('\r\n') + '\r\n';
@@ -919,6 +990,10 @@ async function handleAdminApi(req, res, url) {
     console.log('[admin] 已重設同步碼');
     return sendJson(res, 200, { syncCode: formatSyncCode(code) });
   }
+  if (p === 'declined' && m === 'GET') {
+    requireAdmin(store, req, 'read');
+    return sendJson(res, 200, await runDeclined(store, { from: url.searchParams.get('from'), to: url.searchParams.get('to') ?? undefined }, now));
+  }
   if (p === 'reconcile' && m === 'POST') {
     requireAdmin(store, req, req.headers['x-pt-read'] != null ? 'read' : 'write');
     return sendJson(res, 200, await runReconcile(store, await readJson(req, RECONCILE_MAX_BODY), now));
@@ -963,7 +1038,7 @@ async function handleAdminApi(req, res, url) {
       const body = await readJson(req, ADMIN_MAX_BODY);
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Body must be an object');
       const fields = {};
-      for (const k of ['acceptedAt', 'estimateMin', 'deliveredAt', 'status', 'amount', 'tip', 'noTiming', 'stacked', 'note']) if (k in body) fields[k] = body[k];
+      for (const k of ['acceptedAt', 'estimateMin', 'deliveredAt', 'status', 'amount', 'tip', 'noTiming', 'stacked', 'note', 'store']) if (k in body) fields[k] = body[k];
       r = store.updateOrder(id, fields);
     } else if (!om[2] && m === 'DELETE') {
       requireAdmin(store, req, 'write');
@@ -1016,6 +1091,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/reconcile') {
       if (req.method === 'POST') return await handleReconcile(req, res);
+      throw new HttpError(405, 'Method not allowed');
+    }
+    if (url.pathname === '/api/declined') {
+      if (req.method === 'POST') return await handleDeclined(req, res);
       throw new HttpError(405, 'Method not allowed');
     }
     if (url.pathname.startsWith('/api/admin/')) return await handleAdminApi(req, res, url);

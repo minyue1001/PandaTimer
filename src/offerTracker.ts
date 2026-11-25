@@ -119,6 +119,8 @@ export type OfferObservation = {
   bundle?: number;
   /** v1.2：小費（整數元） */
   tip?: number | null;
+  /** v1.4：邀請畫面的店家名稱（ScreenSummary.store） */
+  store?: string | null;
 };
 
 export type Offer = {
@@ -134,6 +136,8 @@ export type Offer = {
   bundle: number;
   /** v1.2 小費（整數元；最近一次讀到的） */
   tip: number | null;
+  /** v1.4 店家名稱（最近一次讀到的；隨 order/offer_decided telemetry 送，給訂單/拒單紀錄顯示） */
+  store: string | null;
   /** v1.2 邀請出現前 BASELINE_SEC 秒內：有沒有看過常駐字、最大的「N筆訂單」 */
   baseWeak: boolean;
   baseOrders: number | null;
@@ -289,7 +293,7 @@ export class OfferTracker {
       const base = baselineOf(this.idleLog, now);
       const offer: Offer = {
         minutes, amount: o.amount, key: offerKeyOf(minutes, o.amount), firstSeen: now, lastSeen: now, stacked: !!o.stacked,
-        bundle: 0, tip: null, baseWeak: base.weak, baseOrders: base.orders, baseTerms: base.terms,
+        bundle: 0, tip: null, store: null, baseWeak: base.weak, baseOrders: base.orders, baseTerms: base.terms,
       };
       this.noteExtras(offer, o);
       this.state = { kind: 'offered', offer, misses: 0, firstMissAt: null };
@@ -377,10 +381,11 @@ export class OfferTracker {
     if (this.idleLog.length > MAX_BASELINE_LOG) this.idleLog.splice(0, this.idleLog.length - MAX_BASELINE_LOG);
   }
 
-  /** v1.2 組合單張數取最大、小費取最近讀到的 */
+  /** v1.2 組合單張數取最大、小費取最近讀到的；v1.4 店名取最近讀到的 */
   private noteExtras(offer: Offer, o: OfferObservation): void {
     if (o.bundle != null && o.bundle > offer.bundle) offer.bundle = o.bundle;
     if (o.tip != null) offer.tip = o.tip;
+    if (o.store) offer.store = o.store;
   }
 
   private decide(

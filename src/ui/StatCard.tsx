@@ -16,6 +16,7 @@ export function PeriodCard({
   todayCount,
   periodStar,
   todayStar,
+  participationLine,
 }: {
   period: Period;
   current: Summary & { baselineCount: number };
@@ -27,6 +28,8 @@ export function PeriodCard({
   todayCount: number;
   periodStar: number;
   todayStar: number;
+  /** v1.4「參與率約 X%（接 A／派 A+D）」；沒抓到拒單 → 不顯示 */
+  participationLine?: string | null;
 }) {
   const prog = countProgress(current.count, goals.periodOrders, now, todayCount);
   const hint = countHint(prog, todayStar, gp, goals);
@@ -60,6 +63,11 @@ export function PeriodCard({
         {'　'}
         <Text style={{ color: orColor }}>超時 {pctText(current.overrunRate)}（上限 {pctText(goals.overrunRate)}）</Text>
       </Text>
+      {!!participationLine && (
+        <Text style={[S.small, { color: C.sub }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+          {participationLine}
+        </Text>
+      )}
       <Text style={S.small}>
         {current.baselineCount > 0 ? `含補登 ${current.baselineCount}・App ${ownCount}・` : ''}不含不計時效單
         {noStacked.stackedCount > 0 ? `・夾單 ${noStacked.stackedCount} 單（不含夾單準時 ${pctText(noStacked.period.onTimeRate)}）` : ''}

@@ -3,7 +3,10 @@
 //
 // 表：
 //   orders(id PK, acceptedAt, estimateMin, deliveredAt NULL, status, amount NULL, stacked, source, note,
-//          updatedAt, deleted, editedBy, syncAt, tip NULL, noTiming NULL)   ← tip（小費，元）v1.2 加、noTiming（不計時效 1/NULL）v1.2.4 加；舊資料庫由 migrate() 冪等 ALTER TABLE 補欄位
+//          updatedAt, deleted, editedBy, syncAt, tip NULL, noTiming NULL, store NULL)   ← tip（小費，元）v1.2 加、noTiming（不計時效 1/NULL）v1.2.4 加、
+//          store（店家名稱，≤40 字）v1.4 加；舊資料庫由 migrate() 冪等 ALTER TABLE 補欄位
+//   store_hints(at, min, store, kind, createdAt)：v1.4 telemetry 帶來的店名線索（kind 'order'＝ext 接單事件、'offer'＝未接判定），
+//          留 3 天；用來補「同分鐘、接單時間 ±120 秒、還沒有店名」的訂單（訂單可能比 telemetry 晚同步上來）
 //   baselines(period PK, orders, onTimePct, overrunPct, income NULL, updatedAt, deleted, syncAt)
 //   meta(key PK, value)：dbId（資料庫身分，App 用來偵測伺服器資料庫被重建）、syncCode、sessionKey
 // updatedAt＝最後修改時間（LWW 比較用；App 端是手機時鐘、管理頁是伺服器時鐘）；
@@ -18,6 +21,10 @@ export const MAX_NOTE = 100;
 export const MAX_ESTIMATE = 180;
 export const MAX_AMOUNT = 100_000;
 export const MAX_TIP = 2000;
+export const MAX_STORE = 40;
+/** v1.4 店名線索配對：|訂單 acceptedAt − 線索時間| ≤ 120 秒、分鐘相同 */
+export const STORE_MATCH_MS = 120_000;
+const STORE_HINT_KEEP_MS = 3 * 86_400_000;
 export const MAX_BASELINE_ORDERS = 2000;
 export const MAX_INCOME = 10_000_000;
 const ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
@@ -56,6 +63,14 @@ function cleanNote(x) {
   // 去掉控制字元（含換行）；過長 → 不合法（不默默截斷使用者的字）
   const s = x.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
   return s.length > MAX_NOTE ? null : s;
+}
+
+/** v1.4 店名清理（＝src/screenInfo.ts cleanStoreName）：非字串/空 → null；去控制字元、空白收一個、最多 40 個字（code point） */
+export function cleanStore(x) {
+  if (typeof x !== 'string') return null;
+  const t = x.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  return Array.from(t).slice(0, MAX_STORE).join('').trim() || null;
 }
 
 /**
@@ -115,7 +130,10 @@ export function validateOrder(r, now, opts = {}) {
   if (!SOURCES.includes(source)) return { ok: false, error: 'source 不合法' };
   const note = cleanNote(r.note);
   if (note == null) return { ok: false, error: `note 不合法（字串、≤${MAX_NOTE} 字）` };
-  return { ok: true, value: { id, acceptedAt, estimateMin, deliveredAt, status, amount, tip, noTiming, stacked, source, note, updatedAt, deleted } };
+  // v1.4 店家名稱（選填；沒帶/null/空字串＝沒有；超過 40 字截斷）
+  if (r.store != null && typeof r.store !== 'string') return { ok: false, error: 'store 不合法（字串）' };
+  const store = cleanStore(r.store);
+  return { ok: true, value: { id, acceptedAt, estimateMin, deliveredAt, status, amount, tip, noTiming, stacked, source, note, store, updatedAt, deleted } };
 }
 
 /** 補登（period＝期別起日 YYYY-MM-DD；百分比 0~100） */
@@ -155,7 +173,7 @@ CREATE TABLE IF NOT EXISTS orders(
   id TEXT PRIMARY KEY, acceptedAt INTEGER NOT NULL, estimateMin REAL NOT NULL, deliveredAt INTEGER,
   status TEXT NOT NULL, amount REAL, stacked INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'manual',
   note TEXT NOT NULL DEFAULT '', updatedAt INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
-  editedBy TEXT NOT NULL DEFAULT 'app', syncAt INTEGER NOT NULL, tip REAL, noTiming INTEGER);
+  editedBy TEXT NOT NULL DEFAULT 'app', syncAt INTEGER NOT NULL, tip REAL, noTiming INTEGER, store TEXT);
 CREATE INDEX IF NOT EXISTS orders_syncAt ON orders(syncAt);
 CREATE INDEX IF NOT EXISTS orders_acceptedAt ON orders(acceptedAt);
 CREATE TABLE IF NOT EXISTS baselines(
@@ -163,6 +181,8 @@ CREATE TABLE IF NOT EXISTS baselines(
   updatedAt INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, syncAt INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS baselines_syncAt ON baselines(syncAt);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS store_hints(at INTEGER NOT NULL, min REAL NOT NULL, store TEXT NOT NULL, kind TEXT NOT NULL, createdAt INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS store_hints_at ON store_hints(at);
 `;
 
 const orderOut = (r) => ({
@@ -174,6 +194,7 @@ const orderOut = (r) => ({
   amount: r.amount ?? null,
   tip: r.tip ?? null,
   noTiming: r.noTiming ? true : null,
+  store: r.store || null,
   stacked: !!r.stacked,
   source: r.source,
   note: r.note,
@@ -205,12 +226,14 @@ export async function openStore(dbPath, { seedSyncCode = '' } = {}) {
   return new Store(db, seedSyncCode);
 }
 
-/** 冪等遷移：舊資料庫（v0.11~v1.1）沒有 orders.tip、（≤v1.2.3）沒有 orders.noTiming → ALTER TABLE 補上（NULL＝沒有小費／照常計時效）；重複執行無副作用 */
+/** 冪等遷移：舊資料庫（v0.11~v1.1）沒有 orders.tip、（≤v1.2.3）沒有 orders.noTiming、（≤v1.3）沒有 orders.store → ALTER TABLE 補上（NULL＝沒有小費／照常計時效）；重複執行無副作用 */
 export function migrate(db) {
   const cols = db.prepare('PRAGMA table_info(orders)').all().map((c) => c.name);
   if (!cols.includes('tip')) db.exec('ALTER TABLE orders ADD COLUMN tip REAL');
   // v1.2.4 不計時效（1＝不計；NULL＝照常計）
   if (!cols.includes('noTiming')) db.exec('ALTER TABLE orders ADD COLUMN noTiming INTEGER');
+  // v1.4 店家名稱（NULL＝沒有）
+  if (!cols.includes('store')) db.exec('ALTER TABLE orders ADD COLUMN store TEXT');
 }
 
 export class Store {
@@ -221,11 +244,19 @@ export class Store {
       getMeta: q('SELECT value FROM meta WHERE key = ?'),
       setMeta: q('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
       getOrder: q('SELECT * FROM orders WHERE id = ?'),
-      upsertOrder: q(`INSERT INTO orders(id, acceptedAt, estimateMin, deliveredAt, status, amount, stacked, source, note, updatedAt, deleted, editedBy, syncAt, tip, noTiming)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      upsertOrder: q(`INSERT INTO orders(id, acceptedAt, estimateMin, deliveredAt, status, amount, stacked, source, note, updatedAt, deleted, editedBy, syncAt, tip, noTiming, store)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET acceptedAt=excluded.acceptedAt, estimateMin=excluded.estimateMin, deliveredAt=excluded.deliveredAt,
           status=excluded.status, amount=excluded.amount, stacked=excluded.stacked, source=excluded.source, note=excluded.note,
-          updatedAt=excluded.updatedAt, deleted=excluded.deleted, editedBy=excluded.editedBy, syncAt=excluded.syncAt, tip=excluded.tip, noTiming=excluded.noTiming`),
+          updatedAt=excluded.updatedAt, deleted=excluded.deleted, editedBy=excluded.editedBy, syncAt=excluded.syncAt, tip=excluded.tip, noTiming=excluded.noTiming,
+          store=excluded.store`),
+      // v1.4 店名線索
+      addHint: q('INSERT INTO store_hints(at, min, store, kind, createdAt) VALUES(?,?,?,?,?)'),
+      pruneHints: q('DELETE FROM store_hints WHERE createdAt < ?'),
+      hintsNear: q('SELECT * FROM store_hints WHERE at >= ? AND at <= ? AND ABS(min - ?) < 0.05'),
+      ordersNoStoreNear: q(`SELECT id, acceptedAt, source FROM orders WHERE deleted = 0 AND (store IS NULL OR store = '')
+        AND acceptedAt >= ? AND acceptedAt <= ? AND ABS(estimateMin - ?) < 0.05`),
+      setStore: q('UPDATE orders SET store = ?, syncAt = ? WHERE id = ?'),
       tombOrder: q('UPDATE orders SET deleted = 1, updatedAt = ?, editedBy = ?, syncAt = ? WHERE id = ?'),
       setDeleted: q('UPDATE orders SET deleted = ?, updatedAt = ?, editedBy = ?, syncAt = ? WHERE id = ?'),
       ordersSince: q('SELECT * FROM orders WHERE syncAt > ? ORDER BY syncAt LIMIT ?'),
@@ -286,7 +317,7 @@ export class Store {
   #writeOrder(v, editedBy) {
     this.s.upsertOrder.run(
       v.id, v.acceptedAt, v.estimateMin, v.deliveredAt, v.status, v.amount, v.stacked ? 1 : 0, v.source, v.note,
-      v.updatedAt, v.deleted ? 1 : 0, editedBy, this.tick(), v.tip ?? null, v.noTiming ?? null,
+      v.updatedAt, v.deleted ? 1 : 0, editedBy, this.tick(), v.tip ?? null, v.noTiming ?? null, v.store ?? null,
     );
   }
   #writeBaseline(v) {
@@ -300,6 +331,8 @@ export class Store {
   sync({ since, orders = [], baselines = [] }, now = Date.now()) {
     const acceptedO = new Set();
     const acceptedB = new Set();
+    // v1.4：採用了但伺服器補了東西（保留既有店名／用線索補店名）→ 照樣回傳給 App（updatedAt 不變，App 依內容差異套用）
+    const echoO = new Set();
     const rejectedO = new Set(); // 伺服器較新而沒採用的 → 一定回傳伺服器版（就算它在 since 之前）
     const rejectedB = new Set();
     const invalid = [];
@@ -322,7 +355,11 @@ export class Store {
         if (v.tombstoneOnly) {
           // 伺服器沒有這筆＝沒東西可刪（例如還沒同步就被刪掉的單）
           if (cur) this.s.tombOrder.run(v.updatedAt, 'app', this.tick(), v.id);
-        } else this.#writeOrder(v, 'app');
+        } else {
+          const w = this.#withStore(v, cur);
+          if (w !== v) echoO.add(v.id);
+          this.#writeOrder(w, 'app');
+        }
         acceptedO.add(v.id);
       }
       for (const raw of baselines) {
@@ -351,6 +388,7 @@ export class Store {
     const bRows = this.s.baselinesSince.all(from).filter((b) => b.syncAt <= cursor);
     const seenO = new Set(rows.map((r) => r.id));
     for (const id of rejectedO) if (!seenO.has(id)) rows.push(this.s.getOrder.get(id));
+    for (const id of echoO) if (!seenO.has(id)) rows.push(this.s.getOrder.get(id));
     const seenB = new Set(bRows.map((r) => r.period));
     for (const p of rejectedB) if (!seenB.has(p)) bRows.push(this.s.getBaseline.get(p));
     return {
@@ -360,12 +398,61 @@ export class Store {
       // since 比伺服器游標還大＝伺服器資料庫被換過（或 App 帶了別台的游標）→ 從頭給
       reset,
       changes: {
-        orders: rows.filter((o) => !acceptedO.has(o.id)).map(orderOut),
+        orders: rows.filter((o) => !acceptedO.has(o.id) || echoO.has(o.id)).map(orderOut),
         baselines: bRows.filter((b) => !acceptedB.has(b.period)).map(baselineOut),
       },
       accepted: { orders: acceptedO.size, baselines: acceptedB.size },
       invalid,
     };
+  }
+
+  /**
+   * v1.4 App 寫入的單沒帶店名：伺服器已有店名 → 保留（App 不需要上傳店名，舊版 App 也不會清掉它）；
+   * 都沒有 → 用 telemetry 線索補（同分鐘、接單時間 ±120 秒、最近的一條；'offer' 線索只補 confirm 單）。
+   * 有補 → 回傳新物件（呼叫端據此把這筆回傳給 App）；沒補 → 原物件。
+   */
+  #withStore(v, cur) {
+    if (v.store) return v;
+    if (cur?.store) return { ...v, store: cur.store };
+    if (v.deleted) return v;
+    const hint = this.#hintFor(v.acceptedAt, v.estimateMin, v.source);
+    return hint ? { ...v, store: hint } : v;
+  }
+  #hintFor(acceptedAt, min, source) {
+    const rows = this.s.hintsNear.all(acceptedAt - STORE_MATCH_MS, acceptedAt + STORE_MATCH_MS, min);
+    let best = null;
+    for (const h of rows) {
+      if (h.kind !== 'order' && source !== 'confirm') continue;
+      const score = Math.abs(h.at - acceptedAt) + (h.kind === 'order' ? 0 : STORE_MATCH_MS); // 同距離時接單事件優先
+      if (!best || score < best.score) best = { score, store: h.store };
+    }
+    return best?.store ?? null;
+  }
+
+  /**
+   * v1.4 telemetry 帶來的店名線索：hints＝[{ at(接單時間 ms), min, store, kind:'order'|'offer' }]。
+   * 記下（留 3 天）並馬上補給「同分鐘、±120 秒、還沒有店名、未刪除」的單（最近的那張；'offer' 線索只補 confirm 單）。
+   * 只改 store＋syncAt（updatedAt 不動：不會蓋掉 App 較新的修改；App 下次同步依內容差異拿到店名）。回傳補了幾張。
+   */
+  noteStoreHints(hints, now = Date.now()) {
+    let filled = 0;
+    this.tx(() => {
+      this.s.pruneHints.run(now - STORE_HINT_KEEP_MS);
+      for (const h of hints) {
+        const store = cleanStore(h?.store);
+        if (!store || !isNum(h.at) || !isNum(h.min) || h.min < 1 || h.min > MAX_ESTIMATE) continue;
+        const kind = h.kind === 'offer' ? 'offer' : 'order';
+        this.s.addHint.run(Math.round(h.at), h.min, store, kind, now);
+        const cands = this.s.ordersNoStoreNear
+          .all(h.at - STORE_MATCH_MS, h.at + STORE_MATCH_MS, h.min)
+          .filter((o) => kind === 'order' || o.source === 'confirm')
+          .sort((a, b) => Math.abs(a.acceptedAt - h.at) - Math.abs(b.acceptedAt - h.at));
+        if (!cands.length) continue;
+        this.s.setStore.run(store, this.tick(), cands[0].id);
+        filled += 1;
+      }
+    });
+    return filled;
   }
 
   // ── 管理頁 ──

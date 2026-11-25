@@ -5,7 +5,7 @@
 //   - since/now 是伺服器的變更序（不受手機時鐘影響）；dbId 變了或 reset:true＝伺服器資料庫換過 → 全部重傳。
 // 本機「待上傳」不另存佇列：每筆訂單的 updatedAt 與 pushed[id]（伺服器已知的版本）不同就是待上傳；
 //   刪掉的單看 prune 的墓碑（id → 刪除時間＝墓碑的 updatedAt）。離線時自然累積，下次同步一起送。
-import { normalizeTip, type Order } from './orders.ts';
+import { normalizeStore, normalizeTip, type Order } from './orders.ts';
 import { pruneTombstones, type Tombstones } from './prune.ts';
 import type { Baseline } from './stats';
 
@@ -21,6 +21,8 @@ export type WireOrder = {
   tip?: number | null;
   /** v1.2.4 不計時效；沒有＝省略（伺服器 null） */
   noTiming?: boolean | null;
+  /** v1.4 店家名稱（伺服器補）；沒有＝省略或 null。App 有值才上傳（伺服器收到沒帶的會保留它已有的） */
+  store?: string | null;
   stacked: boolean;
   source: WireSource;
   note: string;
@@ -92,7 +94,7 @@ export function orderUpdatedAt(o: Order): number {
 /** 會同步的欄位（activityId/notifIds 是這台手機的本地狀態，不同步、改了也不算變更） */
 export function syncFingerprint(o: Order): string {
   return JSON.stringify([
-    o.acceptedAt, o.estimateMin, o.deliveredAt ?? null, o.status, o.amount ?? null, !!o.stacked, o.source ?? 'manual', o.note ?? '', o.tip ?? null, !!o.noTiming,
+    o.acceptedAt, o.estimateMin, o.deliveredAt ?? null, o.status, o.amount ?? null, !!o.stacked, o.source ?? 'manual', o.note ?? '', o.tip ?? null, !!o.noTiming, o.store ?? null,
   ]);
 }
 
@@ -131,6 +133,7 @@ export function orderToWire(o: Order): WireOrder {
     amount: o.amount ?? null,
     ...(o.tip != null ? { tip: o.tip } : {}),
     ...(o.noTiming ? { noTiming: true } : {}),
+    ...(normalizeStore(o.store) ? { store: normalizeStore(o.store) } : {}),
     stacked: !!o.stacked,
     source: o.source ?? 'manual',
     note: (o.note ?? '').slice(0, MAX_NOTE),
@@ -161,6 +164,7 @@ export function parseWireOrder(raw: unknown): WireOrder | null {
     amount: (r.amount as number | null | undefined) ?? null,
     ...(normalizeTip(r.tip) != null ? { tip: normalizeTip(r.tip) as number } : {}),
     ...(r.noTiming === true || r.noTiming === 1 ? { noTiming: true } : {}),
+    ...(normalizeStore(r.store) ? { store: normalizeStore(r.store) } : {}),
     stacked: r.stacked === true,
     source,
     note: typeof r.note === 'string' ? r.note.slice(0, MAX_NOTE) : '',
@@ -189,6 +193,7 @@ export function wireToOrder(w: WireOrder, local?: Order): Order {
     ...(w.amount != null ? { amount: w.amount } : {}),
     ...(normalizeTip(w.tip) != null ? { tip: normalizeTip(w.tip) as number } : {}),
     ...(w.noTiming === true ? { noTiming: true } : {}),
+    ...(normalizeStore(w.store) ? { store: normalizeStore(w.store) } : {}),
     ...(w.note ? { note: w.note } : {}),
     updatedAt: w.updatedAt,
   };

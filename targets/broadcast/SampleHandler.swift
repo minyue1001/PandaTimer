@@ -1038,6 +1038,8 @@ final class BroadcastDetector {
     if let a = d.offer.amount { fields["amt"] = a }
     if d.offer.bundle >= 2 { fields["bundle"] = d.offer.bundle }
     if let t = d.offer.tip { fields["tip"] = t }
+    // v1.4 店家名稱（接單＝訂單顯示、未接＝拒單紀錄；隱私例外只有店名，見 CLAUDE.md）
+    if let st = d.offer.store { fields["store"] = st }
     telemetry.log("offer_decided", fields, urgent: true)
     let reasonText: String
     switch d.reason {
@@ -1134,6 +1136,8 @@ final class BroadcastDetector {
       fields["tip"] = t
       if tipSent != t { fields["code"] = tipSent ?? 0 }  // 小費超出訊號值（>300 或非整十）→ code＝實際送的值
     }
+    // v1.4 店家名稱：伺服器用（min, 接單時間＝t−delay）找同一張訂單補 store（組合單每張同一個店名）
+    if let st = d.offer.store { fields["store"] = st }
     telemetry.log("order", fields, urgent: true)
     return sent
   }

@@ -130,6 +130,7 @@ let csrf = '';
 let cfg = { graceFactor: 1.05, overrunCap: 1, rate: 245 / 60, minFare: 45 };
 let pIndex = Math.floor((Date.now() - ANCHOR) / SPAN);
 let orders = [];
+let declined = [];
 let baselines = new Map();
 let openId = null;
 let syncCodeText = '';
@@ -265,6 +266,10 @@ async function load() {
   try {
     const [o, b] = await Promise.all([api('GET', `orders?${q}`), api('GET', 'baselines')]);
     orders = o.orders;
+    // v1.4 拒單紀錄（telemetry 只留 14 天；伺服器舊版/失敗 → 不顯示）
+    const today = dateKey(Date.now());
+    const dTo = dateKey(p.end - DAY) < today ? dateKey(p.end - DAY) : today;
+    declined = dateKey(p.start) <= dTo ? await api('GET', `declined?from=${dateKey(p.start)}&to=${dTo}`).then((r) => r.declined || [], () => []) : [];
     baselines = new Map(b.baselines.filter((x) => !x.deleted).map((x) => [x.period, x]));
     render();
   } catch (e) {
@@ -314,12 +319,20 @@ function tagsOf(o) {
   ].filter(Boolean);
 }
 
+const DECLINE_REASON = { rejected: '拒絕', timeout: '逾時', superseded: '未接', stopped: '偵測停止', replaced: '換單' };
 function renderList() {
   const groups = new Map();
   for (const o of orders) {
     const k = dateKey(o.acceptedAt);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(o);
+  }
+  const decl = new Map();
+  for (const x of declined) {
+    const k = dateKey(x.t);
+    if (!decl.has(k)) decl.set(k, []);
+    decl.get(k).push(x);
+    if (!groups.has(k)) groups.set(k, []);
   }
   const out = [];
   for (const [k, list] of [...groups.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1))) {
@@ -329,6 +342,16 @@ function renderList() {
       h('span', {}, `${k.slice(5).replace('-', '/')}（${WEEK[d.getUTCDay()]}）`),
       h('span', {}, `${s.nAll} 單${s.nt ? `（${s.nt} 不計）` : ''}・準時 ${pct(s.n ? s.ok / s.n : null)}・超時 ${pct(s.n ? s.over / s.n : null)}・${money(s.income)}${s.tips > 0 ? `・小費 ${money(s.tips)}` : ''}`)));
     for (const o of list.sort((a, b) => b.acceptedAt - a.acceptedAt)) out.push(orderRow(o));
+    const dl = decl.get(k);
+    if (dl && dl.length) {
+      const live = list.filter((o) => !o.deleted && o.status !== 'canceled').length;
+      const box = h('details', { class: 'dim' }, h('summary', {}, `拒單 ${dl.length} 張（接 ${live}／派 ${live + dl.length}）`));
+      for (const x of dl.slice().sort((a, b) => b.t - a.t)) {
+        box.append(h('div', { class: 'sub' },
+          `${hm(x.t)}・${x.min} 分${x.amt != null ? `・${money(x.amt)}` : ''}${x.km != null ? `・${x.km} 公里` : ''}${x.store ? `・${x.store}` : ''}・${DECLINE_REASON[x.reason] || '未接'}`));
+      }
+      out.push(box);
+    }
   }
   if (!out.length) out.push(h('div', { class: 'card dim' }, '這期沒有訂單'));
   $('list').replaceChildren(...out);
@@ -344,6 +367,7 @@ function orderRow(o) {
         h('div', { class: 't' }, `${hm(o.acceptedAt)} → ${o.deliveredAt != null ? hm(o.deliveredAt) : '—'}`,
           done ? (o.noTiming ? h('span', { class: 'badge' }, '不計') : h('span', { class: `badge ${ok ? 'ok' : 'late'}` }, ok ? '準' : '超')) : null),
         h('div', { class: 'sub' }, `預估 ${o.estimateMin} 分${act != null ? `・實際 ${act} 分` : ''}`),
+        o.store ? h('div', { class: 'sub' }, `🏪 ${o.store}`) : null,
         h('div', {}, tagsOf(o).map((t) => h('span', { class: 'tag' }, t)), o.note ? h('span', { class: 'tag' }, `📝 ${o.note}`) : null)),
       h('div', {},
         h('div', { class: 'amt' }, o.amount != null ? money(o.amount) : h('span', { class: 'dim' }, `≈${money(estPay(o))}`)),
@@ -366,6 +390,7 @@ function fieldsForm(o, onSave, extraButtons) {
   const ntk = h('input', { type: 'checkbox' });
   ntk.checked = !!o.noTiming;
   const note = h('input', { type: 'text', maxlength: '100', value: o.note || '', placeholder: '可空' });
+  const storeIn = h('input', { type: 'text', maxlength: '40', value: o.store || '', placeholder: '可空' });
   const err = h('div', { class: 'err' });
   const save = async () => {
     err.textContent = '';
@@ -381,7 +406,7 @@ function fieldsForm(o, onSave, extraButtons) {
     const tip = tipIn.value.trim() === '' ? null : Number(tipIn.value);
     if (tip != null && !(tip >= 0 && tip <= 2000)) return (err.textContent = '小費 0~2000');
     try {
-      await onSave({ acceptedAt, estimateMin, status: st.value, deliveredAt: st.value === 'active' ? null : deliveredAt, amount, tip, noTiming: ntk.checked, stacked: stk.checked, note: note.value });
+      await onSave({ acceptedAt, estimateMin, status: st.value, deliveredAt: st.value === 'active' ? null : deliveredAt, amount, tip, noTiming: ntk.checked, stacked: stk.checked, note: note.value, store: storeIn.value.trim() || null });
     } catch (e) {
       err.textContent = e.message;
     }
@@ -395,6 +420,7 @@ function fieldsForm(o, onSave, extraButtons) {
     h('label', { class: 'f' }, '小費 $', tipIn),
     h('label', { class: 'f' }, '夾單', stk),
     h('label', { class: 'f' }, '不計時效（轉成其他訂單）', ntk),
+    h('label', { class: 'f' }, '店家', storeIn),
     h('label', { class: 'f' }, '備註', note),
     err,
     h('div', { class: 'row' }, h('button', { class: 'pink grow', onclick: save }, '儲存'), extraButtons));
@@ -425,7 +451,7 @@ function openNew() {
   const box = $('newForm');
   if (!box.classList.contains('hidden')) return box.classList.add('hidden');
   const now = Date.now();
-  const o = { acceptedAt: now - 20 * 60e3, estimateMin: 18, status: 'delivered', deliveredAt: now, amount: null, tip: null, noTiming: false, stacked: false, note: '' };
+  const o = { acceptedAt: now - 20 * 60e3, estimateMin: 18, status: 'delivered', deliveredAt: now, amount: null, tip: null, noTiming: false, stacked: false, note: '', store: null };
   box.replaceChildren(h('h2', {}, '新增一筆'), fieldsForm(o, async (f) => {
     const r = await api('POST', 'orders', f);
     box.classList.add('hidden');

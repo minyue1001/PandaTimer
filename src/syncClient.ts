@@ -5,9 +5,10 @@ import Constants from 'expo-constants';
 import { useCallback, useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 import { cleanupEnded } from './controller';
+import { declinedUrlFrom, parseDeclinedResponse, type DeclinedOffer } from './declined';
 import type { Order } from './orders';
 import { parseReconcileResponse, reconcileUrlFrom, type ReconcileResult } from './reconcile';
-import { periodOf } from './stats';
+import { periodOf, taipeiDate } from './stats';
 import { loadBaselineSlot, saveBaselineSlot } from './statsConfig';
 import {
   getOrders,
@@ -202,6 +203,40 @@ async function runSyncOnce(codeOverride?: string): Promise<RunResult> {
   }
 }
 
+// ── v1.4 拒單紀錄（本期；POST /api/declined，同步碼）：啟動/回前景同步完再抓（伺服器要先有最新訂單才排得掉「其實有接」的） ──
+const DECLINED_URL = declinedUrlFrom(SYNC_URL);
+/** null＝沒抓到（未配對/離線/舊伺服器）→ 畫面不顯示拒單 */
+let declined: DeclinedOffer[] | null = null;
+let declinedWanted = false;
+let declinedAt = 0;
+const declinedListeners = new Set<(l: DeclinedOffer[] | null) => void>();
+async function refreshDeclined(): Promise<void> {
+  if (!DECLINED_URL) return;
+  const code = await loadSyncCode();
+  if (!code) return;
+  const now = Date.now();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(DECLINED_URL, {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'content-type': 'application/json', accept: 'application/json', 'x-pt-sync': code },
+      body: JSON.stringify({ from: taipeiDate(periodOf(now).start), to: taipeiDate(now) }),
+    });
+    if (!res.ok) return; // 舊伺服器 404／錯誤 → 保留上次結果
+    const list = parseDeclinedResponse(await res.json());
+    if (!list) return;
+    declined = list;
+    declinedAt = now;
+    declinedListeners.forEach((l) => l(declined));
+  } catch {
+    /* 離線：不顯示/保留上次 */
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── 排程（單例） ──
 let pairCode: string | null = null;
 let lastRun: RunResult | null = null;
@@ -212,6 +247,11 @@ const scheduler = new SyncScheduler(async () => {
     if (!pairCode || lastRun.ok) {
       const s = await loadSyncState();
       setStatus({ lastAttemptAt: s.lastAttemptAt, lastOkAt: s.lastOkAt, lastResult: s.lastResult, lastOk: s.lastOk });
+    }
+    // 啟動/回前景要的拒單（60 秒內抓過就不再抓）
+    if (declinedWanted && lastRun.ok && Date.now() - declinedAt >= 60_000) {
+      declinedWanted = false;
+      await refreshDeclined();
     }
   } finally {
     setStatus({ running: false });
@@ -229,7 +269,10 @@ function start(): () => void {
       if (!alive) return;
       setStatus({ paired: !!code, codeTail: tailOf(code), lastAttemptAt: s.lastAttemptAt, lastOkAt: s.lastOkAt, lastResult: s.lastResult, lastOk: s.lastOk });
       void refreshPending(s);
-      if (code) void scheduler.now(); // App 啟動
+      if (code) {
+        declinedWanted = true;
+        void scheduler.now(); // App 啟動
+      }
     })();
     const offLocal = onLocalChange(() => {
       if (!status.paired) return;
@@ -237,7 +280,10 @@ function start(): () => void {
       void refreshPending();
     });
     const appSub = AppState.addEventListener('change', (st) => {
-      if (st === 'active' && status.paired) void scheduler.now(); // 回前景
+      if (st === 'active' && status.paired) {
+        declinedWanted = true;
+        void scheduler.now(); // 回前景
+      }
     });
     const timer = setInterval(() => {
       if (status.paired && AppState.currentState === 'active') void scheduler.now(); // 前景每 2 分鐘
@@ -267,6 +313,7 @@ export async function pairWithCode(text: string): Promise<RunResult> {
   const code = normalizeSyncCode(text);
   if (!code) return { ok: false, message: '同步碼格式不對（管理頁上的 12 碼，例如 ABCD-EFGH-JKLM）' };
   pairCode = code;
+  declinedWanted = true;
   try {
     await scheduler.now();
     return lastRun ?? { ok: false, message: '同步沒有執行' };
@@ -338,3 +385,16 @@ export function useCloudSync() {
   return { status: st, syncNow: now, pair, unpair: off };
 }
 export type CloudSync = ReturnType<typeof useCloudSync>;
+
+/** v1.4 本期拒單（null＝沒抓到，不顯示）；啟動/回前景同步後自動更新 */
+export function useDeclined(): DeclinedOffer[] | null {
+  const [list, setList] = useState<DeclinedOffer[] | null>(declined);
+  useEffect(() => {
+    declinedListeners.add(setList);
+    setList(declined);
+    return () => {
+      declinedListeners.delete(setList);
+    };
+  }, []);
+  return list;
+}

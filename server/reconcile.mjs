@@ -102,6 +102,8 @@ export function hms(ms) {
 const hm = (ms) => hms(ms).slice(0, 5);
 const money = (x) => `$${r2(x)}`;
 const minText = (m) => (m == null ? '≤11 分' : `${m} 分`);
+/** v1.4 訂單有店名 → 「(店名)」，沒有＝空字串（對帳提議裡認得是哪一張） */
+const storeTag = (o) => (o && typeof o.store === 'string' && o.store ? `(${o.store})` : '');
 
 /** 台北日 YYYY-MM-DD → 00:00 的 ms；不合法 → NaN */
 export function taipeiDayStart(date) {
@@ -367,7 +369,7 @@ export function reconcile(input) {
         id: pid('restore'),
         type: 'restore',
         confidence: !over && fits && (adds.length || eq(R, 0)) ? 'high' : 'low',
-        text: `還原被取消的 ${hm(o.acceptedAt)} ${o.estimateMin} 分 ${money(amountOf(o))}：之後有取餐與 ${hms(c.deliveredAt)} 送達`,
+        text: `還原被取消的 ${hm(o.acceptedAt)}${storeTag(o)} ${o.estimateMin} 分 ${money(amountOf(o))}：之後有取餐與 ${hms(c.deliveredAt)} 送達`,
         orderId: o.id,
         fields: { status: 'delivered', deliveredAt: c.deliveredAt },
         needs: [],
@@ -457,7 +459,7 @@ export function reconcile(input) {
           id: pid('tip'),
           type: 'tip',
           confidence: 'high',
-          text: `小費 ${money(tipD)} 記在 ${hm(near.acceptedAt)}→${hm(near.deliveredAt)} 那張（${hms(s.at)} 送達畫面有「小費 ${money(tipD)}」）`,
+          text: `小費 ${money(tipD)} 記在 ${hm(near.acceptedAt)}→${hm(near.deliveredAt)}${storeTag(near)} 那張（${hms(s.at)} 送達畫面有「小費 ${money(tipD)}」）`,
           orderId: near.id,
           fields: { tip: tipD },
           needs: [],
@@ -490,7 +492,7 @@ export function reconcile(input) {
       id: pid('review'),
       type: 'review',
       confidence: 'low',
-      text: `App 小費比平台多 ${money(-tipD)}：有小費的單 ${withTip.map((o) => `${hm(o.acceptedAt)} ${money(tipOf(o))}`).join('、') || '（無）'}，請檢查`,
+      text: `App 小費比平台多 ${money(-tipD)}：有小費的單 ${withTip.map((o) => `${hm(o.acceptedAt)}${storeTag(o)} ${money(tipOf(o))}`).join('、') || '（無）'}，請檢查`,
       orderId: null,
       fields: {},
       needs: [],
@@ -511,7 +513,7 @@ export function reconcile(input) {
           id: pid('review'),
           type: 'review',
           confidence: 'low',
-          text: `${hm(o.acceptedAt)} 那張 ${o.estimateMin} 分 ${money(amountOf(o))} → 改成 ${minText(mm.min)} ${money(want)} 金額就對上（分鐘可能讀錯）`,
+          text: `${hm(o.acceptedAt)}${storeTag(o)} 那張 ${o.estimateMin} 分 ${money(amountOf(o))} → 改成 ${minText(mm.min)} ${money(want)} 金額就對上（分鐘可能讀錯）`,
           orderId: o.id,
           fields: { estimateMin: m, amount: want },
           actions: ['edit'],
@@ -549,7 +551,7 @@ export function reconcile(input) {
             id: pid('review'),
             type: 'review',
             confidence: 'low',
-            text: `App 多記 ${-k} 張？${hm(o.acceptedAt)}→${hm(o.deliveredAt)} ${o.estimateMin} 分 ${money(amountOf(o))}：${why.join('、')}`,
+            text: `App 多記 ${-k} 張？${hm(o.acceptedAt)}→${hm(o.deliveredAt)}${storeTag(o)} ${o.estimateMin} 分 ${money(amountOf(o))}：${why.join('、')}`,
             orderId: o.id,
             fields: {},
             actions: ['delete', 'cancel'],
@@ -562,4 +564,69 @@ export function reconcile(input) {
   }
 
   return { date, until: end, app, platform: plat, diff, proposals, info };
+}
+
+// ── v1.4 拒單紀錄（未接的邀請；純函式，/api/declined、/api/admin/declined 用，test/declined.test.mjs 驗） ──
+//
+// 來源：ext `offer_decided` result=reject（舊伺服器只剩 note=reject）。時間＝同分鐘（金額相同或任一方沒抓到）最近一個
+//   `offer_seen`（決定前 15 分鐘內）的 t，沒有就＝t − wait（邀請消失的時間）；公里/金額/店名優先取決定事件，缺的用 offer_seen 補。
+// 排除（不是真的拒單）：
+//   ① replaced 且（自己金額不可能地低＝誤讀，或 10 秒內出現的下一張邀請同分鐘＝同一張重讀）；
+//   ② 60 秒內同分鐘同金額的另一筆拒單（同一張重複判定，留第一筆）；
+//   ③ 前後 60 秒內同分鐘同金額被判「接單」（offer_decided accept／ext order）；
+//   ④ 有訂單（未刪除，任何來源/狀態：App 判定接單、「你有接嗎？」按有接 source=confirm…）同分鐘、接單時間在邀請時間或判定時間 ±120 秒內。
+export const DECLINED_SAME_MS = 60 * SEC;
+export const DECLINED_ORDER_MS = 120 * SEC;
+const SEEN_LOOKBACK_MS = 15 * MIN;
+const REPLACED_NEXT_MS = 10 * SEC;
+const amountKeyOf = (a) => (isNum(a) && a >= 1 && a <= 999 ? Math.round(a) : 0);
+const sameAmount = (a, b) => amountKeyOf(a) === 0 || amountKeyOf(b) === 0 || amountKeyOf(a) === amountKeyOf(b);
+/** 金額比該分鐘的報酬還低（OCR 誤讀）；沒金額 → false */
+const implausible = (min, amt) => isNum(amt) && Math.round(amt * 100) < Math.round(exactFare(min) * 100) - 1;
+
+export const DECLINED_REASON_TEXT = { rejected: '拒絕', timeout: '逾時', superseded: '未接', stopped: '偵測停止', replaced: '換單' };
+
+/**
+ * @param {{ events:object[], orders:object[], from:number, to:number }} input from/to＝邀請時間範圍 [from, to)（ms）
+ * @returns {{ t:number, min:number, amt:number|null, km:number|null, store:string|null, reason:string, decidedAt:number }[]}（依時間舊→新）
+ */
+export function declinedOffers(input) {
+  const evs = (input.events || [])
+    .filter((r) => r && r.src === 'ext' && isNum(r.min) && (r.ev === 'offer_seen' || r.ev === 'offer_decided' || r.ev === 'order'))
+    .map((r) => ({ ...r, at: evTime(r) }))
+    .filter((r) => isNum(r.at))
+    .sort((a, b) => a.at - b.at);
+  const seen = evs.filter((r) => r.ev === 'offer_seen');
+  const accepts = evs.filter((r) => (r.ev === 'offer_decided' && (r.result ?? r.note) === 'accept') || r.ev === 'order');
+  const live = (input.orders || []).filter((o) => o && !o.deleted && isNum(o.acceptedAt) && isNum(o.estimateMin));
+  const out = [];
+  for (const d of evs) {
+    if (d.ev !== 'offer_decided' || (d.result ?? d.note) !== 'reject') continue;
+    let s = null;
+    for (const x of seen) {
+      if (x.at > d.at) break;
+      if (d.at - x.at <= SEEN_LOOKBACK_MS && x.min === d.min && sameAmount(x.amt, d.amt)) s = x;
+    }
+    const t = s ? s.at : d.at - (isNum(d.wait) && d.wait > 0 ? d.wait * SEC : 0);
+    if (!(t >= input.from && t < input.to)) continue;
+    const amt = isNum(d.amt) ? d.amt : isNum(s?.amt) ? s.amt : null;
+    if (d.reason === 'replaced') {
+      if (implausible(d.min, amt)) continue; // ①
+      const next = seen.find((x) => x.at >= d.at - 1000 && x.at - d.at <= REPLACED_NEXT_MS && x !== s);
+      if (next && next.min === d.min) continue;
+    }
+    if (out.some((p) => p.min === d.min && sameAmount(p.amt, amt) && Math.abs(p.decidedAt - d.at) <= DECLINED_SAME_MS)) continue; // ②
+    if (accepts.some((a) => a.min === d.min && sameAmount(a.amt, amt) && Math.abs(a.at - d.at) <= DECLINED_SAME_MS)) continue; // ③
+    if (
+      live.some(
+        (o) =>
+          Math.abs(o.estimateMin - d.min) < 0.05 &&
+          (Math.abs(o.acceptedAt - t) <= DECLINED_ORDER_MS || Math.abs(o.acceptedAt - d.at) <= DECLINED_ORDER_MS),
+      )
+    ) continue; // ④
+    const km = isNum(d.km) ? d.km : isNum(s?.km) ? s.km : null;
+    const store = typeof d.store === 'string' && d.store ? d.store : typeof s?.store === 'string' && s.store ? s.store : null;
+    out.push({ t, min: d.min, amt, km, store, reason: typeof d.reason === 'string' ? d.reason : 'rejected', decidedAt: d.at });
+  }
+  return out;
 }

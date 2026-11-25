@@ -52,6 +52,8 @@ export type HomeProps = {
   screenHint?: ScreenHint | null;
   onHintAdd?: (h: ScreenHint) => void;
   onHintNo?: (h: ScreenHint) => void;
+  /** v1.4 本期參與率一行（沒抓到拒單 → null） */
+  participationLine?: string | null;
 };
 
 export const HomeScreen = memo(function HomeScreen(p: HomeProps) {
@@ -108,6 +110,7 @@ export const HomeScreen = memo(function HomeScreen(p: HomeProps) {
         todayCount={p.stats.today.count}
         periodStar={p.stars.period}
         todayStar={p.stars.today}
+        participationLine={p.participationLine}
       />
       <TodayCard today={p.stats.today} earn={p.todayEarn} todayStar={p.stars.today} />
 

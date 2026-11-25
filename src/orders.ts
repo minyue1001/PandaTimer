@@ -31,6 +31,8 @@ export type Order = {
   tip?: number;
   /** v1.2.4：不計時效（平台把單「轉成其他訂單」：照領錢、補錢 0，但不算進準時率/超時率）；false/undefined 不存 */
   noTiming?: boolean;
+  /** v1.4：店家名稱（伺服器依 extension 接單 telemetry 補上，同步帶回；管理頁可改；≤40 字）；沒有＝不存 */
+  store?: string;
   note?: string;
   /** 雲端同步：同步欄位最後修改時間 (ms)；store.mutate 自動蓋，LWW 用（'admin'＝管理網頁新增的單） */
   updatedAt?: number;
@@ -44,6 +46,14 @@ export function normalizeTip(x: unknown): number | undefined {
   if (typeof x !== 'number' || !Number.isFinite(x) || x <= 0 || x > MAX_TIP) return undefined;
   const t = Math.round(x * 100) / 100;
   return t > 0 ? t : undefined;
+}
+
+/** v1.4 店名正規化（＝server cleanStore）：非字串/空 → undefined；去控制字元、空白收一個、最多 40 個字 */
+export function normalizeStore(x: unknown): string | undefined {
+  if (typeof x !== 'string') return undefined;
+  const t = x.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return undefined;
+  return Array.from(t).slice(0, 40).join('').trim() || undefined;
 }
 
 /** 使用者輸入的小費文字 → { ok, tip }；空字串/0＝清除（tip undefined）；不合法（負數、非數字、>2000）→ ok:false */

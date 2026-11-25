@@ -327,6 +327,8 @@ export type HistRow = {
   noTiming: boolean;
   /** v1.3 星號風險（單接又超過預估分鐘） */
   star: boolean;
+  /** v1.4 店家名稱（沒有＝空字串） */
+  store: string;
   tags: string[];
   /** 「準時」／「超 N 分」 */
   statusText: string;
@@ -421,6 +423,7 @@ export function groupHistory(
           tip: o.tip ?? 0,
           noTiming: !!o.noTiming,
           star: stars.has(o.id),
+          store: o.store ?? '',
           tags: orderTags(o, stars.has(o.id)),
           statusText: rowStatusText({ status: 'delivered', est: o.estimateMin, act, onTime, noTiming: o.noTiming }),
           estActText: estActText({ status: 'delivered', est: o.estimateMin, act }),

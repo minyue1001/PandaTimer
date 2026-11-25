@@ -44,6 +44,11 @@ export function OrderCard({
             <Text style={[S.textBold, { color: C.dim, textDecorationLine: 'underline' }]}>取消</Text>
           </Pressable>
         </View>
+        {!!order.store && (
+          <Text style={[S.textBold, { fontSize: F.label }]} numberOfLines={1}>
+            🏪 {order.store}
+          </Text>
+        )}
         <Text style={[S.textBold, { fontSize: F.title, color }]}>{cd.late ? `已超時 ${cd.lateMin} 分` : '剩餘'}</Text>
         <Text style={[S.bigNum, { fontSize: 72, lineHeight: 80, color }]}>
           {cd.late ? '+' : ''}

@@ -26,7 +26,8 @@ import { DEFAULT_PAY, periodAndTodayEarnings, type PayParams } from './src/earni
 import { DEFAULT_OFFER_ISLAND } from './src/offerIsland';
 import { fetchRemoteParams, loadBaseline, loadCachedOfferWaitSec, loadCachedShortWarnMinutes, loadCachedPayParams, loadCachedStatsParams, loadGoals } from './src/statsConfig';
 import { subscribe } from './src/store';
-import { useCloudSync } from './src/syncClient';
+import { useCloudSync, useDeclined } from './src/syncClient';
+import { participation, participationText } from './src/declined';
 import {
   confirmAcceptedAt,
   EMPTY_STATE,
@@ -396,6 +397,13 @@ function Main() {
     () => ({ period: periodStarCount(orders, minuteTick * 60_000), today: todayStarCount(orders, minuteTick * 60_000) }),
     [orders, minuteTick],
   );
+  // v1.4 本期拒單（伺服器 telemetry）→ 首頁參與率、紀錄頁每天「拒單 N 張」
+  const declined = useDeclined();
+  const participationLine = useMemo(() => {
+    if (!declined) return null;
+    const p = participation(orders, declined, st.period);
+    return p ? participationText(p) : null;
+  }, [declined, orders, st.period]);
   const laSupported = useMemo(() => LiveActivity.isSupported(), []);
   // 原生偵測狀態每秒讀一次（同步、很便宜）
   const det = useMemo(() => LiveActivity.detectorStatus(), [now]);
@@ -450,6 +458,7 @@ function Main() {
             screenHint={screenHint}
             onHintAdd={onHintAdd}
             onHintNo={onHintNo}
+            participationLine={participationLine}
           />
         </View>
         <View style={[S.screen, tab !== 'history' && hidden]}>
@@ -462,6 +471,7 @@ function Main() {
             periodLabel={st.period.label}
             noStacked={noStacked}
             toast={showToast}
+            declined={declined}
           />
         </View>
         <View style={[S.screen, tab !== 'settings' && hidden]}>

@@ -17,7 +17,9 @@ test('欄位白名單：Swift allowedKeys ＝ 伺服器 FIELD_RULES 的鍵', () 
   const sblock = server.slice(server.indexOf('const FIELD_RULES = {'), server.indexOf('const MAX_STR'));
   const serverKeys = [...sblock.matchAll(/\b([A-Za-z]+):/g)].map((m) => m[1]).sort();
   assert.deepEqual(swiftKeys, serverKeys);
-  for (const forbidden of ['text', 'ocrText', 'address', 'addr', 'store', 'customer', 'name', 'phone']) {
+  // v1.4：店名（store）是唯一允許的 OCR 文字欄位（邀請畫面、送餐資訊之前）；地址/客人資訊照舊不准
+  assert.ok(swiftKeys.includes('store'));
+  for (const forbidden of ['text', 'ocrText', 'address', 'addr', 'customer', 'name', 'phone', 'raw', 'lines']) {
     assert.ok(!swiftKeys.includes(forbidden), forbidden);
   }
 });

@@ -1,7 +1,8 @@
 // v0.6 遠端狀態回報（telemetry）用的畫面摘要：只產生**結構化欄位**，絕不輸出 OCR 原文。
 // ⚠️ 與 targets/broadcast/OrderDetector.swift 的 ScreenInfo 同一套規則（Swift 在 WSL 不能跑，這份是測試替身），
 //    白名單關鍵字另與 server/index.mjs 的 TELEMETRY_KEYWORDS 一致（伺服器會再過濾一次）；改一邊改三邊（test 會比對）。
-// 隱私鐵律：不得上傳 OCR 原文、地址、店名、顧客資訊 → 只回報「白名單關鍵字命中清單」、分鐘數、金額、公里數、畫面分類。
+// 隱私鐵律：不得上傳 OCR 原文、地址、顧客資訊 → 只回報「白名單關鍵字命中清單」、分鐘數、金額、公里數、畫面分類。
+// v1.4 唯一例外：邀請畫面的店家名稱（store，送餐資訊之前、店家地址上一行，≤40 字），只隨接單/判定事件送。
 import {
   amountKey,
   DEFAULT_ACCEPT_PATTERN,
@@ -146,6 +147,8 @@ export type ScreenSummary = {
   bundle: number;
   /** v1.2：邀請金額下方「包含額外 N $ 元」＝小費（整數元 1~2000；沒有 → null） */
   tip: number | null;
+  /** v1.4：邀請畫面（有接單鈕）的店家名稱（extractStoreName；隱私例外只有這一欄，≤40 字）；不是邀請/找不到 → null */
+  store: string | null;
 };
 
 // v0.7 接單後/未接畫面的預設關鍵字（v0.8 加入首日實測接單後畫面：「預計7分鐘後抵達店家・1筆訂單」「再 8 分鐘即將準備完成」「取餐體驗如何呢?」；
@@ -176,6 +179,53 @@ const STACK_SCREEN_RX = /疊單|叠单/;
 const PICKED_UP_RX = /已取餐|已取单/;
 /** v1.2.8 邀請卡（滑入/滑出中、接單鈕還沒讀到：每單收入、夾單邀請上方的「夾單」）不算「別的頁」（＝Swift ScreenInfo.offerCardPattern） */
 const OFFER_CARD_RX = /每單收入|每单收入|夾單|夹单/;
+
+// ── v1.4 店家名稱（邀請畫面；＝Swift ScreenInfo.extractStoreName，改一邊改兩邊） ──
+// 隱私例外：只取「第一個送餐資訊之前、店家地址行的上一行」＝店名；客人地址/姓名在送餐資訊之後，絕不看。
+/** 截止行：第一個「送餐資訊」（之後全是客人資訊） */
+export const STORE_STOP_RX = /送餐資訊|送餐资讯|送餐資讯|送餐资訊/;
+/** 店家地址行：開頭是括號包 1~2 個符號（(△)/(X)/(○)…，OCR 可能讀成 (A)/(x)），或有「…市…區」「…路/街…號」 */
+export const STORE_ADDR_MARK_RX = /^[(（\[【〔][^\s()（）\[\]【】〔〕\u4e00-\u9fff]{1,2}[)）\]】〕]/;
+export const STORE_ADDR_TEXT_RX = /[市縣县].{1,5}?[區鄉鎮区乡镇]|[路街道巷段弄].{0,10}?[號号]/;
+/** 不是店名的行：分鐘/公里/金額、純數字符號、邀請卡 UI 字 */
+export const STORE_REJECT_RX =
+  /[0-9]+(?:\.[0-9]+)?(?:分鐘|分钟|公里|km|KM)|[$＄]|每單收入|每单收入|接受訂單|接受订单|夾單|夹单|訂單|订单|包含[額额]外|樓層|楼层|預計|预计/;
+const STORE_NUMERIC_RX = /^[0-9.,:+\-()（）%]*$/;
+export const STORE_MAX = 40;
+
+/** 去空白後的一行是不是店家地址行 */
+export function isStoreAddressLine(compactLine: string): boolean {
+  return STORE_ADDR_MARK_RX.test(compactLine) || STORE_ADDR_TEXT_RX.test(compactLine);
+}
+
+/** 店名清理：去控制字元、空白收成一個、去頭尾、最多 40 個字（code point）；空 → null */
+export function cleanStoreName(s: unknown): string | null {
+  if (typeof s !== 'string') return null;
+  const t = s.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  return Array.from(t).slice(0, STORE_MAX).join('').trim() || null;
+}
+
+/**
+ * OCR 原文（行以 \n 分隔，由上到下）→ 店名；找不到 → null。
+ * 規則：只看第一個「送餐資訊」之前的行（沒有送餐資訊＝不取）；其中第一個店家地址行的上一個非空行＝店名候選；
+ * 候選是分鐘/公里/金額/數字/UI 字或本身也像地址 → null（不往更上面找）。
+ */
+export function extractStoreName(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const lines = normalizeOcrText(raw).split('\n');
+  const stop = lines.findIndex((l) => STORE_STOP_RX.test(l.replace(/\s+/g, '')));
+  if (stop < 0) return null;
+  const head = lines.slice(0, stop);
+  const addr = head.findIndex((l) => isStoreAddressLine(l.replace(/\s+/g, '')));
+  if (addr <= 0) return null;
+  let i = addr - 1;
+  while (i >= 0 && !head[i].trim()) i--;
+  if (i < 0) return null;
+  const compact = head[i].replace(/\s+/g, '');
+  if (!compact || STORE_REJECT_RX.test(compact) || STORE_NUMERIC_RX.test(compact) || isStoreAddressLine(compact)) return null;
+  return cleanStoreName(head[i]);
+}
 
 /** 去空白文字 → 小費整數元（1~2000）；沒有/不合理 → null */
 export function extractTip(compact: string): number | null {
@@ -342,6 +392,7 @@ export function summarizeScreen(raw: string | null | undefined, rules: ScreenRul
     stackScreen: compact ? STACK_SCREEN_RX.test(compact) : false,
     bundle: compact ? countMatches(compact, rules.bundleKeywords, DEFAULT_BUNDLE_KEYWORDS) : 0,
     tip: compact ? extractTip(compact) : null,
+    store: accept ? extractStoreName(raw) : null,
   };
 }
 

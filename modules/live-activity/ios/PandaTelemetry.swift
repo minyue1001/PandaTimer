@@ -7,7 +7,7 @@ import Foundation
 // 設定來源：主 App Info.plist 的 PandaTelemetryKey / PandaTelemetryURL / PandaRuntimeVersion
 //   （plugins/withTelemetry.js 在 prebuild 時由 app.json extra 寫入）；extension 讀「所屬 App」的 Info.plist
 //   （PlugIns/PandaBroadcast.appex 往上兩層）。缺設定 → 停用，只記在 snapshot。
-// 隱私鐵律：不得上傳 OCR 原文、地址、店名、顧客資訊。呼叫端只能傳結構化欄位；這裡再擋一次：
+// 隱私鐵律：不得上傳 OCR 原文、地址、顧客資訊（v1.4 唯一例外：邀請畫面店名 store）。呼叫端只能傳結構化欄位；這裡再擋一次：
 //   只收 allowedKeys（伺服器 server/index.mjs 的 FIELD_RULES 也只收同一批）、字串截 80 字、kw 只收 ≤12 字的字串陣列。
 // 批次＋節流：累積 10 筆或每 60 秒（v0.9 省電；v0.6~0.8 是 30 秒，遠端 telemetry.flushSeconds 可調）送一次；urgent（新單/錯誤）立即送；失敗留在記憶體最多 200 筆（丟最舊）；
 // 每分鐘最多記 100 筆（伺服器上限 120），超過的非 urgent 事件直接丟（計入 dropped）。全部在自己的 queue 上跑，不阻塞偵測。
@@ -43,6 +43,8 @@ final class PandaTelemetry {
     "matched", "stackKind",
     // v1.2 組合單張數、小費（整數元）、送單畫面 N 筆訂單
     "bundle", "tip", "screenOrders",
+    // v1.4 邀請畫面的店家名稱（隱私例外只有這一欄；≤40 字，伺服器再清一次）
+    "store",
   ]
 
   private let endpoint: URL?

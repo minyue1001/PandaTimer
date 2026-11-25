@@ -88,6 +88,8 @@ struct OfferObservation {
   let orders: Int?
   let bundle: Int
   let tip: Int?
+  /// v1.4 邀請畫面的店家名稱
+  let store: String?
   /// v1.2.8
   let acceptTerms: [String]
   let acceptTermParts: [String]
@@ -109,6 +111,7 @@ struct OfferObservation {
     orders = s.orders
     bundle = s.bundle
     tip = s.tip
+    store = s.store
     acceptTerms = s.acceptTerms
     acceptTermParts = s.acceptTermParts
     delivered = s.delivered
@@ -129,6 +132,8 @@ struct Offer {
   /// v1.2 組合單張數（「送餐資訊」最大次數）、小費（最近讀到的）、邀請前有沒有常駐字/最大「N筆訂單」
   var bundle = 0
   var tip: Int?
+  /// v1.4 店家名稱（最近讀到的；隨 order/offer_decided telemetry 送）
+  var store: String?
   var baseWeak = false
   var baseOrders: Int?
   /// v1.2.8 邀請前看過的接單字（子字串摘要）
@@ -230,11 +235,12 @@ final class OfferTracker {
     return out
   }
 
-  /// v1.2 組合單張數取最大、小費取最近讀到的（＝TS noteExtras）
+  /// v1.2 組合單張數取最大、小費取最近讀到的；v1.4 店名取最近讀到的（＝TS noteExtras）
   static func noted(_ offer: Offer, _ o: OfferObservation) -> Offer {
     var out = offer
     if o.bundle > out.bundle { out.bundle = o.bundle }
     if let t = o.tip { out.tip = t }
+    if let st = o.store, !st.isEmpty { out.store = st }
     return out
   }
 
