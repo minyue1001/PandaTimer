@@ -4,6 +4,7 @@
 //   groupHistory  紀錄頁：依台北日期分組＋日小計
 //   orderCountdown / orderAmount / sortActive  進行中訂單卡
 //   parseTab / shouldJumpHome  分頁記憶與自動切回首頁
+import { DEFAULT_OFFER_ISLAND, isShortOffer, OFFER_WARN_TEXT } from '../offerIsland.ts';
 import { beatAgeSec, OFFER_PENDING_STALE_SEC, type DetectorStatus } from '../detector.ts';
 import { formatClock, formatDuration, type Order } from '../orders.ts';
 import { DEFAULT_PAY, fareFor, money, summarizeEarnings, type PayParams } from '../earnings.ts';
@@ -53,7 +54,12 @@ export const START_GRACE_SEC = 120;
  * 規則：沒原生/沒 armed → 未開始（曾非預期停止 → 🔴 已停止）；armed：邀請判定中 → 🟡；剛按開始、還沒新心跳 → 🟡 等待開始直播；
  * 心跳 >150 秒或從沒心跳 → 🔴 沒有回應；其餘 🟢。
  */
-export function detectPill(det: DetectorStatus | null, now: number, armedAt: number | null = null): Pill {
+export function detectPill(
+  det: DetectorStatus | null,
+  now: number,
+  armedAt: number | null = null,
+  shortWarnMinutes: number = DEFAULT_OFFER_ISLAND.shortWarnMinutes,
+): Pill {
   if (!det || !det.armed) {
     if (det?.stoppedUnexpectedAt != null) {
       return {
@@ -71,6 +77,17 @@ export function detectPill(det: DetectorStatus | null, now: number, armedAt: num
     const age = Math.max(0, Math.round((now - det.offerPendingAt) / 1000));
     if (age <= OFFER_PENDING_STALE_SEC) {
       const m = det.offerPendingMinutes != null ? ` ${det.offerPendingMinutes} 分` : '';
+      // v1.2.9 短單提醒：≤ shortWarnMinutes 分 → 紅色「⚠️ 短單 N 分・建議不接」
+      if (det.offerPendingMinutes != null && isShortOffer(det.offerPendingMinutes, shortWarnMinutes)) {
+        return {
+          kind: 'waiting',
+          tone: 'red',
+          title: `⚠️ 短單 ${det.offerPendingMinutes} 分・${OFFER_WARN_TEXT}`,
+          detail: `已偵測到邀請${m}・${age} 秒前`,
+          action: null,
+          canStop: true,
+        };
+      }
       // v1.0（使用者回饋：要看到「偵測成功」才敢按接受）→ 標題直接說可以按
       return { kind: 'waiting', tone: 'yellow', title: '✓ 可以按接受', detail: `已偵測到邀請${m}・${age} 秒前`, action: null, canStop: true };
     }

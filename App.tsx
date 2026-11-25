@@ -23,7 +23,8 @@ import { OtaBanner, useOtaUpdate } from './src/OtaBox';
 import { clampEstimate, DEFAULT_ESTIMATE, type Order } from './src/orders';
 import { DEFAULT_GOALS, DEFAULT_STATS, goalProgress, periodAndToday, periodOf, periodStarCount, todayStarCount, type Baseline, type Goals, type StatsParams } from './src/stats';
 import { DEFAULT_PAY, periodAndTodayEarnings, type PayParams } from './src/earnings';
-import { fetchRemoteParams, loadBaseline, loadCachedOfferWaitSec, loadCachedPayParams, loadCachedStatsParams, loadGoals } from './src/statsConfig';
+import { DEFAULT_OFFER_ISLAND } from './src/offerIsland';
+import { fetchRemoteParams, loadBaseline, loadCachedOfferWaitSec, loadCachedShortWarnMinutes, loadCachedPayParams, loadCachedStatsParams, loadGoals } from './src/statsConfig';
 import { subscribe } from './src/store';
 import { useCloudSync } from './src/syncClient';
 import {
@@ -193,6 +194,7 @@ function Main() {
   const [statsParams, setStatsParams] = useState<StatsParams>(DEFAULT_STATS);
   const [payParams, setPayParams] = useState<PayParams>(DEFAULT_PAY);
   const [goals, setGoals] = useState<Goals>(DEFAULT_GOALS);
+  const [shortWarnMin, setShortWarnMin] = useState<number>(DEFAULT_OFFER_ISLAND.shortWarnMinutes); // v1.2.9 短單提醒門檻
   useEffect(() => {
     let alive = true;
     void loadCachedStatsParams().then((p) => alive && setStatsParams(p));
@@ -202,7 +204,9 @@ function Main() {
       setStatsParams(p.stats);
       setPayParams(p.pay);
       offerWaitRef.current = p.offerWaitSec;
+      setShortWarnMin(p.shortWarnMinutes);
     });
+    void loadCachedShortWarnMinutes().then((n) => alive && setShortWarnMin(n));
     void loadCachedOfferWaitSec().then((n) => {
       if (alive) offerWaitRef.current = n;
     });
@@ -395,7 +399,7 @@ function Main() {
   const laSupported = useMemo(() => LiveActivity.isSupported(), []);
   // 原生偵測狀態每秒讀一次（同步、很便宜）
   const det = useMemo(() => LiveActivity.detectorStatus(), [now]);
-  const pill = detectPill(det, now, armedAt);
+  const pill = detectPill(det, now, armedAt, shortWarnMin);
   const screenHint = screenOrdersHint(det?.screenOrders, active.length, hintDismissedAt, now);
 
   // 偵測停止／有邀請（膠囊變紅/黃）或多了進行中單 → 自動切回首頁

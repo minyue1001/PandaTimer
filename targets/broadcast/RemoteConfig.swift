@@ -370,6 +370,8 @@ final class RemoteConfig {
   struct OfferIslandSettings {
     var islandIndicator = true
     var alertSound = "default"
+    /// v1.2.9 短單提醒：預估分鐘 ≤ 此值（且 >0）→ 動態島警示「短單・建議不接」；0＝關閉
+    var shortWarnMinutes = 10
   }
 
   static func offerIsland(_ root: [String: Any]) -> OfferIslandSettings {
@@ -377,6 +379,7 @@ final class RemoteConfig {
     var out = OfferIslandSettings()
     out.islandIndicator = bool(o["islandIndicator"], out.islandIndicator)
     out.alertSound = choice(o["alertSound"], ["default", "none"], out.alertSound)
+    out.shortWarnMinutes = int(o["shortWarnMinutes"], 0, 30, out.shortWarnMinutes)
     return out
   }
 

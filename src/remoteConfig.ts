@@ -153,6 +153,7 @@ export const RANGES: Record<string, [number, number, boolean]> = {
   'offer.goneAfterMisses': [1, 20, true],
   'offer.decideWindowSec': [5, 60, true], // 延遲訊號只編 0~60 秒
   'offer.suspectBelowMinutes': [0, 10, true], // v1.1 0＝關閉誤讀防護
+  'offer.shortWarnMinutes': [0, 30, true], // v1.2.9 短單提醒門檻（0＝關閉）
   'offer.maxBundle': [1, 4, true], // v1.2 組合單最多拆幾張（1＝不拆；order 槽 mod 4）
   'stats.graceFactor': [1, 2, false],
   'stats.overrunCap': [0.1, 10, false],

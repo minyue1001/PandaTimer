@@ -173,7 +173,7 @@ test('v0.7 offer 區塊：缺漏補預設、範圍、正則（不得命中空字
     assert.ok(problems.some((p) => p.startsWith(`offer.${k}`)), k);
   }
   const ok = validateConfig({ version: 'v07b', offer: { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單' } });
-  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單', islandIndicator: true, alertSound: 'default', suspectBelowMinutes: 3,
+  assert.deepEqual(ok.config.offer, { goneAfterMisses: 3, decideWindowSec: 40, acceptedKeywords: '開始配送', rejectedKeywords: '略過', ambiguousAs: 'reject', stackedKeywords: '順路單', islandIndicator: true, alertSound: 'default', shortWarnMinutes: 10, suspectBelowMinutes: 3,
     weakAcceptedKeywords: DEFAULT_CONFIG.offer.weakAcceptedKeywords, bundleKeywords: DEFAULT_CONFIG.offer.bundleKeywords, maxBundle: 4 });
   assert.equal(DEFAULT_CONFIG.offer.ambiguousAs, 'accept');
   assert.equal(DEFAULT_CONFIG.offer.decideWindowSec, 25);
@@ -199,4 +199,26 @@ test('v1.0 offer.islandIndicator / offer.alertSound：預設、驗證、Swift �
   for (const s of ['var islandIndicator = true', 'var alertSound = "default"',
     'out.islandIndicator = bool(o["islandIndicator"], out.islandIndicator)',
     'out.alertSound = choice(o["alertSound"], ["default", "none"], out.alertSound)']) assert.ok(rc.includes(s), s);
+});
+
+test('v1.2.9 offer.shortWarnMinutes：預設 10、範圍 0~30 整數、Swift 同規則、config.json/default 已含', async () => {
+  assert.equal(DEFAULT_CONFIG.offer.shortWarnMinutes, 10);
+  assert.equal(validateConfig({ version: 'v', offer: { shortWarnMinutes: 0 } }).config.offer.shortWarnMinutes, 0);
+  assert.equal(validateConfig({ version: 'v', offer: { shortWarnMinutes: 30 } }).config.offer.shortWarnMinutes, 30);
+  for (const bad of [31, -1, 8.5, '10', null]) {
+    const r = validateConfig({ version: 'v', offer: { shortWarnMinutes: bad } });
+    assert.equal(r.config.offer.shortWarnMinutes, 10, String(bad));
+    assert.ok(r.problems.some((p) => p.startsWith('offer.shortWarnMinutes')), String(bad));
+  }
+  const { readFileSync } = await import('node:fs');
+  for (const f of ['../modules/live-activity/ios/RemoteConfig.swift', '../targets/broadcast/RemoteConfig.swift']) {
+    const rc = readFileSync(new URL(f, import.meta.url), 'utf8');
+    assert.ok(rc.includes('var shortWarnMinutes = 10'), f);
+    assert.ok(rc.includes('out.shortWarnMinutes = int(o["shortWarnMinutes"], 0, 30, out.shortWarnMinutes)'), f);
+  }
+  for (const f of ['../server/config.json', '../server/config.default.json']) {
+    const j = JSON.parse(readFileSync(new URL(f, import.meta.url), 'utf8'));
+    assert.equal(j.offer.shortWarnMinutes, 10, f);
+    assert.deepEqual(validateConfig(j).problems.filter((p) => p.startsWith('offer.shortWarnMinutes')), [], f);
+  }
 });

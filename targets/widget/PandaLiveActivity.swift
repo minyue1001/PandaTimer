@@ -38,7 +38,30 @@ private func showsOffer(_ context: ActivityViewContext<PandaTimerAttributes>) ->
 /// 「$77.59・可以按接受」（金額沒有就只有後半）＝src/offerIsland.ts offerTexts().subtitle
 private func offerSubtitle(_ state: PandaTimerAttributes.ContentState) -> String {
   let amount = state.offerAmount.map { String(format: "$%.2f・", $0) } ?? ""
-  return amount + "可以按接受"
+  return amount + (state.offerWarn ?? "可以按接受")
+}
+
+/// v1.2.9 短單提醒（offerWarn 非 nil）：紅色警示「⚠️ 短單 8 分」「$45.00・建議不接」；compact「⚠️8」（＝src/offerIsland.ts offerTexts）
+private let offerRed = Color(red: 1, green: 69 / 255, blue: 58 / 255)
+
+private func offerAccent(_ state: PandaTimerAttributes.ContentState) -> Color {
+  state.offerWarn != nil ? offerRed : offerYellow
+}
+
+private func offerTitle(_ state: PandaTimerAttributes.ContentState) -> String {
+  state.offerWarn != nil ? "⚠️ 短單 \(state.offerMin ?? 0) 分" : "✓ 已偵測 \(state.offerMin ?? 0) 分邀請"
+}
+
+private func offerCompact(_ state: PandaTimerAttributes.ContentState) -> String {
+  state.offerWarn != nil ? "⚠️\(state.offerMin ?? 0)" : "\(state.offerMin ?? 0)分✓"
+}
+
+private func offerMinimal(_ state: PandaTimerAttributes.ContentState) -> String {
+  state.offerWarn != nil ? "⚠️" : "\(state.offerMin ?? 0)"
+}
+
+private func offerBadgeText(_ state: PandaTimerAttributes.ContentState, _ m: Int) -> String {
+  (state.offerWarn != nil ? "＋⚠️ 短單 \(m) 分・" : "＋偵測到 \(m) 分邀請・") + offerSubtitle(state)
 }
 
 private func detectorTitle(_ state: PandaTimerAttributes.ContentState) -> String {
@@ -60,9 +83,9 @@ struct PandaLiveActivity: Widget {
         }
         DynamicIslandExpandedRegion(.trailing) {
           if showsOffer(context) {
-            Text("邀請")
+            Text(context.state.offerWarn != nil ? "短單" : "邀請")
               .font(.headline)
-              .foregroundStyle(offerYellow)
+              .foregroundStyle(offerAccent(context.state))
           } else if isDetectorCard(context.state) {
             HeartbeatText(state: context.state)
               .font(.headline)
@@ -106,10 +129,10 @@ struct PandaLiveActivity: Widget {
         Text("🐼")
       } compactTrailing: {
         if showsOffer(context) {
-          Text("\(context.state.offerMin ?? 0)分✓")
+          Text(offerCompact(context.state))
             .font(.system(.body, design: .rounded).bold())
             .monospacedDigit()
-            .foregroundStyle(offerYellow)
+            .foregroundStyle(offerAccent(context.state))
         } else if isDetectorCard(context.state) {
           Text(context.state.mode == "stopped" ? "停止" : "偵測")
             .foregroundStyle(context.state.mode == "stopped" ? Color.gray : Color.green)
@@ -122,10 +145,10 @@ struct PandaLiveActivity: Widget {
         }
       } minimal: {
         if showsOffer(context) {
-          Text("\(context.state.offerMin ?? 0)")
+          Text(offerMinimal(context.state))
             .font(.system(.body, design: .rounded).bold())
             .monospacedDigit()
-            .foregroundStyle(offerYellow)
+            .foregroundStyle(offerAccent(context.state))
         } else {
           Text("🐼")
         }
@@ -255,14 +278,14 @@ struct OfferDetail: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
-      Text("✓ 已偵測 \(state.offerMin ?? 0) 分邀請")
+      Text(offerTitle(state))
         .font(large ? .title2.bold() : .headline.bold())
-        .foregroundStyle(offerYellow)
+        .foregroundStyle(offerAccent(state))
         .lineLimit(1)
         .minimumScaleFactor(0.7)
       Text(offerSubtitle(state))
         .font(.headline)
-        .foregroundStyle(Color.white)
+        .foregroundStyle(state.offerWarn != nil ? Color.orange : Color.white)
         .lineLimit(1)
       if let at = state.offerAt {
         Text("偵測於 \(at, format: .dateTime.hour().minute().second())")
@@ -281,9 +304,9 @@ struct OfferBadge: View {
 
   var body: some View {
     if state.mode == "countdown" || state.mode == nil, let m = state.offerMin {
-      Text("＋偵測到 \(m) 分邀請・" + offerSubtitle(state))
+      Text(offerBadgeText(state, m))
         .font(.caption.bold())
-        .foregroundStyle(offerYellow)
+        .foregroundStyle(offerAccent(state))
         .lineLimit(1)
         .minimumScaleFactor(0.8)
     }

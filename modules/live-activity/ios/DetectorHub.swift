@@ -693,6 +693,12 @@ final class DetectorHub {
   static func offerAlertTitle(_ minutes: Int) -> String { "已偵測 \(minutes) 分邀請" }
   static let offerAlertBody = "可以按接受訂單"
   static let offerAlertBodyCounting = "可以按接受訂單・倒數照常進行"
+  /// v1.2.9 短單提醒（＝src/offerIsland.ts isShortOffer / offerTexts 的 warn 版）
+  static let offerWarnText = "建議不接"
+  static func isShortOffer(_ minutes: Int, warnMinutes: Int) -> Bool { warnMinutes > 0 && minutes > 0 && minutes <= warnMinutes }
+  static func offerWarnAlertTitle(_ minutes: Int) -> String { "⚠️ 短單 \(minutes) 分" }
+  static let offerWarnAlertBody = "建議不接這單"
+  static let offerWarnAlertBodyCounting = "建議不接這單・倒數照常進行"
 
   /// 偵測卡 update 串成一條（前一個做完才做下一個）
   private func enqueueCard(_ work: @escaping () async -> Void) {
@@ -711,6 +717,7 @@ final class DetectorHub {
     let beat = lastBeat ?? at
     let diag = diagText(note: "偵測到邀請 \(minutes) 分 \(Self.hms(at))")
     let silent = island.alertSound == "none"
+    let short = Self.isShortOffer(minutes, warnMinutes: island.shortWarnMinutes)
     let baseFields = appFields()
     offerShownAt = at
     queue.asyncAfter(deadline: .now() + Self.offerIslandSeconds) { [weak self] in
@@ -731,6 +738,7 @@ final class DetectorHub {
       state.offerMin = minutes
       state.offerAmount = amount
       state.offerAt = at
+      state.offerWarn = short ? Self.offerWarnText : nil
       state.heartbeat = beat
       var staleDate = card.content.staleDate
       if !counting {
@@ -742,8 +750,11 @@ final class DetectorHub {
       // ⚠️ ActivityKit 沒有官方「靜音」：.named("") 找不到檔案時系統可能照樣用預設聲音（實機確認）
       let sound: AlertConfiguration.AlertSound = silent ? .named("") : .default
       let alert = AlertConfiguration(
-        title: LocalizedStringResource(stringLiteral: Self.offerAlertTitle(minutes)),
-        body: LocalizedStringResource(stringLiteral: counting ? Self.offerAlertBodyCounting : Self.offerAlertBody),
+        title: LocalizedStringResource(stringLiteral: short ? Self.offerWarnAlertTitle(minutes) : Self.offerAlertTitle(minutes)),
+        body: LocalizedStringResource(
+          stringLiteral: short
+            ? (counting ? Self.offerWarnAlertBodyCounting : Self.offerWarnAlertBody)
+            : (counting ? Self.offerAlertBodyCounting : Self.offerAlertBody)),
         sound: sound)
       await card.update(ActivityContent(state: state, staleDate: staleDate), alertConfiguration: alert)
       self.queue.async { self.lastCardPushAt = Date() }
@@ -809,6 +820,7 @@ final class DetectorHub {
     state.offerMin = nil
     state.offerAmount = nil
     state.offerAt = nil
+    state.offerWarn = nil
   }
 
   /// v0.8 只在 queue 上：near 前後 2 秒內收到的夾單訊號（取走就清掉；過期的也清掉）

@@ -144,6 +144,7 @@ public class LiveActivityModule: Module {
         state.offerMin = nil
         state.offerAmount = nil
         state.offerAt = nil
+        state.offerWarn = nil
         state.heartbeat = now
         state.diag = "App 已就緒，等待廣播…"
         let staleDate = state.mode == "countdown" ? activity.content.staleDate : nil

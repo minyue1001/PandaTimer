@@ -87,6 +87,7 @@ enum DetectorCardPlan {
     state.offerMin = nil
     state.offerAmount = nil
     state.offerAt = nil
+    state.offerWarn = nil
     guard let main = items.first else {
       if state.heartbeat != nil || state.mode == "standby" || state.mode == "stopped" || state.mode == "offer" {
         state.mode = state.mode == "stopped" ? "stopped" : "standby"

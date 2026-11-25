@@ -3,6 +3,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { validateConfig } from './remoteConfig';
+import { DEFAULT_OFFER_ISLAND } from './offerIsland';
 import { waitSecFor } from './unconfirmedOffers';
 import { DEFAULT_PAY, type PayParams } from './earnings';
 import { notifyLocalChange } from './store';
@@ -22,6 +23,17 @@ import {
 const STATS_CACHE_KEY = 'pandatimer.statsParams.v1';
 const PAY_CACHE_KEY = 'pandatimer.payParams.v1';
 const OFFER_WINDOW_CACHE_KEY = 'pandatimer.offerWindowSec.v1';
+const SHORT_WARN_CACHE_KEY = 'pandatimer.shortWarnMinutes.v1';
+
+/** v1.2.9 短單提醒門檻（offer.shortWarnMinutes）快取；讀不到 → 預設 10 */
+export async function loadCachedShortWarnMinutes(): Promise<number> {
+  try {
+    const raw = await AsyncStorage.getItem(SHORT_WARN_CACHE_KEY);
+    return validateConfig({ offer: { shortWarnMinutes: raw == null ? undefined : Number(raw) } }).config.offer.shortWarnMinutes;
+  } catch {
+    return DEFAULT_OFFER_ISLAND.shortWarnMinutes;
+  }
+}
 
 /** v0.10 未確認邀請的等待秒數（decideWindowSec+10）；讀不到快取 → 35 */
 export async function loadCachedOfferWaitSec(): Promise<number> {
@@ -62,7 +74,7 @@ export async function loadCachedPayParams(): Promise<PayParams> {
 }
 
 /** 抓 /api/config（3 秒逾時）→ stats／pay 參數並快取；失敗回 null（呼叫端沿用快取） */
-export async function fetchRemoteParams(): Promise<{ stats: StatsParams; pay: PayParams; offerWaitSec: number } | null> {
+export async function fetchRemoteParams(): Promise<{ stats: StatsParams; pay: PayParams; offerWaitSec: number; shortWarnMinutes: number } | null> {
   const url = (Constants.expoConfig?.extra as { configUrl?: unknown } | undefined)?.configUrl;
   if (typeof url !== 'string' || !url.startsWith('https://')) return null;
   const ctrl = new AbortController();
@@ -77,7 +89,9 @@ export async function fetchRemoteParams(): Promise<{ stats: StatsParams; pay: Pa
     await AsyncStorage.setItem(PAY_CACHE_KEY, JSON.stringify(pay)).catch(() => undefined);
     const window = validateConfig(body).config.offer.decideWindowSec;
     await AsyncStorage.setItem(OFFER_WINDOW_CACHE_KEY, String(window)).catch(() => undefined);
-    return { stats, pay, offerWaitSec: waitSecFor(window) };
+    const shortWarnMinutes = validateConfig(body).config.offer.shortWarnMinutes;
+    await AsyncStorage.setItem(SHORT_WARN_CACHE_KEY, String(shortWarnMinutes)).catch(() => undefined);
+    return { stats, pay, offerWaitSec: waitSecFor(window), shortWarnMinutes };
   } catch {
     return null;
   } finally {

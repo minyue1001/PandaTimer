@@ -10,8 +10,17 @@ export const OFFER_ISLAND_SECONDS = 60;
 
 /** 遠端設定 offer 區塊的 App 端欄位（OfferTracker 不讀） */
 export type AlertSound = 'default' | 'none';
-export type OfferIslandSettings = { islandIndicator: boolean; alertSound: AlertSound };
-export const DEFAULT_OFFER_ISLAND: Readonly<OfferIslandSettings> = Object.freeze({ islandIndicator: true, alertSound: 'default' });
+/** v1.2.9 shortWarnMinutes：預估分鐘 ≤ 此值（且 >0）→ 短單警示（0＝關閉） */
+export type OfferIslandSettings = { islandIndicator: boolean; alertSound: AlertSound; shortWarnMinutes: number };
+export const DEFAULT_OFFER_ISLAND: Readonly<OfferIslandSettings> = Object.freeze({ islandIndicator: true, alertSound: 'default', shortWarnMinutes: 10 });
+
+/** v1.2.9 短單提醒：ContentState.offerWarn 的值（非 nil＝短單） */
+export const OFFER_WARN_TEXT = '建議不接';
+
+/** 短單＝預估分鐘 ≤ warnMinutes 且 >0（warnMinutes 0＝關閉）；Swift DetectorHub.isShortOffer 同構 */
+export function isShortOffer(minutes: number, warnMinutes: number): boolean {
+  return warnMinutes > 0 && minutes > 0 && minutes <= warnMinutes;
+}
 export const ALERT_SOUNDS: readonly AlertSound[] = ['default', 'none'];
 
 /** 卡片金額＝平台確切報酬（同 src/orders.ts exactFare；Swift 用整數分 minutes*24500/60+1） */
@@ -30,8 +39,21 @@ export type OfferTexts = {
   alertBodyCounting: string;
 };
 
-/** 動態島/鎖定畫面/提示的文字（amount null → 只寫「可以按接受」） */
-export function offerTexts(minutes: number, amount: number | null): OfferTexts {
+/** 動態島/鎖定畫面/提示的文字（amount null → 只寫「可以按接受」；short＝短單警示版，v1.2.9） */
+export function offerTexts(minutes: number, amount: number | null, short = false): OfferTexts {
+  if (short) {
+    const subtitle = (amount != null ? `$${amount.toFixed(2)}・` : '') + OFFER_WARN_TEXT;
+    return {
+      compact: `⚠️${minutes}`,
+      minimal: '⚠️',
+      title: `⚠️ 短單 ${minutes} 分`,
+      subtitle,
+      badge: `＋⚠️ 短單 ${minutes} 分・${subtitle}`,
+      alertTitle: `⚠️ 短單 ${minutes} 分`,
+      alertBody: '建議不接這單',
+      alertBodyCounting: '建議不接這單・倒數照常進行',
+    };
+  }
   const subtitle = (amount != null ? `$${amount.toFixed(2)}・` : '') + '可以按接受';
   return {
     compact: `${minutes}分✓`,

@@ -29,6 +29,8 @@ struct PandaTimerAttributes: ActivityAttributes {
     var offerMin: Int? = nil
     var offerAmount: Double? = nil
     var offerAt: Date? = nil
+    /// v1.2.9 短單提醒：非 nil（例如「建議不接」）＝這張邀請是短單、動態島改紅色警示「⚠️ 短單 N 分」；nil＝照舊「✓ 已偵測」
+    var offerWarn: String? = nil
   }
 
   /// 接單時間

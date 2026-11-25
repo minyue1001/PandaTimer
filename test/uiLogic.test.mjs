@@ -311,3 +311,17 @@ test('v1.2.4 不計時效：列標記、狀態字「不計」、tags、日小計
   assert.equal(g.subtotal.overrunRate, 0);
   assert.ok(Math.abs(g.subtotal.payout - (2 * 81.67 + 5)) < 1e-6, '不計時效的單補錢 0、收入照算');
 });
+
+test('detectPill v1.2.9：短單（≤10 分）→ 🔴 ⚠️ 短單 N 分・建議不接；11 分照舊；關閉(0)照舊；門檻可調', () => {
+  const now = 2_000_000;
+  const base = { armed: true, keepAlive: '定位中', lastBeatAt: now - 3_000, offerPendingAt: now - 8_000 };
+  const s8 = detectPill(status({ ...base, offerPendingMinutes: 8 }), now);
+  assert.deepEqual([s8.kind, s8.tone, s8.title], ['waiting', 'red', '⚠️ 短單 8 分・建議不接']);
+  assert.equal(s8.detail, '已偵測到邀請 8 分・8 秒前');
+  assert.equal(detectPill(status({ ...base, offerPendingMinutes: 10 }), now).tone, 'red');
+  const s11 = detectPill(status({ ...base, offerPendingMinutes: 11 }), now);
+  assert.deepEqual([s11.tone, s11.title], ['yellow', '✓ 可以按接受']);
+  assert.equal(detectPill(status({ ...base, offerPendingMinutes: 8 }), now, null, 0).title, '✓ 可以按接受');
+  assert.equal(detectPill(status({ ...base, offerPendingMinutes: 12 }), now, null, 15).tone, 'red');
+  assert.equal(detectPill(status({ ...base, offerPendingMinutes: null }), now).title, '✓ 可以按接受'); // 沒讀到分鐘不警示
+});
